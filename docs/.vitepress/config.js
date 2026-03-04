@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'Luban-RDS 文档',
   description: '轻量级、高性能的内存键值存储，兼容 Redis 协议',
-  base: '/luban-rds-doc/',
+  base: '/luban-rds/',
   themeConfig: {
     nav: [
       {
