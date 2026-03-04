@@ -269,6 +269,7 @@ public class RedisController {
 
 ## 文档
 
+- [在线文档](https://luban-rds.github.io/luban-rds/)：完整的项目文档
 - [系统架构](docs/系统架构.md)：详细描述系统的架构设计
 - [功能架构](docs/功能架构.md)：详细描述系统的功能组件
 - [使用手册](docs/使用手册.md)：详细说明如何使用系统
