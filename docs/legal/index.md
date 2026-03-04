@@ -10,7 +10,7 @@
 
 ## 许可证
 
-Luban-RDS 项目采用 MIT 许可证，详情请参考 [许可证](license.md) 文档。
+Luban-RDS 项目采用 Apache License 2.0 许可证，详情请参考 [许可证](license.md) 文档。
 
 ## 隐私政策
 

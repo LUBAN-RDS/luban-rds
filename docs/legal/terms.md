@@ -22,7 +22,7 @@ Luban-RDS 是一个开源的内存键值存储系统，兼容 Redis 协议，提
 
 ## 知识产权
 
-1. **开源许可证**：Luban-RDS 采用 MIT 许可证，详见 [许可证](license.md) 文档。
+1. **开源许可证**：Luban-RDS 采用 Apache License 2.0 许可证，详见 [许可证](license.md) 文档。
 
 2. **商标**：Luban-RDS 是 Luban-RDS 团队的商标，未经授权不得使用。
 

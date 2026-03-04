@@ -1,6 +1,6 @@
 # Luban-RDS
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 Luban-RDS 是一个完全兼容 Redis 协议的轻量级内存数据库，使用 Java 开发，基于 Maven 构建，支持嵌入到 Spring Boot 项目中使用。
 

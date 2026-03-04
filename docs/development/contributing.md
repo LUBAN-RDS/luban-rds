@@ -334,12 +334,12 @@ npm run docs:preview
 通过提交代码或其他贡献，您同意：
 
 - 您有权提交这些贡献，并且这些贡献是您的原创作品
-- 您授权 Your Organization 在 MIT 许可证下使用和分发您的贡献
+- 您授权 Your Organization 在 Apache License 2.0 许可证下使用和分发您的贡献
 - 您的贡献将被包含在项目的版权声明中
 
 ### 10.2 许可证信息
 
-Luban-RDS 项目采用 MIT 许可证开源，详细信息请参考 [许可证](../legal/license.md) 文档。
+Luban-RDS 项目采用 Apache License 2.0 许可证开源，详细信息请参考 [许可证](../legal/license.md) 文档。
 
 ## 11. 常见问题
 
