@@ -10,31 +10,35 @@ title: 社区资源
 
 ### 1.1 GitHub 仓库
 
-- **代码仓库**：[github.com/your-org/luban-rds](https://github.com/your-org/luban-rds)
-- **问题跟踪**：[Issues](https://github.com/your-org/luban-rds/issues)
-- **讨论区**：[Discussions](https://github.com/your-org/luban-rds/discussions)
-- **版本发布**：[Releases](https://github.com/your-org/luban-rds/releases)
+- **代码仓库**：[github.com/LUBAN-RDS/luban-rds](https://github.com/LUBAN-RDS/luban-rds)
+- **问题跟踪**：[Issues](https://github.com/LUBAN-RDS/luban-rds/issues)
+- **讨论区**：[Discussions](https://github.com/LUBAN-RDS/luban-rds/discussions)
+- **版本发布**：[Releases](https://github.com/LUBAN-RDS/luban-rds/releases)
 
-### 1.2 官方文档
+### 1.2 Gitee 仓库（国内镜像）
 
-- **用户指南**：[https://your-org.github.io/luban-rds/guide/](https://your-org.github.io/luban-rds/guide/)
-- **API 参考**：[https://your-org.github.io/luban-rds/api/](https://your-org.github.io/luban-rds/api/)
-- **架构文档**：[https://your-org.github.io/luban-rds/architecture/](https://your-org.github.io/luban-rds/architecture/)
-- **部署指南**：[https://your-org.github.io/luban-rds/deployment/](https://your-org.github.io/luban-rds/deployment/)
+- **代码仓库**：[gitee.com/luban-rds/luban-rds](https://gitee.com/luban-rds/luban-rds)
+- **问题跟踪**：[Issues](https://gitee.com/luban-rds/luban-rds/issues)
 
-### 1.3 博客与新闻
+### 1.3 官方文档
 
-- **官方博客**：[https://your-org.github.io/blog/](https://your-org.github.io/blog/)
-- **技术分享**：[https://your-org.github.io/articles/](https://your-org.github.io/articles/)
-- **更新公告**：[https://your-org.github.io/announcements/](https://your-org.github.io/announcements/)
+- **用户指南**：[https://luban-rds.github.io/luban-rds/guide/](https://luban-rds.github.io/luban-rds/guide/)
+- **API 参考**：[https://luban-rds.github.io/luban-rds/api/](https://luban-rds.github.io/luban-rds/api/)
+- **架构文档**：[https://luban-rds.github.io/luban-rds/architecture/](https://luban-rds.github.io/luban-rds/architecture/)
+- **部署指南**：[https://luban-rds.github.io/luban-rds/deployment/](https://luban-rds.github.io/luban-rds/deployment/)
+
+### 1.4 博客与新闻
+
+- **官方博客**：[https://luban-rds.github.io/blog/](https://luban-rds.github.io/blog/)
+- **技术分享**：[https://luban-rds.github.io/articles/](https://luban-rds.github.io/articles/)
+- **更新公告**：[https://luban-rds.github.io/announcements/](https://luban-rds.github.io/announcements/)
 
 ## 2. 社区支持
 
 ### 2.1 讨论组
 
-- **GitHub Discussions**：[https://github.com/your-org/luban-rds/discussions](https://github.com/your-org/luban-rds/discussions)
+- **GitHub Discussions**：[https://github.com/LUBAN-RDS/luban-rds/discussions](https://github.com/LUBAN-RDS/luban-rds/discussions)
 - **Gitter 聊天室**：[https://gitter.im/luban-rds/community](https://gitter.im/luban-rds/community)
-- **Slack 频道**：[https://your-org.slack.com/](https://your-org.slack.com/)（#luban-rds 频道）
 
 ### 2.2 问答平台
 
@@ -48,7 +52,7 @@ title: 社区资源
 ### 2.3 社交媒体
 
 - **Twitter**：[@luban_rds](https://twitter.com/luban_rds)
-- **GitHub 社交**：关注 [luban-rds](https://github.com/your-org/luban-rds)
+- **GitHub 社交**：关注 [luban-rds](https://github.com/LUBAN-RDS/luban-rds)
 - **掘金**：[https://juejin.cn/tag/Luban-RDS](https://juejin.cn/tag/Luban-RDS)
 - **CSDN**：[https://blog.csdn.net/column/details/luban-rds.html](https://blog.csdn.net/column/details/luban-rds.html)
 

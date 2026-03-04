@@ -142,7 +142,7 @@ export default defineConfig({
     socialLinks: [
       {
         icon: 'github',
-        link: 'https://github.com/your-repo/luban-rds'
+        link: 'https://github.com/LUBAN-RDS/luban-rds'
       }
     ],
     footer: {

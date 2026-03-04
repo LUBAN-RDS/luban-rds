@@ -23,7 +23,12 @@ title: 安装指南
 #### 步骤 1：克隆仓库
 
 ```bash
-git clone https://github.com/your-repo/luban-rds.git
+# 从 GitHub 克隆
+git clone https://github.com/LUBAN-RDS/luban-rds.git
+
+# 或从 Gitee 克隆
+git clone https://gitee.com/luban-rds/luban-rds.git
+
 cd luban-rds
 ```
 
@@ -45,7 +50,7 @@ mvn clean package -DskipTests
 
 ```bash
 # 下载最新版本
-wget https://github.com/your-repo/luban-rds/releases/download/v1.0.0/luban-rds-bin-1.0.0.jar
+wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.0/luban-rds-bin-1.0.0.jar
 
 # 启动服务器
 java -jar luban-rds-bin-1.0.0.jar

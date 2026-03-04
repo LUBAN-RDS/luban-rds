@@ -14,7 +14,12 @@ title: 快速开始
 ## 步骤 1：克隆项目
 
 ```bash
-git clone https://github.com/your-repo/luban-rds.git
+# 从 GitHub 克隆
+git clone https://github.com/LUBAN-RDS/luban-rds.git
+
+# 或从 Gitee 克隆
+git clone https://gitee.com/luban-rds/luban-rds.git
+
 cd luban-rds
 ```
 

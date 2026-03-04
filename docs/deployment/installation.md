@@ -63,7 +63,12 @@ brew install openjdk@17
 
 **步骤 1：克隆代码库**
 ```bash
-git clone https://github.com/your-org/luban-rds.git
+# 从 GitHub 克隆
+git clone https://github.com/LUBAN-RDS/luban-rds.git
+
+# 或从 Gitee 克隆
+git clone https://gitee.com/luban-rds/luban-rds.git
+
 cd luban-rds
 ```
 
@@ -93,7 +98,7 @@ chmod +x start.sh
 **步骤 1：下载预编译包**
 从 GitHub Releases 页面下载最新的预编译包：
 ```bash
-wget https://github.com/your-org/luban-rds/releases/download/v1.0.0/luban-rds-bin-1.0.0.jar
+wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.0/luban-rds-bin-1.0.0.jar
 ```
 
 **步骤 2：启动服务**

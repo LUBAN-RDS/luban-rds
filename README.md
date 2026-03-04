@@ -341,5 +341,5 @@ mvn test
 
 ## 联系方式
 
-- 项目地址：<repository-url>
-- 问题反馈：<repository-url>/issues
+- 项目地址：https://github.com/LUBAN-RDS/luban-rds
+- 问题反馈：https://github.com/LUBAN-RDS/luban-rds/issues
