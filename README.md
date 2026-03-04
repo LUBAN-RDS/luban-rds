@@ -1,89 +1,40 @@
 # Luban-RDS
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Java](https://img.shields.io/badge/Java-17+-green.svg)](https://www.oracle.com/java/)
+[![Maven](https://img.shields.io/badge/Maven-3.6+-blue.svg)](https://maven.apache.org/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.18-green.svg)](https://spring.io/projects/spring-boot)
+[![Netty](https://img.shields.io/badge/Netty-4.2.10.Final-orange.svg)](https://netty.io/)
+[![Redis Compatible](https://img.shields.io/badge/Redis-Protocol%20Compatible-red.svg)](https://redis.io/)
+[![GitHub Stars](https://img.shields.io/github/stars/LUBAN-RDS/luban-rds?style=social)](https://github.com/LUBAN-RDS/luban-rds)
+[![GitHub Forks](https://img.shields.io/github/forks/LUBAN-RDS/luban-rds?style=social)](https://github.com/LUBAN-RDS/luban-rds)
+
+## 📖 项目简介
 
 Luban-RDS 是一个完全兼容 Redis 协议的轻量级内存数据库，使用 Java 开发，基于 Maven 构建，支持嵌入到 Spring Boot 项目中使用。
 
-## 项目特点
+## ✨ 主要特性
 
 - **完全兼容 Redis 协议**：支持标准 Redis 客户端（redis-cli、Jedis、Lettuce）连接
 - **轻量级设计**：核心依赖少，易于集成
-- **支持多种数据结构**：String、Hash、List、Set、ZSet
-- **支持键过期时间**：实现惰性删除机制
+- **丰富的数据结构**：支持 String、Hash、List、Set、ZSet
+- **键过期机制**：实现惰性删除机制
 - **内存淘汰策略**：支持 LRU、Random、TTL 等多种淘汰策略
 - **持久化支持**：支持 RDB 异步快照和 AOF 追加日志
-- **密码认证**：支持 AUTH 命令进行密码验证
+- **安全认证**：支持 AUTH 命令进行密码验证
 - **多数据库**：支持 SELECT 命令切换数据库（默认 16 个）
-- **基于 Netty 的高性能网络服务器**：支持高并发连接
+- **高性能网络**：基于 Netty 的 NIO 服务器，支持高并发连接
 - **Spring Boot 集成**：提供自动配置和 RedisTemplate
-- **线程安全的内存存储**：基于 ConcurrentHashMap 和 Caffeine 实现
+- **线程安全**：基于 ConcurrentHashMap 和 Caffeine 实现的内存存储
 - **性能优化**：协议解析优化、响应缓存、数据结构直接操作
 - **易于扩展**：模块化设计，支持命令和数据结构扩展
 - **发布/订阅**：支持 SUBSCRIBE、UNSUBSCRIBE、PUBLISH
 - **Lua 脚本**：支持 EVAL、EVALSHA、SCRIPT 命令族，完全兼容 Redis Lua 脚本
+- **事务支持**：支持 MULTI、EXEC、DISCARD、WATCH、UNWATCH
 
-## 技术栈
+## 🚀 快速开始
 
-- **Java**：JDK 17+
-- **Maven**：项目构建工具
-- **Netty**：4.2.10.Final，高性能网络服务器
-- **Spring Boot**：2.7.18，自动配置和集成
-- **Caffeine**：2.9.3，高性能缓存库
-- **Guava**：33.5.0-jre，工具库
-- **SLF4J**：1.7.36，日志框架
-- **LuaJ**：3.0.1，Java 实现的 Lua 解释器（用于 Lua 脚本支持）
-
-## 项目结构
-
-```
-luban-rds/
-├── luban-rds-common/          # 通用模块
-│   ├── src/main/java/com/igbp/luban/rds/common/
-│   │   ├── config/             # 配置类
-│   │   ├── constant/           # 常量定义（含 RedisResponseConstant 性能优化）
-│   │   ├── exception/          # 异常类
-│   │   └── util/               # 工具类
-├── luban-rds-core/             # 核心模块
-│   ├── src/main/java/com/igbp/luban/rds/core/
-│   │   ├── store/              # 内存存储实现（含 LRU 淘汰、ZSet 跳表）
-│   │   └── handler/            # 命令处理器
-├── luban-rds-protocol/         # 协议模块
-│   ├── src/main/java/com/igbp/luban/rds/protocol/
-│   │   ├── Command.java        # 命令对象
-│   │   └── RedisProtocolParser.java  # RESP 协议解析器（含性能优化）
-├── luban-rds-persistence/      # 持久化模块
-│   ├── src/main/java/com/igbp/luban/rds/persistence/
-│   │   ├── PersistService.java # 持久化服务接口
-│   │   └── impl/               # RDB/AOF 实现
-├── luban-rds-server/           # 服务器模块
-│   ├── src/main/java/com/igbp/luban/rds/server/
-│   │   ├── RedisServer.java    # 服务器接口
-│   │   ├── NettyRedisServer.java  # Netty 服务器实现
-│   │   ├── EmbeddedRedisServer.java  # 嵌入式服务器实现
-│   │   └── RedisServerHandler.java  # 连接处理器
-├── luban-rds-spring-boot-starter/  # Spring Boot 启动器
-│   ├── src/main/java/com/igbp/luban/rds/spring/boot/
-│   │   ├── autoconfigure/      # 自动配置
-│   │   └── template/           # RedisTemplate
-├── luban-rds-client/           # 客户端模块
-│   ├── src/main/java/com/igbp/luban/rds/client/
-│   │   ├── RedisClient.java    # 客户端接口
-│   │   └── NettyRedisClient.java  # Netty 客户端实现
-├── luban-rds-bin/              # 可执行程序模块
-│   ├── scripts/                # 启动脚本
-│   └── src/main/java/          # 服务器启动入口、性能测试
-├── docs/                       # 文档目录
-│   ├── 系统架构.md              # 系统架构文档
-│   ├── 功能架构.md              # 功能架构文档
-│   ├── 使用手册.md              # 使用手册
-│   ├── API文档.md               # API 文档
-│   └── 部署指南.md              # 部署指南
-└── pom.xml                     # 父项目 POM 文件
-```
-
-## 快速开始
-
-### 1. 构建项目
+### 安装
 
 ```bash
 # 克隆代码
@@ -94,7 +45,9 @@ cd luban-rds
 mvn clean install
 ```
 
-### 2. 运行独立服务器
+### 基本使用
+
+#### 运行独立服务器
 
 ```bash
 # 使用 Maven 插件运行
@@ -105,7 +58,7 @@ cd luban-rds-server/target
 java -cp "luban-rds-server-1.0.0.jar:lib/*" com.janeluo.luban.rds.server.NettyRedisServer
 ```
 
-### 3. 连接服务器
+#### 连接服务器
 
 使用标准 Redis 客户端连接：
 
@@ -123,12 +76,11 @@ OK
 "Hello Luban-RDS"
 ```
 
-### 4. 嵌入到 Spring Boot 项目
+### Spring Boot 集成
 
 #### 添加依赖
 
 ```xml
-
 <dependency>
     <groupId>com.janeluo.luban</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
@@ -189,7 +141,66 @@ public class RedisController {
 }
 ```
 
-## 支持的命令
+## 🛠️ 技术栈
+
+- **Java**：JDK 17+
+- **Maven**：项目构建工具
+- **Netty**：4.2.10.Final，高性能网络服务器
+- **Spring Boot**：2.7.18，自动配置和集成
+- **Caffeine**：2.9.3，高性能缓存库
+- **Guava**：33.5.0-jre，工具库
+- **SLF4J**：1.7.36，日志框架
+- **LuaJ**：3.0.1，Java 实现的 Lua 解释器（用于 Lua 脚本支持）
+
+## 📁 项目结构
+
+```
+luban-rds/
+├── luban-rds-common/          # 通用模块
+│   ├── src/main/java/com/igbp/luban/rds/common/
+│   │   ├── config/             # 配置类
+│   │   ├── constant/           # 常量定义（含 RedisResponseConstant 性能优化）
+│   │   ├── exception/          # 异常类
+│   │   └── util/               # 工具类
+├── luban-rds-core/             # 核心模块
+│   ├── src/main/java/com/igbp/luban/rds/core/
+│   │   ├── store/              # 内存存储实现（含 LRU 淘汰、ZSet 跳表）
+│   │   └── handler/            # 命令处理器
+├── luban-rds-protocol/         # 协议模块
+│   ├── src/main/java/com/igbp/luban/rds/protocol/
+│   │   ├── Command.java        # 命令对象
+│   │   └── RedisProtocolParser.java  # RESP 协议解析器（含性能优化）
+├── luban-rds-persistence/      # 持久化模块
+│   ├── src/main/java/com/igbp/luban/rds/persistence/
+│   │   ├── PersistService.java # 持久化服务接口
+│   │   └── impl/               # RDB/AOF 实现
+├── luban-rds-server/           # 服务器模块
+│   ├── src/main/java/com/igbp/luban/rds/server/
+│   │   ├── RedisServer.java    # 服务器接口
+│   │   ├── NettyRedisServer.java  # Netty 服务器实现
+│   │   ├── EmbeddedRedisServer.java  # 嵌入式服务器实现
+│   │   └── RedisServerHandler.java  # 连接处理器
+├── luban-rds-spring-boot-starter/  # Spring Boot 启动器
+│   ├── src/main/java/com/igbp/luban/rds/spring/boot/
+│   │   ├── autoconfigure/      # 自动配置
+│   │   └── template/           # RedisTemplate
+├── luban-rds-client/           # 客户端模块
+│   ├── src/main/java/com/igbp/luban/rds/client/
+│   │   ├── RedisClient.java    # 客户端接口
+│   │   └── NettyRedisClient.java  # Netty 客户端实现
+├── luban-rds-bin/              # 可执行程序模块
+│   ├── scripts/                # 启动脚本
+│   └── src/main/java/          # 服务器启动入口、性能测试
+├── docs/                       # 文档目录
+│   ├── 系统架构.md              # 系统架构文档
+│   ├── 功能架构.md              # 功能架构文档
+│   ├── 使用手册.md              # 使用手册
+│   ├── API文档.md               # API 文档
+│   └── 部署指南.md              # 部署指南
+└── pom.xml                     # 父项目 POM 文件
+```
+
+## 📚 命令参考
 
 ### 字符串命令
 - SET, GET, INCR, DECR, INCRBY, DECRBY, APPEND, STRLEN
@@ -228,14 +239,6 @@ public class RedisController {
 - 使用 WATCH 监视的键在 EXEC 前如果发生变更，EXEC 返回 Null Array（RESP: `*-1\r\n`），事务不执行
 - 事务入队阶段若存在参数错误，EXEC 返回 EXECABORT 并丢弃整个事务
 
-#### QUIT 命令
-- 用于客户端主动关闭连接；服务器返回 `+OK\r\n` 后立即关闭连接
-```bash
-127.0.0.1:9736> QUIT
-+OK
-# 连接被关闭
-```
-
 #### 发布/订阅示例
 ```bash
 # 终端 A：订阅频道
@@ -263,33 +266,75 @@ public class RedisController {
 3) "1"
 ```
 
-说明：
-- 客户端进入订阅模式后，仅允许 SUBSCRIBE/UNSUBSCRIBE/PING 命令
-- 当前不支持 PSUBSCRIBE/PUBSUB 等扩展命令（计划后续完善）
+## ⚙️ 配置选项
 
-## 文档
+| 配置项 | 描述 | 默认值 |
+|-------|------|--------|
+| `luban.rds.server.enabled` | 是否启用服务器 | true |
+| `luban.rds.server.host` | 服务器监听地址 | localhost |
+| `luban.rds.server.port` | 服务器监听端口 | 9736 |
+| `luban.rds.server.persist-mode` | 持久化模式（rdb/aof） | rdb |
+| `luban.rds.server.data-dir` | 数据存储目录 | ./data |
+| `luban.rds.server.rdb-save-interval` | RDB 保存间隔（秒） | 60 |
+| `luban.rds.server.maxmemory` | 最大内存限制（字节，0 表示无限制） | 0 |
+| `luban.rds.server.maxmemory-policy` | 内存淘汰策略 | noeviction |
+| `luban.rds.server.requirepass` | 密码认证（空字符串表示不需要） | "" |
+| `luban.rds.server.databases` | 数据库数量 | 16 |
 
-- [在线文档](https://luban-rds.github.io/luban-rds/)：完整的项目文档
-- [系统架构](docs/系统架构.md)：详细描述系统的架构设计
-- [功能架构](docs/功能架构.md)：详细描述系统的功能组件
-- [使用手册](docs/使用手册.md)：详细说明如何使用系统
-- [API 文档](docs/API文档.md)：详细描述系统的 API 接口
-- [部署指南](docs/部署指南.md)：详细说明如何部署和运行系统
+## 💾 持久化
 
-### 协议提示
-- 所有 RESP 响应以 CRLF 结尾
-- EXEC 在 WATCH 触发时返回 Null Array（`*-1\r\n`），与 Bulk nil（`$-1\r\n`）语义不同
-- QUIT 命令响应为 `+OK\r\n`，随后服务器主动关闭该连接
+Luban-RDS 支持两种持久化方式：
 
-## 测试
+### RDB 持久化
+- 异步快照，定期将内存数据保存到磁盘
+- 配置 `luban.rds.server.persist-mode=rdb`
+- 设置保存间隔 `luban.rds.server.rdb-save-interval=60`
 
-运行单元测试：
+### AOF 持久化
+- 追加日志，记录所有写操作
+- 配置 `luban.rds.server.persist-mode=aof`
 
+## 📊 监控和管理
+
+- **MONITOR 命令**：实时监控命令执行
+- **SLOWLOG**：记录慢查询
+- **INFO 命令**：查看服务器状态信息
+
+## 🌐 部署指南
+
+### 独立部署
+1. 构建项目：`mvn clean install`
+2. 运行服务器：`java -cp "luban-rds-server-1.0.0.jar:lib/*" com.janeluo.luban.rds.server.NettyRedisServer`
+3. 配置防火墙，允许端口 9736 访问
+
+### Docker 部署
+（计划后续支持）
+
+## 🛠️ 开发和贡献
+
+### 环境要求
+- JDK 17+
+- Maven 3.6+
+
+### 构建和测试
 ```bash
+# 构建项目
+mvn clean install
+
+# 运行单元测试
 mvn test
 ```
 
-## 常见问题
+### 代码规范
+- 遵循 Java 标准编码规范
+- 使用 4 空格缩进
+- 为公共类和方法添加 Javadoc 注释
+
+### 提交代码
+- 使用清晰的提交信息
+- 推荐使用功能分支
+
+## ❓ 常见问题
 
 ### 1. 启动失败，端口被占用
 
@@ -318,7 +363,7 @@ mvn test
 - 设置合适的保存间隔：配置 `luban.rds.server.rdb-save-interval=60`
 - 确保数据目录可写：配置 `luban.rds.server.data-dir=./data`
 
-## 未来规划
+## 📍 未来规划
 
 - [x] 支持持久化（RDB、AOF）
 - [x] 支持内存淘汰策略（LRU、Random、TTL）
@@ -331,16 +376,27 @@ mvn test
 - [x] 支持发布/订阅
 - [ ] 支持更多 Redis 命令
 - [ ] 增强监控和管理功能
+- [ ] Docker 部署支持
 
-## 许可证
+## 📚 文档
 
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
+- [在线文档](https://luban-rds.github.io/luban-rds/)：完整的项目文档
+- [系统架构](docs/系统架构.md)：详细描述系统的架构设计
+- [功能架构](docs/功能架构.md)：详细描述系统的功能组件
+- [使用手册](docs/使用手册.md)：详细说明如何使用系统
+- [API 文档](docs/API文档.md)：详细描述系统的 API 接口
+- [部署指南](docs/部署指南.md)：详细说明如何部署和运行系统
 
-## 贡献
+## 📄 许可证
+
+本项目采用 Apache 2.0 许可证 - 详见 [LICENSE](LICENSE) 文件
+
+## 🤝 贡献
 
 欢迎提交 Issue 和 Pull Request 来改进这个项目！
 
-## 联系方式
+## 📞 联系方式
 
 - 项目地址：https://github.com/LUBAN-RDS/luban-rds
 - 问题反馈：https://github.com/LUBAN-RDS/luban-rds/issues
+- 在线文档：https://luban-rds.github.io/luban-rds/
