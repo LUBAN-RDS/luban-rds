@@ -1,19 +1,43 @@
 package com.janeluo.luban.rds.server.redisson;
 
-import org.junit.jupiter.api.*;
-import org.redisson.RedissonRedLock;
-import org.redisson.api.*;
-import org.redisson.api.listener.MessageListener;
-import org.redisson.codec.JsonJacksonCodec;
-import org.redisson.codec.SerializationCodec;
-import org.redisson.connection.ConnectionListener;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.Serializable;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.*;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+import org.redisson.RedissonRedLock;
+import org.redisson.api.BatchResult;
+import org.redisson.api.RAtomicLong;
+import org.redisson.api.RBatch;
+import org.redisson.api.RBucket;
+import org.redisson.api.RList;
+import org.redisson.api.RLock;
+import org.redisson.api.RMap;
+import org.redisson.api.RQueue;
+import org.redisson.api.RScript;
+import org.redisson.api.RSet;
+import org.redisson.api.RTopic;
+import org.redisson.api.RTransaction;
+import org.redisson.api.TransactionOptions;
+import org.redisson.codec.JsonJacksonCodec;
+import org.redisson.codec.SerializationCodec;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class RedissonIntegrationTest extends RedissonTestBase {
@@ -123,6 +147,28 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         
         map.remove("key1");
         assertFalse(map.containsKey("key1"));
+    }
+
+    @Test
+    @DisplayName("Test RMap with Object")
+    @Order(3)
+    void testMapObject() {
+        RMap<String, TestObject> map = redisson.getMap("testMapObject", new JsonJacksonCodec());
+        TestObject testObject = new TestObject("test", 123);
+        map.put("key1", testObject);
+        TestObject retrieved = map.get("key1");
+        assertEquals(testObject, retrieved);
+    }
+    
+    @Test
+    @DisplayName("Test RMap with Object for SerializationCodec")
+    @Order(3)
+    void testMapObject4SerializationCodec() {
+        RMap<String, TestObject> map = redisson.getMap("testMapObject4SerializationCodec", new SerializationCodec());
+        TestObject testObject = new TestObject("test", 123);
+        map.put("key1", testObject);
+        TestObject retrieved = map.get("key1");
+        assertEquals(testObject, retrieved);
     }
 
     @Test
