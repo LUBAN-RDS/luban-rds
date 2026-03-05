@@ -147,8 +147,8 @@ public class HashCommandHandler implements CommandHandler {
             return "$-1\r\n";
         }
         
-        // 使用 UTF-8 字节长度
-        int byteLength = value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        // 使用 ISO-8859-1 字节长度
+        int byteLength = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1).length;
         return "$" + byteLength + "\r\n" + value + "\r\n";
     }
 
@@ -169,7 +169,7 @@ public class HashCommandHandler implements CommandHandler {
             if (val == null) {
                 sb.append("$-1\r\n");
             } else {
-                int bytes = val.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                int bytes = val.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1).length;
                 sb.append("$").append(bytes).append("\r\n").append(val).append("\r\n");
             }
         }
@@ -241,7 +241,7 @@ public class HashCommandHandler implements CommandHandler {
         result.append("\r\n");
         
         for (String field : hash.keySet()) {
-            int byteLen = field.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            int byteLen = field.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1).length;
             result.append("$").append(byteLen).append("\r\n").append(field).append("\r\n");
         }
         
@@ -263,7 +263,7 @@ public class HashCommandHandler implements CommandHandler {
         result.append("\r\n");
         
         for (String value : hash.values()) {
-            int byteLen = value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            int byteLen = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1).length;
             result.append("$").append(byteLen).append("\r\n").append(value).append("\r\n");
         }
         

@@ -364,9 +364,13 @@ public class CommonCommandHandler implements CommandHandler {
         if (args.length < 3) {
             return "-ERR wrong number of arguments for 'publish' command\r\n";
         }
-        // TODO: Integrate with PubSubManager if possible, but currently PubSubManager is in server module
-        // and LuaCommandHandler/CommonCommandHandler are in core module.
-        // For now, return 0 (no subscribers) to allow Lua scripts to proceed.
+        
+        com.janeluo.luban.rds.common.context.PubSubService service = com.janeluo.luban.rds.common.context.ServerContext.getPubSubService();
+        if (service != null) {
+            int count = service.publish(args[1], args[2]);
+            return ":" + count + "\r\n";
+        }
+        
         return ":0\r\n";
     }
     

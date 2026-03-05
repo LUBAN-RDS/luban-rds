@@ -504,13 +504,28 @@ public class LuaCommandHandler implements CommandHandler {
                 LuaTable table = (LuaTable) args.arg(2);
                 int length = table.length();
                 for (int i = 1; i <= length; i++) {
-                    argList.add(table.get(i).tojstring());
+                    LuaValue v = table.get(i);
+                    if (v.isstring()) {
+                        LuaString ls = v.checkstring();
+                        byte[] bytes = new byte[ls.length()];
+                        ls.copyInto(0, bytes, 0, bytes.length);
+                        argList.add(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1));
+                    } else {
+                        argList.add(v.tojstring());
+                    }
                 }
             } else {
                 for (int i = 2; i <= n; i++) {
                     LuaValue v = args.arg(i);
                     if (!v.isnil()) {
-                        argList.add(v.tojstring());
+                        if (v.isstring()) {
+                            LuaString ls = v.checkstring();
+                            byte[] bytes = new byte[ls.length()];
+                            ls.copyInto(0, bytes, 0, bytes.length);
+                            argList.add(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1));
+                        } else {
+                            argList.add(v.tojstring());
+                        }
                     }
                 }
             }

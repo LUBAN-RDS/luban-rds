@@ -213,7 +213,7 @@ public class RedissonIntegrationTest extends RedissonTestBase {
     @Test
     @DisplayName("Test RTopic")
     @Order(9)
-    @Disabled("Luban-RDS Pub/Sub implementation might have timing issues or missing features for Redisson")
+    // Removed @Disabled annotation to enable the test
     void testTopic() throws InterruptedException {
         RTopic topic = redisson.getTopic("testTopic");
         CountDownLatch latch = new CountDownLatch(1);
@@ -227,7 +227,8 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         });
         
         // Wait for subscription to propagate
-        Thread.sleep(500);
+        // Increase wait time to ensure subscription is processed
+        Thread.sleep(1000);
         
         long clients = topic.publish("hello");
         // Note: publish returns number of clients received. 

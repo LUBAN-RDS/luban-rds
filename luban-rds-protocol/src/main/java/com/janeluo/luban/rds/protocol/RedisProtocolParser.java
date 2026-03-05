@@ -22,16 +22,16 @@ public class RedisProtocolParser {
             ThreadLocal.withInitial(() -> new StringBuilder(64));
     
     // 预定义常用响应字节数组
-    private static final byte[] CRLF = "\r\n".getBytes(StandardCharsets.UTF_8);
-    private static final byte[] NULL_BULK = "$-1\r\n".getBytes(StandardCharsets.UTF_8);
-    private static final byte[] NULL_ARRAY = "*-1\r\n".getBytes(StandardCharsets.UTF_8);
-    private static final byte[] EMPTY_ARRAY = "*0\r\n".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] CRLF = "\r\n".getBytes(StandardCharsets.ISO_8859_1);
+    private static final byte[] NULL_BULK = "$-1\r\n".getBytes(StandardCharsets.ISO_8859_1);
+    private static final byte[] NULL_ARRAY = "*-1\r\n".getBytes(StandardCharsets.ISO_8859_1);
+    private static final byte[] EMPTY_ARRAY = "*0\r\n".getBytes(StandardCharsets.ISO_8859_1);
     
     // 预定义常用整数响应
     private static final byte[][] INT_CACHE = new byte[32][];
     static {
         for (int i = 0; i < 32; i++) {
-            INT_CACHE[i] = (":" + i + "\r\n").getBytes(StandardCharsets.UTF_8);
+            INT_CACHE[i] = (":" + i + "\r\n").getBytes(StandardCharsets.ISO_8859_1);
         }
     }
     
@@ -128,7 +128,7 @@ public class RedisProtocolParser {
         // 跳过\r\n
         buffer.skipBytes(2);
         
-        return new String(bytes, StandardCharsets.UTF_8);
+        return new String(bytes, StandardCharsets.ISO_8859_1);
     }
     
     // 解析所有RESP类型
@@ -227,7 +227,7 @@ public class RedisProtocolParser {
             if (str.startsWith("+") || str.startsWith("-") || str.startsWith(":") || str.startsWith("$") || str.startsWith("*")) {
                 // 如果是完整的RESP格式字符串，直接写入
                 ByteBuf buffer = Unpooled.directBuffer(str.length());
-                buffer.writeBytes(str.getBytes(StandardCharsets.UTF_8));
+                buffer.writeBytes(str.getBytes(StandardCharsets.ISO_8859_1));
                 return buffer;
             }
             // 检查是否为错误消息
@@ -255,7 +255,7 @@ public class RedisProtocolParser {
     }
     
     private ByteBuf serializeSimpleString(String value) {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = value.getBytes(StandardCharsets.ISO_8859_1);
         ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
         buffer.writeByte('+');
         buffer.writeBytes(bytes);
@@ -264,7 +264,7 @@ public class RedisProtocolParser {
     }
     
     private ByteBuf serializeError(String error) {
-        byte[] bytes = error.getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = error.getBytes(StandardCharsets.ISO_8859_1);
         ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
         buffer.writeByte('-');
         buffer.writeBytes(bytes);
@@ -308,7 +308,7 @@ public class RedisProtocolParser {
         if (value == null) {
             return Unpooled.directBuffer(5).writeBytes("$-1\r\n".getBytes());
         }
-        return serializeBulkString(value.getBytes(StandardCharsets.UTF_8));
+        return serializeBulkString(value.getBytes(StandardCharsets.ISO_8859_1));
     }
     
     private ByteBuf serializeArray(List<?> values) {

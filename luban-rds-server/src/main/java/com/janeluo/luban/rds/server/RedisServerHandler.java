@@ -36,7 +36,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 "ZADD","ZRANGE","ZSCORE","ZREM","ZCARD",
                 "EXISTS","DEL","EXPIRE","TTL","FLUSHALL","TYPE","PING","ECHO","SELECT","INFO","SCAN","DBSIZE","TIME",
                 "AUTH",
-                "SUBSCRIBE","UNSUBSCRIBE","PUBLISH",
+                "SUBSCRIBE","UNSUBSCRIBE","PUBLISH","PSUBSCRIBE","PUNSUBSCRIBE",
                 "EVAL","EVALSHA","SCRIPT","SCRIPT LOAD","SCRIPT EXISTS","SCRIPT FLUSH","SCRIPT KILL",
                 "MULTI","EXEC","DISCARD","WATCH","UNWATCH","QUIT",
                 "MEMORY", "MONITOR",
@@ -54,6 +54,75 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     private static final Map<ChannelId, ClientInfo> CLIENT_INFO_MAP = new ConcurrentHashMap<>();
     // Pub/Sub 管理
     private static final PubSubManager PUB_SUB_MANAGER = new PubSubManager();
+    private static final com.janeluo.luban.rds.protocol.RedisProtocolParser SHARED_PROTOCOL_PARSER = new com.janeluo.luban.rds.protocol.RedisProtocolParser();
+
+    static {
+        String[] names = new String[]{
+                "PING","ECHO","SELECT","QUIT","AUTH",
+                "GET","SET","SETNX","GETSET","MGET","MSET","MSETNX","STRLEN","APPEND","INCR","DECR","INCRBY","DECRBY",
+                "LPUSH","RPUSH","LPOP","RPOP","LLEN","LRANGE","LINDEX","LSET","LREM","LTRIM",
+                "SADD","SREM","SISMEMBER","SMEMBERS","SCARD","SPOP","SRANDMEMBER","SMOVE","SUNION","SINTER","SDIFF",
+                "HSET","HGET","HMSET","HMGET","HGETALL","HKEYS","HVALS","HLEN","HEXISTS","HDEL","HINCRBY",
+                "ZADD","ZREM","ZSCORE","ZRANK","ZREVRANK","ZRANGE","ZREVRANGE","ZRANGEBYSCORE","ZCARD","ZCOUNT","ZINCRBY",
+                "EXPIRE","PEXPIRE","TTL","PTTL","PERSIST","TYPE","KEYS","DEL","EXISTS","DBSIZE","FLUSHDB","FLUSHALL",
+                "SUBSCRIBE","UNSUBSCRIBE","PUBLISH","PSUBSCRIBE","PUNSUBSCRIBE",
+                "EVAL","EVALSHA","SCRIPT","SCRIPT LOAD","SCRIPT EXISTS","SCRIPT FLUSH","SCRIPT KILL",
+                "MULTI","EXEC","DISCARD","WATCH","UNWATCH","QUIT",
+                "INFO", "MONITOR",
+                "MEMORY", "MEMORY USAGE", "MEMORY STATS", "MEMORY PURGE", "MEMORY DOCTOR", "MEMORY MALLOC-STATS", "MEMORY HELP",
+                "HSCAN"
+        };
+        for (String n : names) KNOWN_COMMANDS.add(n);
+        
+        // Register PubSubService
+        com.janeluo.luban.rds.common.context.ServerContext.setPubSubService((channel, message) -> publishMessage(channel, message));
+    }
+    
+    public static int publishMessage(String channel, String message) {
+        int receivers = 0;
+        java.util.List<Channel> snapshot = new java.util.ArrayList<>(PUB_SUB_MANAGER.subscribers(channel));
+        for (Channel ch : snapshot) {
+            ByteBuf resp = SHARED_PROTOCOL_PARSER.serialize(java.util.Arrays.asList(
+                CMD_MESSAGE, 
+                channel.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                message.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1)));
+            if (resp != null && resp.isReadable()) {
+                ch.writeAndFlush(resp);
+                receivers++;
+            } else if (resp != null) {
+                resp.release();
+            }
+        }
+        
+        // Pattern subscribers
+        java.util.Map<String, java.util.Collection<Channel>> patternSubs = PUB_SUB_MANAGER.patternSubscribers(channel);
+        for (java.util.Map.Entry<String, java.util.Collection<Channel>> entry : patternSubs.entrySet()) {
+            String pattern = entry.getKey();
+            for (Channel ch : entry.getValue()) {
+                ByteBuf resp = SHARED_PROTOCOL_PARSER.serialize(java.util.Arrays.asList(
+                    CMD_PMESSAGE, 
+                    pattern.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                    channel.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                    message.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1)));
+                if (resp != null && resp.isReadable()) {
+                    ch.writeAndFlush(resp);
+                    receivers++;
+                } else if (resp != null) {
+                    resp.release();
+                }
+            }
+        }
+        return receivers;
+    }
+    
+    // Pub/Sub 响应常量
+    private static final byte[] CMD_SUBSCRIBE = "subscribe".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    private static final byte[] CMD_UNSUBSCRIBE = "unsubscribe".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    private static final byte[] CMD_PSUBSCRIBE = "psubscribe".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    private static final byte[] CMD_PUNSUBSCRIBE = "punsubscribe".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    private static final byte[] CMD_MESSAGE = "message".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    private static final byte[] CMD_PMESSAGE = "pmessage".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    private static final byte[] EMPTY_BYTES = new byte[0];
     
     private final MemoryStore memoryStore;
     private final DefaultCommandHandler commandHandler;
@@ -183,8 +252,10 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             if (clientInfo.isInPubSubMode()) {
                 if (!"SUBSCRIBE".equals(commandName)
                         && !"UNSUBSCRIBE".equals(commandName)
+                        && !"PSUBSCRIBE".equals(commandName)
+                        && !"PUNSUBSCRIBE".equals(commandName)
                         && !"PING".equals(commandName)) {
-                    ByteBuf errorBuffer = protocolParser.serialize("-ERR only (SUBSCRIBE/UNSUBSCRIBE/PING) allowed in Pub/Sub mode\r\n");
+                    ByteBuf errorBuffer = protocolParser.serialize("-ERR only (SUBSCRIBE/PSUBSCRIBE/UNSUBSCRIBE/PUNSUBSCRIBE/PING) allowed in Pub/Sub mode\r\n");
                     if (errorBuffer != null && errorBuffer.isReadable()) {
                         ctx.writeAndFlush(errorBuffer);
                     } else if (errorBuffer != null) {
@@ -198,6 +269,12 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 return;
             } else if ("UNSUBSCRIBE".equals(commandName)) {
                 handleUnsubscribe(ctx, args);
+                return;
+            } else if ("PSUBSCRIBE".equals(commandName)) {
+                handlePsubscribe(ctx, args);
+                return;
+            } else if ("PUNSUBSCRIBE".equals(commandName)) {
+                handlePunsubscribe(ctx, args);
                 return;
             } else if ("PUBLISH".equals(commandName)) {
                 handlePublish(ctx, args);
@@ -264,6 +341,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         logger.info("Client disconnected: {}", ctx.channel().remoteAddress());
         // 断开连接时清理订阅
         PUB_SUB_MANAGER.unsubscribeAll(ctx.channel());
+        PUB_SUB_MANAGER.punsubscribeAll(ctx.channel());
         MonitorManager.getInstance().removeMonitor(ctx.channel());
         ClientInfo info = CLIENT_INFO_MAP.remove(ctx.channel().id());
         if (info != null && info.getInboundBuf() != null) {
@@ -396,8 +474,11 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         for (int i = 1; i < args.length; i++) {
             String channelName = args[i];
             PUB_SUB_MANAGER.subscribe(ctx.channel(), channelName);
-            int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel());
-            ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList("subscribe", channelName, String.valueOf(count)));
+            int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel());
+            ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                CMD_SUBSCRIBE, 
+                channelName.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                count));
             if (resp != null && resp.isReadable()) {
                 ctx.writeAndFlush(resp);
             } else if (resp != null) {
@@ -415,7 +496,10 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         if (args.length <= 1) {
             java.util.Set<String> subs = PUB_SUB_MANAGER.subscriptions(ctx.channel());
             if (subs.isEmpty()) {
-                ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList("unsubscribe", "", "0"));
+                ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                    CMD_UNSUBSCRIBE, 
+                    EMPTY_BYTES, 
+                    PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel())));
                 if (resp != null && resp.isReadable()) {
                     ctx.writeAndFlush(resp);
                 } else if (resp != null) {
@@ -424,8 +508,11 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             } else {
                 for (String ch : subs.toArray(new String[0])) {
                     PUB_SUB_MANAGER.unsubscribe(ctx.channel(), ch);
-                    int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel());
-                    ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList("unsubscribe", ch, String.valueOf(count)));
+                    int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel());
+                    ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                        CMD_UNSUBSCRIBE, 
+                        ch.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                        count));
                     if (resp != null && resp.isReadable()) {
                         ctx.writeAndFlush(resp);
                     } else if (resp != null) {
@@ -437,8 +524,11 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             for (int i = 1; i < args.length; i++) {
                 String channelName = args[i];
                 PUB_SUB_MANAGER.unsubscribe(ctx.channel(), channelName);
-                int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel());
-                ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList("unsubscribe", channelName, String.valueOf(count)));
+                int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel());
+                ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                    CMD_UNSUBSCRIBE, 
+                    channelName.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                    count));
                 if (resp != null && resp.isReadable()) {
                     ctx.writeAndFlush(resp);
                 } else if (resp != null) {
@@ -447,7 +537,89 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             }
         }
         if (clientInfo != null) {
-            clientInfo.setInPubSubMode(PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) > 0);
+            clientInfo.setInPubSubMode(PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) > 0 || PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel()) > 0);
+        }
+    }
+
+    // 处理 PSUBSCRIBE 命令
+    private void handlePsubscribe(ChannelHandlerContext ctx, String[] args) {
+        if (args.length < 2) {
+            ByteBuf errorBuffer = protocolParser.serialize("-ERR wrong number of arguments for 'psubscribe' command\r\n");
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
+            }
+            return;
+        }
+        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        for (int i = 1; i < args.length; i++) {
+            String pattern = args[i];
+            PUB_SUB_MANAGER.psubscribe(ctx.channel(), pattern);
+            int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel());
+            ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                CMD_PSUBSCRIBE, 
+                pattern.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                count));
+            if (resp != null && resp.isReadable()) {
+                ctx.writeAndFlush(resp);
+            } else if (resp != null) {
+                resp.release();
+            }
+        }
+        if (clientInfo != null) {
+            clientInfo.setInPubSubMode(true);
+        }
+    }
+
+    // 处理 PUNSUBSCRIBE 命令
+    private void handlePunsubscribe(ChannelHandlerContext ctx, String[] args) {
+        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        if (args.length <= 1) {
+            java.util.Set<String> patterns = PUB_SUB_MANAGER.patternSubscriptions(ctx.channel());
+            if (patterns.isEmpty()) {
+                ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                    CMD_PUNSUBSCRIBE, 
+                    EMPTY_BYTES, 
+                    PUB_SUB_MANAGER.subscriptionCount(ctx.channel())));
+                if (resp != null && resp.isReadable()) {
+                    ctx.writeAndFlush(resp);
+                } else if (resp != null) {
+                    resp.release();
+                }
+            } else {
+                for (String p : patterns.toArray(new String[0])) {
+                    PUB_SUB_MANAGER.punsubscribe(ctx.channel(), p);
+                    int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel());
+                    ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                        CMD_PUNSUBSCRIBE, 
+                        p.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                        count));
+                    if (resp != null && resp.isReadable()) {
+                        ctx.writeAndFlush(resp);
+                    } else if (resp != null) {
+                        resp.release();
+                    }
+                }
+            }
+        } else {
+            for (int i = 1; i < args.length; i++) {
+                String pattern = args[i];
+                PUB_SUB_MANAGER.punsubscribe(ctx.channel(), pattern);
+                int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel());
+                ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                    CMD_PUNSUBSCRIBE, 
+                    pattern.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                    count));
+                if (resp != null && resp.isReadable()) {
+                    ctx.writeAndFlush(resp);
+                } else if (resp != null) {
+                    resp.release();
+                }
+            }
+        }
+        if (clientInfo != null) {
+            clientInfo.setInPubSubMode(PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) > 0 || PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel()) > 0);
         }
     }
 
@@ -464,17 +636,9 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         }
         String channel = args[1];
         String message = args[2];
-        int receivers = 0;
-        java.util.List<Channel> snapshot = new java.util.ArrayList<>(PUB_SUB_MANAGER.subscribers(channel));
-        for (Channel ch : snapshot) {
-            ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList("message", channel, message));
-            if (resp != null && resp.isReadable()) {
-                ch.writeAndFlush(resp);
-                receivers++;
-            } else if (resp != null) {
-                resp.release();
-            }
-        }
+        
+        int receivers = publishMessage(channel, message);
+        
         ByteBuf countBuf = protocolParser.serialize(receivers);
         if (countBuf != null && countBuf.isReadable()) {
             ctx.writeAndFlush(countBuf);

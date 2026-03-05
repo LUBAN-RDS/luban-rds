@@ -113,8 +113,8 @@ public class StringCommandHandler implements CommandHandler {
         }
         
         String strValue = value.toString();
-        // 使用UTF-8编码计算字节长度
-        byte[] bytes = strValue.getBytes(StandardCharsets.UTF_8);
+        // 使用ISO-8859-1编码计算字节长度
+        byte[] bytes = strValue.getBytes(StandardCharsets.ISO_8859_1);
         return "$" + bytes.length + "\r\n" + strValue + "\r\n";
     }
     
@@ -327,7 +327,7 @@ public class StringCommandHandler implements CommandHandler {
                 sb.append("$-1\r\n");
             } else {
                 String str = (String) val;
-                byte[] bytes = str.getBytes(StandardCharsets.UTF_8);
+                byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
                 sb.append("$").append(bytes.length).append("\r\n").append(str).append("\r\n");
             }
         }

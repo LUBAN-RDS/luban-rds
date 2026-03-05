@@ -5,6 +5,7 @@ package com.janeluo.luban.rds.common.context;
  */
 public class ServerContext {
     private static InfoProvider infoProvider;
+    private static PubSubService pubSubService;
 
     public static void setInfoProvider(InfoProvider provider) {
         infoProvider = provider;
@@ -12,5 +13,13 @@ public class ServerContext {
 
     public static InfoProvider getInfoProvider() {
         return infoProvider;
+    }
+
+    public static void setPubSubService(PubSubService service) {
+        pubSubService = service;
+    }
+
+    public static PubSubService getPubSubService() {
+        return pubSubService;
     }
 }
