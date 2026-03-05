@@ -147,6 +147,16 @@ public interface MemoryStore {
      * @return 是否存在
      */
     boolean hexists(int database, String key, String field);
+
+    /**
+     * 为哈希表中的字段值加上指定增量值
+     * @param database 数据库索引
+     * @param key Hash 键
+     * @param field 字段名
+     * @param increment 增量值
+     * @return 增量后的值
+     */
+    long hincrby(int database, String key, String field, long increment);
     
     /**
      * 获取 Hash 的所有字段和值
@@ -212,13 +222,32 @@ public interface MemoryStore {
     String rpop(int database, String key);
     
     /**
+     * 移除列表元素
+     * @param database 数据库索引
+     * @param key 列表键
+     * @param count 移除数量
+     * @param value 元素值
+     * @return 移除数量
+     */
+    int lrem(int database, String key, int count, String value);
+
+    /**
      * 获取列表长度
      * @param database 数据库索引
-     * @param key List 键
+     * @param key 列表键
      * @return 列表长度
      */
     int llen(int database, String key);
     
+    /**
+     * 获取列表指定索引的元素
+     * @param database 数据库索引
+     * @param key 列表键
+     * @param index 索引
+     * @return 元素值
+     */
+    String lindex(int database, String key, int index);
+
     /**
      * 获取列表指定范围的元素
      * @param database 数据库索引

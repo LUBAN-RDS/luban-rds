@@ -26,6 +26,7 @@ public class RdsCommandConstant {
     public static final String HKEYS = "HKEYS";
     public static final String HVALS = "HVALS";
     public static final String HLEN = "HLEN";
+    public static final String HINCRBY = "HINCRBY";
     public static final String HSCAN = "HSCAN";
     
     // 列表命令
@@ -35,6 +36,8 @@ public class RdsCommandConstant {
     public static final String RPOP = "RPOP";
     public static final String LLEN = "LLEN";
     public static final String LRANGE = "LRANGE";
+    public static final String LREM = "LREM";
+    public static final String LINDEX = "LINDEX";
     
     // 集合命令
     public static final String SADD = "SADD";
@@ -55,7 +58,9 @@ public class RdsCommandConstant {
     public static final String EXISTS = "EXISTS";
     public static final String DEL = "DEL";
     public static final String EXPIRE = "EXPIRE";
+    public static final String PEXPIRE = "PEXPIRE";
     public static final String TTL = "TTL";
+    public static final String PTTL = "PTTL";
     public static final String FLUSHALL = "FLUSHALL";
     public static final String TYPE = "TYPE";
     public static final String PING = "PING";

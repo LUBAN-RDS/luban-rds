@@ -19,7 +19,9 @@ public class CommonCommandHandler implements CommandHandler {
         RdsCommandConstant.EXISTS,
         RdsCommandConstant.DEL,
         RdsCommandConstant.EXPIRE,
+        RdsCommandConstant.PEXPIRE,
         RdsCommandConstant.TTL,
+        RdsCommandConstant.PTTL,
         RdsCommandConstant.FLUSHALL,
         RdsCommandConstant.TYPE,
         RdsCommandConstant.PING,
@@ -57,8 +59,12 @@ public class CommonCommandHandler implements CommandHandler {
                 return handleDel(database, args, store);
             case RdsCommandConstant.EXPIRE:
                 return handleExpire(database, args, store);
+            case RdsCommandConstant.PEXPIRE:
+                return handlePExpire(database, args, store);
             case RdsCommandConstant.TTL:
                 return handleTtl(database, args, store);
+            case RdsCommandConstant.PTTL:
+                return handlePTtl(database, args, store);
             case RdsCommandConstant.FLUSHALL:
                 return handleFlushAll(args, store);
             case RdsCommandConstant.TYPE:
@@ -159,6 +165,30 @@ public class CommonCommandHandler implements CommandHandler {
         boolean success = store.expire(database, key, seconds);
         return success ? ":1\r\n" : ":0\r\n";
     }
+
+    private Object handlePExpire(int database, String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return "-ERR wrong number of arguments for 'pexpire' command\r\n";
+        }
+        
+        String key = args[1];
+        long milliseconds;
+        
+        try {
+            milliseconds = Long.parseLong(args[2]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        // Convert ms to seconds (rounding up)
+        long seconds = (long) Math.ceil(milliseconds / 1000.0);
+        if (seconds == 0 && milliseconds > 0) {
+            seconds = 1;
+        }
+        
+        boolean success = store.expire(database, key, seconds);
+        return success ? ":1\r\n" : ":0\r\n";
+    }
     
     private Object handleTtl(int database, String[] args, MemoryStore store) {
         if (args.length < 2) {
@@ -167,6 +197,19 @@ public class CommonCommandHandler implements CommandHandler {
         
         String key = args[1];
         long ttl = store.ttl(database, key);
+        return ":" + ttl + "\r\n";
+    }
+
+    private Object handlePTtl(int database, String[] args, MemoryStore store) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'pttl' command\r\n";
+        }
+        
+        String key = args[1];
+        long ttl = store.ttl(database, key);
+        if (ttl > 0) {
+            ttl = ttl * 1000;
+        }
         return ":" + ttl + "\r\n";
     }
     

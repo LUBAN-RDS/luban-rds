@@ -1244,6 +1244,62 @@ public class DefaultMemoryStore implements MemoryStore {
         
         return false;
     }
+
+    @Override
+    public long hincrby(int database, String key, String field, long increment) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        java.util.concurrent.ConcurrentHashMap<String, String> hash;
+        boolean isNew = false;
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            hash = new java.util.concurrent.ConcurrentHashMap<>();
+            isNew = true;
+        } else {
+            Object val = storeValue.value;
+            if (val instanceof java.util.concurrent.ConcurrentHashMap) {
+                hash = (java.util.concurrent.ConcurrentHashMap<String, String>) val;
+            } else if (val instanceof java.util.Map) {
+                hash = new java.util.concurrent.ConcurrentHashMap<>((java.util.Map<String, String>) val);
+                isNew = true;
+            } else {
+                hash = new java.util.concurrent.ConcurrentHashMap<>();
+                isNew = true;
+            }
+        }
+        
+        long newValue;
+        String oldValueStr = hash.get(field);
+        if (oldValueStr == null) {
+            newValue = increment;
+        } else {
+            try {
+                newValue = Long.parseLong(oldValueStr) + increment;
+            } catch (NumberFormatException e) {
+                throw new RuntimeException("ERR hash value is not an integer");
+            }
+        }
+        
+        String newValueStr = String.valueOf(newValue);
+        hash.put(field, newValueStr);
+        
+        if (isNew) {
+            set(database, key, hash);
+        } else {
+            long delta = 0;
+            if (oldValueStr == null) {
+                delta = 64 + field.length() * 2L + newValueStr.length() * 2L;
+            } else {
+                delta = (newValueStr.length() - oldValueStr.length()) * 2L;
+            }
+            storeValue.updateEstimatedSize(delta);
+            updateMemory(delta);
+            bumpKeyVersion(database, key);
+        }
+        
+        return newValue;
+    }
     
     @Override
     public java.util.Map<String, String> hgetall(int database, String key) {
@@ -1485,6 +1541,79 @@ public class DefaultMemoryStore implements MemoryStore {
     }
     
     @Override
+    public int lrem(int database, String key, int count, String value) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return 0;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof java.util.List)) {
+            return 0;
+        }
+        
+        // Copy to ArrayList for modification (CopyOnWriteArrayList iterator doesn't support remove)
+        java.util.List<String> list = new java.util.ArrayList<>((java.util.List<String>) val);
+        int removed = 0;
+        
+        if (count == 0) {
+            // Remove all occurrences
+            java.util.Iterator<String> it = list.iterator();
+            while (it.hasNext()) {
+                String v = it.next();
+                if (v.equals(value)) {
+                    it.remove();
+                    removed++;
+                }
+            }
+        } else if (count > 0) {
+            // Remove first count occurrences from head
+            java.util.Iterator<String> it = list.iterator();
+            while (it.hasNext() && removed < count) {
+                String v = it.next();
+                if (v.equals(value)) {
+                    it.remove();
+                    removed++;
+                }
+            }
+        } else {
+            // Remove first |count| occurrences from tail
+            int toRemove = Math.abs(count);
+            java.util.ListIterator<String> it = list.listIterator(list.size());
+            while (it.hasPrevious() && removed < toRemove) {
+                String v = it.previous();
+                if (v.equals(value)) {
+                    it.remove();
+                    removed++;
+                }
+            }
+        }
+        
+        if (removed > 0) {
+            // Replace with new CopyOnWriteArrayList and StoreValue
+            java.util.concurrent.CopyOnWriteArrayList<String> newList = new java.util.concurrent.CopyOnWriteArrayList<>(list);
+            StoreValue newValue;
+            if (storeValue.hasExpireTime()) {
+                long remaining = Math.max(0, storeValue.getExpireTime() - RdsUtil.currentSeconds());
+                newValue = new StoreValue(newList, RdsDataTypeConstant.LIST, remaining);
+            } else {
+                newValue = new StoreValue(newList, RdsDataTypeConstant.LIST);
+            }
+            
+            long oldSize = storeValue.getEstimatedSize();
+            long newSize = newValue.getEstimatedSize();
+            updateMemory(newSize - oldSize);
+            
+            store.storage.put(key, newValue);
+            bumpKeyVersion(database, key);
+        }
+        
+        return removed;
+    }
+
+    @Override
     public int llen(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.getIfPresent(key);
@@ -1502,6 +1631,36 @@ public class DefaultMemoryStore implements MemoryStore {
         
         RuntimeConfig.incKeyspaceHits();
         return 0;
+    }
+    
+    @Override
+    public String lindex(int database, String key, int index) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return null;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof java.util.List)) {
+            throw new RuntimeException("WRONGTYPE Operation against a key holding the wrong kind of value");
+        }
+        
+        java.util.List<?> list = (java.util.List<?>) val;
+        int size = list.size();
+        
+        if (index >= 0) {
+            if (index < size) {
+                return list.get(index).toString();
+            }
+        } else {
+            if (Math.abs(index) <= size) {
+                return list.get(size + index).toString();
+            }
+        }
+        
+        return null;
     }
     
     @Override

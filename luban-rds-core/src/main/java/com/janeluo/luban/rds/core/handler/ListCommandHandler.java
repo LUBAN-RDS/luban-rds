@@ -16,7 +16,9 @@ public class ListCommandHandler implements CommandHandler {
         RdsCommandConstant.LPOP,
         RdsCommandConstant.RPOP,
         RdsCommandConstant.LLEN,
-        RdsCommandConstant.LRANGE
+        RdsCommandConstant.LRANGE,
+        RdsCommandConstant.LREM,
+        RdsCommandConstant.LINDEX
     );
     
     @Override
@@ -36,6 +38,10 @@ public class ListCommandHandler implements CommandHandler {
                 return handleLLen(database, args, store);
             case RdsCommandConstant.LRANGE:
                 return handleLRange(database, args, store);
+            case RdsCommandConstant.LREM:
+                return handleLRem(database, args, store);
+            case RdsCommandConstant.LINDEX:
+                return handleLIndex(database, args, store);
             default:
                 return "-ERR unknown command\r\n";
         }
@@ -129,6 +135,52 @@ public class ListCommandHandler implements CommandHandler {
         int len = store.llen(database, key);
         
         return ":" + len + "\r\n";
+    }
+    
+    private Object handleLRem(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'lrem' command\r\n";
+        }
+        
+        String key = args[1];
+        int count;
+        try {
+            count = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        String value = args[3];
+        
+        int removed = store.lrem(database, key, count, value);
+        return ":" + removed + "\r\n";
+    }
+
+    private Object handleLIndex(int database, String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return "-ERR wrong number of arguments for 'lindex' command\r\n";
+        }
+        
+        String key = args[1];
+        int index;
+        try {
+            index = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        try {
+            String value = store.lindex(database, key, index);
+            if (value == null) {
+                return "$-1\r\n";
+            }
+            int byteLen = value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            return "$" + byteLen + "\r\n" + value + "\r\n";
+        } catch (RuntimeException e) {
+             if (e.getMessage() != null && e.getMessage().startsWith("WRONGTYPE")) {
+                return "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+            }
+            throw e;
+        }
     }
     
     private Object handleLRange(int database, String[] args, MemoryStore store) {

@@ -25,6 +25,7 @@ public class HashCommandHandler implements CommandHandler {
         RdsCommandConstant.HKEYS,
         RdsCommandConstant.HVALS,
         RdsCommandConstant.HLEN,
+        RdsCommandConstant.HINCRBY,
         RdsCommandConstant.HSCAN
     );
     
@@ -55,6 +56,8 @@ public class HashCommandHandler implements CommandHandler {
                 return handleHVals(database, args, store);
             case RdsCommandConstant.HLEN:
                 return handleHLen(database, args, store);
+            case RdsCommandConstant.HINCRBY:
+                return handleHIncrBy(database, args, store);
             case RdsCommandConstant.HSCAN:
                 return handleHScan(database, args, store);
             default:
@@ -277,6 +280,36 @@ public class HashCommandHandler implements CommandHandler {
         int len = store.hlen(database, key);
         
         return ":" + len + "\r\n";
+    }
+
+    private Object handleHIncrBy(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'hincrby' command\r\n";
+        }
+        
+        String key = args[1];
+        String field = args[2];
+        long increment;
+        try {
+            increment = Long.parseLong(args[3]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        try {
+            long newValue = store.hincrby(database, key, field, increment);
+            return ":" + newValue + "\r\n";
+        } catch (RuntimeException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.startsWith("OOM command not allowed")) {
+                RuntimeConfig.incErrorRepliesOom();
+                return "-OOM command not allowed when used memory > 'maxmemory'\r\n";
+            }
+            if (msg.startsWith("ERR hash value is not an integer")) {
+                return "-ERR hash value is not an integer\r\n";
+            }
+            throw e;
+        }
     }
     
     private Object handleHScan(int database, String[] args, MemoryStore store) {
