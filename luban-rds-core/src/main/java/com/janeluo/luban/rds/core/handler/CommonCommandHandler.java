@@ -29,6 +29,7 @@ public class CommonCommandHandler implements CommandHandler {
         RdsCommandConstant.SELECT,
         RdsCommandConstant.INFO,
         RdsCommandConstant.SCAN,
+        RdsCommandConstant.PUBLISH,
         RdsCommandConstant.DBSIZE,
         RdsCommandConstant.FLUSHDB,
         RdsCommandConstant.TIME,
@@ -79,6 +80,8 @@ public class CommonCommandHandler implements CommandHandler {
                 return handleInfo(args, store);
             case RdsCommandConstant.SCAN:
                 return handleScan(database, args, store);
+            case RdsCommandConstant.PUBLISH:
+                return handlePublish(args, store);
             case RdsCommandConstant.DBSIZE:
                 return handleDbsize(database, args, store);
             case RdsCommandConstant.FLUSHDB:
@@ -180,13 +183,7 @@ public class CommonCommandHandler implements CommandHandler {
             return "-ERR value is not an integer or out of range\r\n";
         }
         
-        // Convert ms to seconds (rounding up)
-        long seconds = (long) Math.ceil(milliseconds / 1000.0);
-        if (seconds == 0 && milliseconds > 0) {
-            seconds = 1;
-        }
-        
-        boolean success = store.expire(database, key, seconds);
+        boolean success = store.pexpire(database, key, milliseconds);
         return success ? ":1\r\n" : ":0\r\n";
     }
     
@@ -206,10 +203,7 @@ public class CommonCommandHandler implements CommandHandler {
         }
         
         String key = args[1];
-        long ttl = store.ttl(database, key);
-        if (ttl > 0) {
-            ttl = ttl * 1000;
-        }
+        long ttl = store.pttl(database, key);
         return ":" + ttl + "\r\n";
     }
     
@@ -364,6 +358,16 @@ public class CommonCommandHandler implements CommandHandler {
             response.append(RdsResponseConstant.bulkString(key));
         }
         return response.toString();
+    }
+    
+    private Object handlePublish(String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return "-ERR wrong number of arguments for 'publish' command\r\n";
+        }
+        // TODO: Integrate with PubSubManager if possible, but currently PubSubManager is in server module
+        // and LuaCommandHandler/CommonCommandHandler are in core module.
+        // For now, return 0 (no subscribers) to allow Lua scripts to proceed.
+        return ":0\r\n";
     }
     
     private Object handleDbsize(int database, String[] args, MemoryStore store) {

@@ -34,7 +34,7 @@ public class DefaultMemoryStore implements MemoryStore {
     private static class StoreValue {
         private final Object value;
         private final String type;
-        private Long expireTime;
+        private Long expireTime; // Milliseconds
         private long lastAccessTime; // 最后访问时间，用于LRU
         private long estimatedSize; // 估算的内存大小
         
@@ -45,10 +45,15 @@ public class DefaultMemoryStore implements MemoryStore {
             this.estimatedSize = estimateSize(value);
         }
         
-        public StoreValue(Object value, String type, long expireSeconds) {
+        /**
+         * @param value 值
+         * @param type 类型
+         * @param expireTime 过期时间（毫秒），绝对时间戳
+         */
+        public StoreValue(Object value, String type, Long expireTime) {
             this.value = value;
             this.type = type;
-            this.expireTime = RdsUtil.currentSeconds() + expireSeconds;
+            this.expireTime = expireTime;
             this.lastAccessTime = System.currentTimeMillis();
             this.estimatedSize = estimateSize(value);
         }
@@ -58,7 +63,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         public boolean isExpired() {
-            return expireTime != null && RdsUtil.currentSeconds() >= expireTime;
+            return expireTime != null && System.currentTimeMillis() >= expireTime;
         }
         
         public void updateAccessTime() {
@@ -713,7 +718,38 @@ public class DefaultMemoryStore implements MemoryStore {
     public void setWithExpire(int database, String key, Object value, long expireSeconds) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         String type = getType(value);
-        StoreValue newValue = new StoreValue(value, type, expireSeconds);
+        long expireTime = System.currentTimeMillis() + expireSeconds * 1000L;
+        StoreValue newValue = new StoreValue(value, type, expireTime);
+        long requiredSize = newValue.getEstimatedSize();
+        
+        // 检查是否已存在该键，如果存在则先减去旧值的内存
+        StoreValue oldValue = store.storage.getIfPresent(key);
+        if (oldValue != null) {
+            updateMemory(-oldValue.getEstimatedSize());
+        }
+        
+        // 检查内存限制，尝试淘汰
+        if (!tryEvictMemory(requiredSize)) {
+            // 内存不足且无法淘汰，恢复旧值的内存统计
+            if (oldValue != null) {
+                updateMemory(oldValue.getEstimatedSize());
+            }
+            throw new RuntimeException("OOM command not allowed when used memory > 'maxmemory'");
+        }
+        
+        // 写入新值
+        store.storage.put(key, newValue);
+        store.keySet.put(key, Boolean.TRUE);
+        updateMemory(requiredSize);
+        bumpKeyVersion(database, key);
+    }
+    
+    @Override
+    public void setWithExpireMs(int database, String key, Object value, long expireMilliseconds) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        String type = getType(value);
+        long expireTime = System.currentTimeMillis() + expireMilliseconds;
+        StoreValue newValue = new StoreValue(value, type, expireTime);
         long requiredSize = newValue.getEstimatedSize();
         
         // 检查是否已存在该键，如果存在则先减去旧值的内存
@@ -778,14 +814,22 @@ public class DefaultMemoryStore implements MemoryStore {
     
     @Override
     public boolean expire(int database, String key, long seconds) {
+        return pexpire(database, key, seconds * 1000L);
+    }
+    
+    @Override
+    public boolean pexpire(int database, String key, long milliseconds) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.getIfPresent(key);
         if (storeValue == null) {
+            logger.warn("pexpire failed: key={} not found", key);
             return false;
         }
         
         // 更新过期时间
-        StoreValue newStoreValue = new StoreValue(storeValue.value, storeValue.type, seconds);
+        long expireTime = System.currentTimeMillis() + milliseconds;
+        logger.info("pexpire: key={} ms={} expireTime={}", key, milliseconds, expireTime);
+        StoreValue newStoreValue = new StoreValue(storeValue.value, storeValue.type, expireTime);
         store.storage.put(key, newStoreValue);
         bumpKeyVersion(database, key);
         return true;
@@ -812,6 +856,15 @@ public class DefaultMemoryStore implements MemoryStore {
     
     @Override
     public long ttl(int database, String key) {
+        long pttl = pttl(database, key);
+        if (pttl < 0) {
+            return pttl;
+        }
+        return pttl / 1000;
+    }
+    
+    @Override
+    public long pttl(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.getIfPresent(key);
         if (storeValue == null) {
@@ -831,7 +884,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         RuntimeConfig.incKeyspaceHits();
-        long remaining = storeValue.expireTime - RdsUtil.currentSeconds();
+        long remaining = storeValue.expireTime - System.currentTimeMillis();
         return remaining > 0 ? remaining : -2;
     }
     
@@ -888,7 +941,7 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         java.util.List<Object> result = new java.util.ArrayList<>();
         
-        // ��认为0
+        // 默认为0
         if (cursor == 0 && store.keySet.isEmpty()) {
             // 没有键，返回0游标
             result.add(0L);
@@ -1233,15 +1286,23 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.getIfPresent(key);
         
-        if (storeValue == null || storeValue.isExpired()) {
+        if (storeValue == null) {
+            logger.info("hexists: key={} not found", key);
+            return false;
+        }
+        if (storeValue.isExpired()) {
+            logger.info("hexists: key={} expired", key);
             return false;
         }
         
         Object val = storeValue.value;
         if (val instanceof java.util.Map) {
-            return ((java.util.Map<?, ?>) val).containsKey(field);
+            boolean exists = ((java.util.Map<?, ?>) val).containsKey(field);
+            logger.info("hexists: key={} field={} exists={}", key, field, exists);
+            return exists;
         }
         
+        logger.warn("hexists: key={} wrong type", key);
         return false;
     }
 
@@ -1596,8 +1657,7 @@ public class DefaultMemoryStore implements MemoryStore {
             java.util.concurrent.CopyOnWriteArrayList<String> newList = new java.util.concurrent.CopyOnWriteArrayList<>(list);
             StoreValue newValue;
             if (storeValue.hasExpireTime()) {
-                long remaining = Math.max(0, storeValue.getExpireTime() - RdsUtil.currentSeconds());
-                newValue = new StoreValue(newList, RdsDataTypeConstant.LIST, remaining);
+                newValue = new StoreValue(newList, RdsDataTypeConstant.LIST, storeValue.getExpireTime());
             } else {
                 newValue = new StoreValue(newList, RdsDataTypeConstant.LIST);
             }

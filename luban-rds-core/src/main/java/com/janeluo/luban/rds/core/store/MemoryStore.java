@@ -30,14 +30,47 @@ public interface MemoryStore {
      * @param expireSeconds 过期时间（秒）
      */
     void setWithExpire(int database, String key, Object value, long expireSeconds);
+
+    /**
+     * 设置带过期时间的键值对（毫秒）
+     * @param database 数据库索引
+     * @param key 键
+     * @param value 值
+     * @param expireMilliseconds 过期时间（毫秒）
+     */
+    default void setWithExpireMs(int database, String key, Object value, long expireMilliseconds) {
+        setWithExpire(database, key, value, expireMilliseconds / 1000);
+    }
     
     boolean del(int database, String key);
     
     boolean expire(int database, String key, long seconds);
+
+    /**
+     * 设置键的过期时间（毫秒）
+     * @param database 数据库索引
+     * @param key 键
+     * @param milliseconds 过期时间（毫秒）
+     * @return 是否设置成功
+     */
+    default boolean pexpire(int database, String key, long milliseconds) {
+        return expire(database, key, milliseconds / 1000);
+    }
     
     boolean exists(int database, String key);
     
     long ttl(int database, String key);
+
+    /**
+     * 获取键的剩余生存时间（毫秒）
+     * @param database 数据库索引
+     * @param key 键
+     * @return 剩余时间（毫秒），-1表示无过期时间，-2表示键不存在
+     */
+    default long pttl(int database, String key) {
+        long ttl = ttl(database, key);
+        return ttl > 0 ? ttl * 1000 : ttl;
+    }
     
     void flushAll();
     

@@ -556,72 +556,77 @@ public class LuaCommandHandler implements CommandHandler {
      */
     private static LuaValue convertRedisResponseToLuaValue(Object response) {
         if (response == null) {
-            return LuaValue.NIL;
+            return LuaValue.FALSE;
         }
         String str = response.toString();
         if (str.isEmpty()) {
-            return LuaValue.NIL;
+            return LuaValue.FALSE;
         }
         char prefix = str.charAt(0);
         if (prefix == '+') {
             int end = str.indexOf("\r\n");
             if (end <= 1) {
-                return LuaValue.NIL;
+                return LuaValue.FALSE;
             }
             String value = str.substring(1, end);
-            return LuaValue.valueOf(value);
+            LuaTable t = new LuaTable();
+            t.set("ok", LuaValue.valueOf(value));
+            return t;
         } else if (prefix == ':') {
             int end = str.indexOf("\r\n");
             if (end <= 1) {
-                return LuaValue.NIL;
+                return LuaValue.FALSE;
             }
             String numStr = str.substring(1, end);
             try {
                 long v = Long.parseLong(numStr);
                 return LuaValue.valueOf(v);
             } catch (NumberFormatException e) {
-                return LuaValue.NIL;
+                return LuaValue.FALSE;
             }
         } else if (prefix == '$') {
             if (str.startsWith("$-1\r\n")) {
-                return LuaValue.NIL;
+                return LuaValue.FALSE;
             }
             int lenEnd = str.indexOf("\r\n");
             if (lenEnd <= 1) {
-                return LuaValue.NIL;
+                return LuaValue.FALSE;
             }
             String lenStr = str.substring(1, lenEnd);
             try {
                 int length = Integer.parseInt(lenStr);
                 int start = lenEnd + 2;
                 if (length < 0) {
-                    return LuaValue.NIL;
+                    return LuaValue.FALSE;
                 }
                 if (start + length > str.length()) {
                     if (str.length() >= 2) {
                         String value = str.substring(start, str.length() - 2);
                         return LuaValue.valueOf(value);
                     } else {
-                        return LuaValue.NIL;
+                        return LuaValue.FALSE;
                     }
                 } else {
                     String value = str.substring(start, start + length);
                     return LuaValue.valueOf(value);
                 }
             } catch (NumberFormatException e) {
-                return LuaValue.NIL;
+                return LuaValue.FALSE;
             }
         } else if (prefix == '*') {
+            if (str.startsWith("*-1\r\n")) {
+                return LuaValue.FALSE;
+            }
             int lenEnd = str.indexOf("\r\n");
             if (lenEnd <= 1) {
-                return LuaValue.NIL;
+                return LuaValue.FALSE;
             }
             String lenStr = str.substring(1, lenEnd);
             int count;
             try {
                 count = Integer.parseInt(lenStr);
             } catch (NumberFormatException e) {
-                return LuaValue.NIL;
+                return LuaValue.FALSE;
             }
             LuaTable table = new LuaTable();
             int index = lenEnd + 2;
@@ -646,7 +651,7 @@ public class LuaCommandHandler implements CommandHandler {
                         long v = Long.parseLong(numStr);
                         table.set(elementIndex++, LuaValue.valueOf(v));
                     } catch (NumberFormatException e) {
-                        table.set(elementIndex++, LuaValue.NIL);
+                        table.set(elementIndex++, LuaValue.FALSE);
                     }
                     index = end + 2;
                 } else if (c == '$') {
@@ -659,12 +664,12 @@ public class LuaCommandHandler implements CommandHandler {
                     try {
                         l = Integer.parseInt(lStr);
                     } catch (NumberFormatException e) {
-                        table.set(elementIndex++, LuaValue.NIL);
+                        table.set(elementIndex++, LuaValue.FALSE);
                         index = lenPos + 2;
                         continue;
                     }
                     if (l == -1) {
-                        table.set(elementIndex++, LuaValue.NIL);
+                        table.set(elementIndex++, LuaValue.FALSE);
                         index = lenPos + 2;
                     } else {
                         int start = lenPos + 2;
@@ -673,7 +678,7 @@ public class LuaCommandHandler implements CommandHandler {
                                 String value = str.substring(start, str.length() - 2);
                                 table.set(elementIndex++, LuaValue.valueOf(value));
                             } else {
-                                table.set(elementIndex++, LuaValue.NIL);
+                                table.set(elementIndex++, LuaValue.FALSE);
                             }
                             index = str.length();
                         } else {
@@ -702,7 +707,7 @@ public class LuaCommandHandler implements CommandHandler {
             String msg = str.substring(1, end);
             throw new RuntimeException(msg);
         } else {
-            return LuaValue.NIL;
+            return LuaValue.FALSE;
         }
     }
 

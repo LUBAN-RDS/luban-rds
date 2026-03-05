@@ -68,6 +68,7 @@ public class RdsCommandConstant {
     public static final String SELECT = "SELECT";
     public static final String INFO = "INFO";
     public static final String SCAN = "SCAN";
+    public static final String PUBLISH = "PUBLISH";
     
     // 事务命令
     public static final String MULTI = "MULTI";
