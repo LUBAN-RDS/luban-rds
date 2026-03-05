@@ -349,7 +349,7 @@ public class RdbPersistService implements PersistService {
     private boolean readRdbHeader(DataInputStream dis) throws IOException {
         byte[] header = new byte[9];
         dis.readFully(header);
-        String headerStr = new String(header);
+        String headerStr = new String(header, java.nio.charset.StandardCharsets.ISO_8859_1);
         return headerStr.startsWith("REDIS");
     }
     
@@ -440,7 +440,7 @@ public class RdbPersistService implements PersistService {
     }
     
     private void writeString(DataOutputStream dos, String str) throws IOException {
-        byte[] bytes = str.getBytes();
+        byte[] bytes = str.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
         writeLength(dos, bytes.length);
         dos.write(bytes);
     }
@@ -449,7 +449,7 @@ public class RdbPersistService implements PersistService {
         int length = readLength(dis);
         byte[] bytes = new byte[length];
         dis.readFully(bytes);
-        return new String(bytes);
+        return new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1);
     }
     
     private void writeList(DataOutputStream dos, List<?> list) throws IOException {

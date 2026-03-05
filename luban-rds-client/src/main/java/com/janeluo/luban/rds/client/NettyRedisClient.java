@@ -345,8 +345,8 @@ public class NettyRedisClient implements RedisClient {
                 sb.append("$").append(arg.length()).append("\r\n").append(arg).append("\r\n");
             }
             
-            // 发送命令
-            channel.writeAndFlush(io.netty.buffer.Unpooled.copiedBuffer(sb.toString().getBytes())).sync();
+            // 发送命令 - 使用ISO-8859-1编码确保二进制安全
+            channel.writeAndFlush(io.netty.buffer.Unpooled.copiedBuffer(sb.toString().getBytes(java.nio.charset.StandardCharsets.ISO_8859_1))).sync();
             
             // 等待响应
             Object response = responseQueue.poll(5, TimeUnit.SECONDS);

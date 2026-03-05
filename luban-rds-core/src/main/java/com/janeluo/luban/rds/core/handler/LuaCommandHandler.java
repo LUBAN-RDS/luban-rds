@@ -449,7 +449,8 @@ public class LuaCommandHandler implements CommandHandler {
             return ":" + value.toint() + "\r\n";
         } else if (value.isstring()) {
             String str = value.tojstring();
-            return "$" + str.length() + "\r\n" + str + "\r\n";
+            byte[] bytes = str.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
         } else if (value.istable()) {
             LuaTable table = (LuaTable) value;
             int length = table.length();

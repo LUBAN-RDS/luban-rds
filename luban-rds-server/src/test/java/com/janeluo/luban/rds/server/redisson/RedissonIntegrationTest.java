@@ -321,7 +321,6 @@ public class RedissonIntegrationTest extends RedissonTestBase {
     @Test
     @DisplayName("Test Serialization (Default/FST/Marshalling replacement)")
     @Order(12)
-    @Disabled("Luban-RDS is not binary-safe (stores everything as UTF-8 Strings), causing corruption for binary codecs")
     void testDefaultSerialization() {
         // Redisson default is Marshalling or FST depending on version, or Kryo.
         // 4.3.0 might use something else.

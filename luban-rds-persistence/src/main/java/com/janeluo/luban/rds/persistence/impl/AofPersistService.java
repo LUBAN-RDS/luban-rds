@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.concurrent.ExecutorService;
@@ -160,22 +161,23 @@ public class AofPersistService implements PersistService {
         }
         
         try {
-            // 构建AOF格式的命令
+            // 构建AOF格式的命令 - 使用ISO-8859-1编码确保二进制安全
             StringBuilder sb = new StringBuilder();
             sb.append("*")
               .append(args.length)
               .append("\r\n");
             
             for (String arg : args) {
+                byte[] argBytes = arg.getBytes(StandardCharsets.ISO_8859_1);
                 sb.append("$")
-                  .append(arg.getBytes().length)
+                  .append(argBytes.length)
                   .append("\r\n")
                   .append(arg)
                   .append("\r\n");
             }
             
-            // 写入AOF文件
-            aofWriter.write(sb.toString());
+            // 写入AOF文件 - 使用ISO-8859-1编码
+            aofWriter.write(sb.toString(), 0, sb.length());
             
             // 如果fsync间隔为0，立即fsync
             if (fsyncInterval == 0) {
@@ -316,8 +318,9 @@ public class AofPersistService implements PersistService {
           .append("\r\n");
         
         for (String arg : args) {
+            byte[] argBytes = arg.getBytes(StandardCharsets.ISO_8859_1);
             sb.append("$")
-              .append(arg.getBytes().length)
+              .append(argBytes.length)
               .append("\r\n")
               .append(arg)
               .append("\r\n");
@@ -334,8 +337,9 @@ public class AofPersistService implements PersistService {
           .append("\r\n");
         
         for (String arg : args) {
+            byte[] argBytes = arg.getBytes(StandardCharsets.ISO_8859_1);
             sb.append("$")
-              .append(arg.getBytes().length)
+              .append(argBytes.length)
               .append("\r\n")
               .append(arg)
               .append("\r\n");

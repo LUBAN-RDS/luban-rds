@@ -260,7 +260,7 @@ public class RedisProtocolParser {
         ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
         buffer.writeByte('+');
         buffer.writeBytes(bytes);
-        buffer.writeBytes("\r\n".getBytes());
+        buffer.writeBytes(CRLF);
         return buffer;
     }
     
@@ -269,7 +269,7 @@ public class RedisProtocolParser {
         ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
         buffer.writeByte('-');
         buffer.writeBytes(bytes);
-        buffer.writeBytes("\r\n".getBytes());
+        buffer.writeBytes(CRLF);
         return buffer;
     }
     
