@@ -87,8 +87,8 @@ public class SetCommandHandler implements CommandHandler {
         result.append("\r\n");
         
         for (String value : set) {
-            byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            result.append("$").append(bytes.length).append("\r\n").append(value).append("\r\n");
+            byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            result.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
         }
         
         return result.toString();

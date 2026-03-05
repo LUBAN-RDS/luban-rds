@@ -239,7 +239,9 @@ public class CommonCommandHandler implements CommandHandler {
             message.append(args[i]);
         }
         
-        return "$" + message.length() + "\r\n" + message.toString() + "\r\n";
+        String msgStr = message.toString();
+        byte[] bytes = msgStr.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        return "$" + bytes.length + "\r\n" + msgStr + "\r\n";
     }
     
     private Object handleSelect(String[] args, MemoryStore store) {
@@ -292,7 +294,8 @@ public class CommonCommandHandler implements CommandHandler {
         }
         
         String infoStr = info.toString();
-        return "$" + infoStr.length() + "\r\n" + infoStr + "\r\n";
+        byte[] bytes = infoStr.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        return "$" + bytes.length + "\r\n" + infoStr + "\r\n";
     }
     
     private String capitalize(String str) {
@@ -656,7 +659,8 @@ public class CommonCommandHandler implements CommandHandler {
         String key = args[1];
         // 模拟返回key的调试信息
         String debugInfo = "Value at:0x7f9b1c000000 refcount:1 encoding:raw serializedlength:0 lru:0 lru_seconds_idle:0\r\n";
-        return "$" + debugInfo.length() + "\r\n" + debugInfo + "\r\n";
+        byte[] bytes = debugInfo.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        return "$" + bytes.length + "\r\n" + debugInfo + "\r\n";
     }
     
     private Object handleDebugSegfault(String[] args, MemoryStore store) {

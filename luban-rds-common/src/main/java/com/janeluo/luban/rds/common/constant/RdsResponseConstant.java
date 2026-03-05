@@ -102,7 +102,7 @@ public final class RdsResponseConstant {
         if (value == null) {
             return NULL_BULK;
         }
-        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
         return "$" + bytes.length + "\r\n" + value + "\r\n";
     }
     

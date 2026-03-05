@@ -208,9 +208,9 @@ public class StringCommandHandler implements CommandHandler {
         }
         
         String strValue = value.toString();
-        // 使用ISO-8859-1编码计算字节长度
+        // 使用ISO-8859-1编码计算字节长度并确保返回正确的二进制数据
         byte[] bytes = strValue.getBytes(StandardCharsets.ISO_8859_1);
-        return "$" + bytes.length + "\r\n" + strValue + "\r\n";
+        return "$" + bytes.length + "\r\n" + new String(bytes, StandardCharsets.ISO_8859_1) + "\r\n";
     }
     
     private Object handleIncr(int database, String[] args, MemoryStore store) {
@@ -437,7 +437,7 @@ public class StringCommandHandler implements CommandHandler {
             
             String strValue = oldValue.toString();
             byte[] bytes = strValue.getBytes(StandardCharsets.ISO_8859_1);
-            return "$" + bytes.length + "\r\n" + strValue + "\r\n";
+            return "$" + bytes.length + "\r\n" + new String(bytes, StandardCharsets.ISO_8859_1) + "\r\n";
         } catch (RuntimeException e) {
             String msg = e.getMessage() != null ? e.getMessage() : "";
             if (msg.startsWith("OOM command not allowed")) {
@@ -544,7 +544,7 @@ public class StringCommandHandler implements CommandHandler {
         
         String result = value.substring((int)start, (int)end + 1);
         byte[] bytes = result.getBytes(StandardCharsets.ISO_8859_1);
-        return "$" + bytes.length + "\r\n" + result + "\r\n";
+        return "$" + bytes.length + "\r\n" + new String(bytes, StandardCharsets.ISO_8859_1) + "\r\n";
     }
 
     private Object handleMGet(int database, String[] args, MemoryStore store) {
@@ -566,7 +566,7 @@ public class StringCommandHandler implements CommandHandler {
             } else {
                 String str = (String) val;
                 byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
-                sb.append("$").append(bytes.length).append("\r\n").append(str).append("\r\n");
+                sb.append("$").append(bytes.length).append("\r\n").append(new String(bytes, StandardCharsets.ISO_8859_1)).append("\r\n");
             }
         }
         return sb.toString();

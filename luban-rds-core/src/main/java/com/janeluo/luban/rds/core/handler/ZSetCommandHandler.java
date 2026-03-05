@@ -147,8 +147,8 @@ public class ZSetCommandHandler implements CommandHandler {
         result.append("\r\n");
         
         for (String member : resultList) {
-            byte[] bytes = member.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            result.append("$").append(bytes.length).append("\r\n").append(member).append("\r\n");
+            byte[] bytes = member.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            result.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
         }
         
         return result.toString();
@@ -170,8 +170,8 @@ public class ZSetCommandHandler implements CommandHandler {
         }
         
         String scoreStr = score.toString();
-        byte[] bytes = scoreStr.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        return "$" + bytes.length + "\r\n" + scoreStr + "\r\n";
+        byte[] bytes = scoreStr.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
     }
     
     private Object handleZRem(int database, String[] args, MemoryStore store) {

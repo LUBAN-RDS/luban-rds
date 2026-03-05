@@ -147,9 +147,9 @@ public class HashCommandHandler implements CommandHandler {
             return "$-1\r\n";
         }
         
-        // 使用 ISO-8859-1 字节长度
-        int byteLength = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1).length;
-        return "$" + byteLength + "\r\n" + value + "\r\n";
+        // 使用 ISO-8859-1 字节长度并确保返回正确的二进制数据
+        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
     }
 
     private Object handleHMGet(int database, String[] args, MemoryStore store) {
@@ -169,8 +169,8 @@ public class HashCommandHandler implements CommandHandler {
             if (val == null) {
                 sb.append("$-1\r\n");
             } else {
-                int bytes = val.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1).length;
-                sb.append("$").append(bytes).append("\r\n").append(val).append("\r\n");
+                byte[] bytes = val.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                sb.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
             }
         }
         return sb.toString();
@@ -241,8 +241,8 @@ public class HashCommandHandler implements CommandHandler {
         result.append("\r\n");
         
         for (String field : hash.keySet()) {
-            int byteLen = field.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1).length;
-            result.append("$").append(byteLen).append("\r\n").append(field).append("\r\n");
+            byte[] bytes = field.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            result.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
         }
         
         return result.toString();
@@ -263,8 +263,8 @@ public class HashCommandHandler implements CommandHandler {
         result.append("\r\n");
         
         for (String value : hash.values()) {
-            int byteLen = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1).length;
-            result.append("$").append(byteLen).append("\r\n").append(value).append("\r\n");
+            byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            result.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
         }
         
         return result.toString();

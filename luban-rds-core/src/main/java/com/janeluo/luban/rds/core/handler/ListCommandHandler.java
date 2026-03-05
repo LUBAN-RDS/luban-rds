@@ -104,8 +104,8 @@ public class ListCommandHandler implements CommandHandler {
             return "$-1\r\n";
         }
         
-        int byteLen = value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-        return "$" + byteLen + "\r\n" + value + "\r\n";
+        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
     }
     
     private Object handleRPop(int database, String[] args, MemoryStore store) {
@@ -121,8 +121,8 @@ public class ListCommandHandler implements CommandHandler {
             return "$-1\r\n";
         }
         
-        int byteLen = value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-        return "$" + byteLen + "\r\n" + value + "\r\n";
+        byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
     }
     
     private Object handleLLen(int database, String[] args, MemoryStore store) {
@@ -211,8 +211,8 @@ public class ListCommandHandler implements CommandHandler {
         result.append("\r\n");
         
         for (String value : subList) {
-            int byteLen = value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
-            result.append("$").append(byteLen).append("\r\n").append(value).append("\r\n");
+            byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            result.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
         }
         
         return result.toString();
