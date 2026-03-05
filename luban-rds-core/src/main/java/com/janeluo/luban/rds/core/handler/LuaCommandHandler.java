@@ -8,6 +8,10 @@ import org.luaj.vm2.*;
 import org.luaj.vm2.lib.OneArgFunction;
 import org.luaj.vm2.lib.VarArgFunction;
 import org.luaj.vm2.lib.jse.JsePlatform;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.UnsupportedEncodingException;
 import java.security.MessageDigest;
@@ -303,6 +307,20 @@ public class LuaCommandHandler implements CommandHandler {
 
                 // 加载 struct 库以支持 Redisson 等客户端
                 globals.load(new StructLib());
+                
+                // 注册 cjson 库
+                LuaTable cjsonTable = new LuaTable();
+                cjsonTable.set("encode", new CJsonEncodeFunction());
+                cjsonTable.set("decode", new CJsonDecodeFunction());
+                // 创建一个特殊的null值，用于标识JSON null
+                LuaValue nullValue = new LuaUserdata(null) {
+                    @Override
+                    public boolean isnil() {
+                        return true;
+                    }
+                };
+                cjsonTable.set("null", nullValue);
+                globals.set("cjson", cjsonTable);
 
                 // Polyfill for table.getn (Lua 5.1 compatibility)
                 LuaValue tableLib = globals.get("table");
@@ -767,6 +785,127 @@ public class LuaCommandHandler implements CommandHandler {
         @Override
         public LuaValue call(LuaValue arg) {
             return new StatusReplyValue(arg.tojstring());
+        }
+    }
+    
+    /**
+     * cjson.encode 函数实现。
+     * 将 Lua 值转换为 JSON 字符串。
+     */
+    private static class CJsonEncodeFunction extends OneArgFunction {
+        private static final ObjectMapper objectMapper = new ObjectMapper().setSerializationInclusion(com.fasterxml.jackson.annotation.JsonInclude.Include.ALWAYS);
+        
+        @Override
+        public LuaValue call(LuaValue arg) {
+            try {
+                Object javaObj = convertLuaValueToJava(arg);
+                String json = objectMapper.writeValueAsString(javaObj);
+                return LuaValue.valueOf(json);
+            } catch (Exception e) {
+                throw new RuntimeException("cjson.encode error: " + e.getMessage());
+            }
+        }
+        
+        private Object convertLuaValueToJava(LuaValue value) {
+            if (value.isnil()) {
+                return null;
+            } else if (value.isboolean()) {
+                return value.toboolean();
+            } else if (value.isnumber()) {
+                return value.tojstring();
+            } else if (value.isstring()) {
+                return value.tojstring();
+            } else if (value.istable()) {
+                LuaTable table = (LuaTable) value;
+                // 检查是否为数组
+                boolean isArray = true;
+                int length = 0;
+                for (int i = 1; ; i++) {
+                    if (table.get(i).isnil()) {
+                        length = i - 1;
+                        break;
+                    }
+                }
+                // 检查是否有非数字键
+                LuaValue key = LuaValue.NIL;
+                while (true) {
+                    Varargs next = table.next(key);
+                    if (next.isnil(1)) break;
+                    key = next.arg1();
+                    if (!key.isnumber()) {
+                        isArray = false;
+                        break;
+                    }
+                }
+                if (isArray && length > 0) {
+                    java.util.List<Object> list = new java.util.ArrayList<>();
+                    for (int i = 1; i <= length; i++) {
+                        list.add(convertLuaValueToJava(table.get(i)));
+                    }
+                    return list;
+                } else {
+                    java.util.Map<String, Object> map = new java.util.HashMap<>();
+                    key = LuaValue.NIL;
+                    while (true) {
+                        Varargs next = table.next(key);
+                        if (next.isnil(1)) break;
+                        key = next.arg(1);
+                        LuaValue val = next.arg(2);
+                        map.put(key.tojstring(), convertLuaValueToJava(val));
+                    }
+                    return map;
+                }
+            } else {
+                return value.tojstring();
+            }
+        }
+    }
+    
+    /**
+     * cjson.decode 函数实现。
+     * 将 JSON 字符串转换为 Lua 值。
+     */
+    private static class CJsonDecodeFunction extends OneArgFunction {
+        private static final ObjectMapper objectMapper = new ObjectMapper();
+        
+        @Override
+        public LuaValue call(LuaValue arg) {
+            try {
+                String json = arg.tojstring();
+                JsonNode node = objectMapper.readTree(json);
+                return convertJsonNodeToLua(node);
+            } catch (Exception e) {
+                throw new RuntimeException("cjson.decode error: " + e.getMessage());
+            }
+        }
+        
+        private LuaValue convertJsonNodeToLua(JsonNode node) {
+            if (node == null || node.isNull()) {
+                return LuaValue.NIL;
+            } else if (node.isBoolean()) {
+                return LuaValue.valueOf(node.asBoolean());
+            } else if (node.isNumber()) {
+                return LuaValue.valueOf(node.asText());
+            } else if (node.isTextual()) {
+                return LuaValue.valueOf(node.asText());
+            } else if (node.isArray()) {
+                ArrayNode arrayNode = (ArrayNode) node;
+                LuaTable table = new LuaTable();
+                for (int i = 0; i < arrayNode.size(); i++) {
+                    table.set(i + 1, convertJsonNodeToLua(arrayNode.get(i)));
+                }
+                return table;
+            } else if (node.isObject()) {
+                ObjectNode objectNode = (ObjectNode) node;
+                LuaTable table = new LuaTable();
+                for (java.util.Iterator<String> it = objectNode.fieldNames(); it.hasNext(); ) {
+                    String key = it.next();
+                    table.set(key, convertJsonNodeToLua(objectNode.get(key)));
+                }
+                return table;
+            } else {
+                return LuaValue.NIL;
+            }
         }
     }
 }

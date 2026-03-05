@@ -351,7 +351,7 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         String sessionId = "test-session-1";
         String key1 = "testSession";
         String key2 = "testSession:attrs";
-        long timeout = 3600000; // 1 hour in milliseconds
+        String timeoutJson = "[0, 3600000]";
         String startTimestamp = String.valueOf(System.currentTimeMillis());
         String host = "test-host";
 
@@ -359,14 +359,15 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         RScript script = redisson.getScript();
         try {
             Object initResult = script.eval(RScript.Mode.READ_WRITE, 
-                "function initSession(key1, sessionId, timeout, startTimestamp, host) " +
-                "    redis.call('HMSET', key1, 'id', sessionId, 'timeout', timeout, 'startTimestamp', startTimestamp, 'lastAccessTime', startTimestamp, 'host', host) " +
+                "function initSession(key1, sessionId, timeoutJson, startTimestamp, host) " +
+                "    redis.call('HMSET', key1, 'id', sessionId, 'timeout', timeoutJson, 'startTimestamp', startTimestamp, 'lastAccessTime', startTimestamp, 'host', host) " +
+                "    local timeout = cjson.decode(timeoutJson)[2] " +
                 "    redis.call('PEXPIRE', key1, timeout) " +
                 "end " +
                 "return initSession(KEYS[1], ARGV[1], ARGV[2], ARGV[3], ARGV[4])", 
                 RScript.ReturnType.VALUE, 
                 Arrays.asList(key1), 
-                sessionId, String.valueOf(timeout), startTimestamp, host);
+                sessionId, timeoutJson, startTimestamp, host);
             System.out.println("initResult: " + initResult);
         } catch (Exception e) {
             System.out.println("Error executing initSession: " + e.getMessage());
@@ -394,10 +395,11 @@ public class RedissonIntegrationTest extends RedissonTestBase {
                 "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
                 "        return redis.error_reply('-2') " +
                 "    end " +
-                "    local timeout = redis.call('HGET', key1, 'timeout') " +
-                "    if timeout == nil then " +
+                "    local timeoutEncoded = redis.call('HGET', key1, 'timeout') " +
+                "    if timeoutEncoded == nil then " +
                 "        return redis.error_reply('-3') " +
                 "    end " +
+                "    local timeout = cjson.decode(timeoutEncoded)[2] " +
                 "    redis.call('HSET', key1, 'lastAccessTime', lastAccessTime) " +
                 "    redis.call('PEXPIRE', key1, timeout) " +
                 "    redis.call('PEXPIRE', key2, timeout) " +
@@ -508,10 +510,10 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         }
 
         // Test 7: setSessionTimeout - 修改会话超时时间
-        long newTimeout = 7200000; // 2 hours in milliseconds
+        String newTimeoutJson = "[0, 7200000]";
         try {
             Object setTimeoutResult = script.eval(RScript.Mode.READ_WRITE, 
-                "function setSessionTimeout(key1, key2, newTimeout) " +
+                "function setSessionTimeout(key1, key2, newTimeoutJson) " +
                 "    if redis.call('PTTL', key1) <= 0 then " +
                 "        return redis.error_reply('-1') " +
                 "    end " +
@@ -522,14 +524,15 @@ public class RedissonIntegrationTest extends RedissonTestBase {
                 "    if timeout == nil then " +
                 "        return redis.error_reply('-3') " +
                 "    end " +
-                "    redis.call('HSET', key1, 'timeout', newTimeout) " +
+                "    redis.call('HSET', key1, 'timeout', newTimeoutJson) " +
+                "    local newTimeout = cjson.decode(newTimeoutJson)[2] " +
                 "    redis.call('PEXPIRE', key1, newTimeout) " +
                 "    redis.call('PEXPIRE', key2, newTimeout) " +
                 "end " +
                 "return setSessionTimeout(KEYS[1], KEYS[2], ARGV[1])", 
                 RScript.ReturnType.VALUE, 
                 Arrays.asList(key1, key2), 
-                String.valueOf(newTimeout));
+                newTimeoutJson);
             System.out.println("setTimeoutResult: " + setTimeoutResult);
         } catch (Exception e) {
             System.out.println("Error executing setSessionTimeout: " + e.getMessage());
