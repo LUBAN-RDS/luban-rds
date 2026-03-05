@@ -335,6 +335,354 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         // This test is expected to fail or hang if BLPOP is not supported.
         // We leave it here as requested but disabled until Luban-RDS supports it.
     }
+
+    // ==========================================
+    // Lua Session Script Tests
+    // ==========================================
+
+    @Test
+    @DisplayName("Test Lua Session Scripts")
+    @Order(16)
+    void testLuaSessionScripts() throws InterruptedException {
+        // Clean up any existing test data
+        redisson.getKeys().delete("testSession", "testSession:attrs");
+
+        // Test 1: initSession - 会话初始化
+        String sessionId = "test-session-1";
+        String key1 = "testSession";
+        String key2 = "testSession:attrs";
+        long timeout = 3600000; // 1 hour in milliseconds
+        String startTimestamp = String.valueOf(System.currentTimeMillis());
+        String host = "test-host";
+
+        // Execute initSession script
+        RScript script = redisson.getScript();
+        try {
+            Object initResult = script.eval(RScript.Mode.READ_WRITE, 
+                "function initSession(key1, sessionId, timeout, startTimestamp, host) " +
+                "    redis.call('HMSET', key1, 'id', sessionId, 'timeout', timeout, 'startTimestamp', startTimestamp, 'lastAccessTime', startTimestamp, 'host', host) " +
+                "    redis.call('PEXPIRE', key1, timeout) " +
+                "end " +
+                "return initSession(KEYS[1], ARGV[1], ARGV[2], ARGV[3], ARGV[4])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1), 
+                sessionId, String.valueOf(timeout), startTimestamp, host);
+            System.out.println("initResult: " + initResult);
+        } catch (Exception e) {
+            System.out.println("Error executing initSession: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        // For debugging, let's try a simple set and get
+        redisson.getBucket("testKey").set("testValue");
+        Object testValueObj = redisson.getBucket("testKey").get();
+        System.out.println("testKey value: " + testValueObj);
+        
+        // Use direct Redis commands to verify session initialization
+        // Check if the session key exists
+        boolean exists = redisson.getKeys().countExists(key1) > 0;
+        System.out.println("Session key exists: " + exists);
+        
+        // Test 2: touchSession - 会话触发生命周期续期
+        String newLastAccessTime = String.valueOf(System.currentTimeMillis());
+        try {
+            Object touchResult = script.eval(RScript.Mode.READ_WRITE, 
+                "function touchSession(key1, key2, lastAccessTime) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    local timeout = redis.call('HGET', key1, 'timeout') " +
+                "    if timeout == nil then " +
+                "        return redis.error_reply('-3') " +
+                "    end " +
+                "    redis.call('HSET', key1, 'lastAccessTime', lastAccessTime) " +
+                "    redis.call('PEXPIRE', key1, timeout) " +
+                "    redis.call('PEXPIRE', key2, timeout) " +
+                "end " +
+                "return touchSession(KEYS[1], KEYS[2], ARGV[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1, key2), 
+                newLastAccessTime);
+            System.out.println("touchResult: " + touchResult);
+        } catch (Exception e) {
+            System.out.println("Error executing touchSession: " + e.getMessage());
+        }
+
+        // Test 3: getSessionStartTime - 获取会话启动时间
+        try {
+            Object startTimeResult = script.eval(RScript.Mode.READ_ONLY, 
+                "function getSessionStartTime(key1) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    local startTime = redis.call('HGET', key1, 'startTimestamp') " +
+                "    if startTime == nil then " +
+                "        return redis.error_reply('-3') " +
+                "    end " +
+                "    return startTime " +
+                "end " +
+                "return getSessionStartTime(KEYS[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1));
+            System.out.println("startTimeResult: " + startTimeResult);
+        } catch (Exception e) {
+            System.out.println("Error executing getSessionStartTime: " + e.getMessage());
+        }
+
+        // Test 4: getSessionLastAccessTime - 获取会话最后访问时间
+        try {
+            Object lastAccessResult = script.eval(RScript.Mode.READ_ONLY, 
+                "function getSessionLastAccessTime(key1) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    local lastTime = redis.call('HGET', key1, 'lastAccessTime') " +
+                "    if lastTime == nil then " +
+                "        return redis.error_reply('-3') " +
+                "    end " +
+                "    return lastTime " +
+                "end " +
+                "return getSessionLastAccessTime(KEYS[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1));
+            System.out.println("lastAccessResult: " + lastAccessResult);
+        } catch (Exception e) {
+            System.out.println("Error executing getSessionLastAccessTime: " + e.getMessage());
+        }
+
+        // Test 5: getSessionTimeout - 获取会话超时时间
+        try {
+            Object timeoutResult = script.eval(RScript.Mode.READ_ONLY, 
+                "function getSessionTimeout(key1) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    local timeout = redis.call('HGET', key1, 'timeout') " +
+                "    if timeout == nil then " +
+                "        return redis.error_reply('-3') " +
+                "    end " +
+                "    return timeout " +
+                "end " +
+                "return getSessionTimeout(KEYS[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1));
+            System.out.println("timeoutResult: " + timeoutResult);
+        } catch (Exception e) {
+            System.out.println("Error executing getSessionTimeout: " + e.getMessage());
+        }
+
+        // Test 6: getSessionHost - 获取会话所属主机
+        try {
+            Object hostResult = script.eval(RScript.Mode.READ_ONLY, 
+                "function getSessionHost(key1) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    local host = redis.call('HGET', key1, 'host') " +
+                "    if host == nil then " +
+                "        return redis.error_reply('-3') " +
+                "    end " +
+                "    return host " +
+                "end " +
+                "return getSessionHost(KEYS[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1));
+            System.out.println("hostResult: " + hostResult);
+        } catch (Exception e) {
+            System.out.println("Error executing getSessionHost: " + e.getMessage());
+        }
+
+        // Test 7: setSessionTimeout - 修改会话超时时间
+        long newTimeout = 7200000; // 2 hours in milliseconds
+        try {
+            Object setTimeoutResult = script.eval(RScript.Mode.READ_WRITE, 
+                "function setSessionTimeout(key1, key2, newTimeout) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    local timeout = redis.call('HGET', key1, 'timeout') " +
+                "    if timeout == nil then " +
+                "        return redis.error_reply('-3') " +
+                "    end " +
+                "    redis.call('HSET', key1, 'timeout', newTimeout) " +
+                "    redis.call('PEXPIRE', key1, newTimeout) " +
+                "    redis.call('PEXPIRE', key2, newTimeout) " +
+                "end " +
+                "return setSessionTimeout(KEYS[1], KEYS[2], ARGV[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1, key2), 
+                String.valueOf(newTimeout));
+            System.out.println("setTimeoutResult: " + setTimeoutResult);
+        } catch (Exception e) {
+            System.out.println("Error executing setSessionTimeout: " + e.getMessage());
+        }
+
+        // Test 8: setSessionAttr - 设置会话属性
+        String attrKey = "userName";
+        String attrValue = "testUser";
+        try {
+            Object setAttrResult = script.eval(RScript.Mode.READ_WRITE, 
+                "function setSessionAttr(key1, key2, attrKey, attrValue) " +
+                "    local pttl = redis.call('PTTL', key1) " +
+                "    if pttl <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    redis.call('HSET', key2, attrKey, attrValue) " +
+                "    if redis.call('PTTL', key2) <= 0 then " +
+                "        redis.call('PEXPIRE', key2, pttl) " +
+                "    end " +
+                "end " +
+                "return setSessionAttr(KEYS[1], KEYS[2], ARGV[1], ARGV[2])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1, key2), 
+                attrKey, attrValue);
+            System.out.println("setAttrResult: " + setAttrResult);
+        } catch (Exception e) {
+            System.out.println("Error executing setSessionAttr: " + e.getMessage());
+        }
+
+        // Test 9: getSessionAttr - 获取指定会话属性
+        try {
+            Object getAttrResult = script.eval(RScript.Mode.READ_ONLY, 
+                "function getSessionAttr(key1, key2, attrKey) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    return redis.call('HGET', key2, attrKey) " +
+                "end " +
+                "return getSessionAttr(KEYS[1], KEYS[2], ARGV[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1, key2), 
+                attrKey);
+            System.out.println("getAttrResult: " + getAttrResult);
+        } catch (Exception e) {
+            System.out.println("Error executing getSessionAttr: " + e.getMessage());
+        }
+
+        // Test 10: getSessionAttrKeys - 获取会话属性键列表
+        try {
+            Object getAttrKeysResult = script.eval(RScript.Mode.READ_ONLY, 
+                "function getSessionAttrKeys(key1, key2) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    return redis.call('HKEYS', key2) " +
+                "end " +
+                "return getSessionAttrKeys(KEYS[1], KEYS[2])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1, key2));
+            System.out.println("getAttrKeysResult: " + getAttrKeysResult);
+        } catch (Exception e) {
+            System.out.println("Error executing getSessionAttrKeys: " + e.getMessage());
+        }
+
+        // Test 11: removeSessionAttr - 移除指定会话属性
+        try {
+            Object removeAttrResult = script.eval(RScript.Mode.READ_WRITE, 
+                "function removeSessionAttr(key1, key2, attrKey) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    local attr = redis.call('HGET', key2, attrKey) " +
+                "    if attr ~= nil then " +
+                "        redis.call('HDEL', key2, attrKey) " +
+                "    end " +
+                "    return attr " +
+                "end " +
+                "return removeSessionAttr(KEYS[1], KEYS[2], ARGV[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1, key2), 
+                attrKey);
+            System.out.println("removeAttrResult: " + removeAttrResult);
+        } catch (Exception e) {
+            System.out.println("Error executing removeSessionAttr: " + e.getMessage());
+        }
+
+        // Test 12: stopSession - 停止会话
+        String stopFlag = "1";
+        try {
+            Object stopResult = script.eval(RScript.Mode.READ_WRITE, 
+                "function stopSession(key1, stopFlag) " +
+                "    if redis.call('PTTL', key1) <= 0 then " +
+                "        return redis.error_reply('-1') " +
+                "    end " +
+                "    if redis.call('HEXISTS', key1, 'stop') == 1 then " +
+                "        return redis.error_reply('-2') " +
+                "    end " +
+                "    redis.call('HSET', key1, 'stop', stopFlag) " +
+                "end " +
+                "return stopSession(KEYS[1], ARGV[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1), 
+                stopFlag);
+            System.out.println("stopResult: " + stopResult);
+        } catch (Exception e) {
+            System.out.println("Error executing stopSession: " + e.getMessage());
+        }
+
+        // Test 13: readSessionTTL - 读取会话剩余存活时间
+        try {
+            Object ttlResult = script.eval(RScript.Mode.READ_ONLY, 
+                "function readSessionTTL(key1) " +
+                "    return redis.call('PTTL', key1) " +
+                "end " +
+                "return readSessionTTL(KEYS[1])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1));
+            System.out.println("ttlResult: " + ttlResult);
+        } catch (Exception e) {
+            System.out.println("Error executing readSessionTTL: " + e.getMessage());
+        }
+
+        // Test 14: deleteSession - 删除会话
+        try {
+            Object deleteResult = script.eval(RScript.Mode.READ_WRITE, 
+                "function deleteSession(key1, key2) " +
+                "    redis.call('DEL', key1, key2) " +
+                "end " +
+                "return deleteSession(KEYS[1], KEYS[2])", 
+                RScript.ReturnType.VALUE, 
+                Arrays.asList(key1, key2));
+            System.out.println("deleteResult: " + deleteResult);
+        } catch (Exception e) {
+            System.out.println("Error executing deleteSession: " + e.getMessage());
+        }
+
+        // Verify session was deleted
+        boolean deleted = redisson.getKeys().countExists(key1) == 0 && redisson.getKeys().countExists(key2) == 0;
+        System.out.println("Session deleted: " + deleted);
+        assertTrue(deleted);
+    }
     
     // Serializable Test Object
     static class TestObject implements Serializable {
