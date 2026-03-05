@@ -1778,6 +1778,31 @@ public class DefaultMemoryStore implements MemoryStore {
             return result;
         }
         
+        java.util.List<String> rangeByScore(double min, double max, int offset, int count) {
+            java.util.NavigableMap<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> subMap = 
+                    scoreMembers.subMap(min, true, max, true);
+            
+            java.util.List<String> result = new java.util.ArrayList<>();
+            int skipped = 0;
+            
+            for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : subMap.entrySet()) {
+                for (String member : entry.getValue()) {
+                    if (skipped < offset) {
+                        skipped++;
+                        continue;
+                    }
+                    if (count >= 0 && result.size() >= count) {
+                        return result;
+                    }
+                    result.add(member);
+                }
+                if (count >= 0 && result.size() >= count) {
+                    break;
+                }
+            }
+            return result;
+        }
+        
         int size() {
             return memberScores.size();
         }
@@ -1905,6 +1930,26 @@ public class DefaultMemoryStore implements MemoryStore {
         
         RuntimeConfig.incKeyspaceHits();
         return 0;
+    }
+    
+    @Override
+    public java.util.List<String> zrangeByScore(int database, String key, double min, double max, int offset, int count) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            RuntimeConfig.incKeyspaceMisses();
+            return java.util.Collections.emptyList();
+        }
+        
+        Object val = storeValue.value;
+        if (val instanceof ZSetStore) {
+            RuntimeConfig.incKeyspaceHits();
+            return ((ZSetStore) val).rangeByScore(min, max, offset, count);
+        }
+        
+        RuntimeConfig.incKeyspaceHits();
+        return java.util.Collections.emptyList();
     }
 
     @Override

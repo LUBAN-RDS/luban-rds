@@ -321,6 +321,19 @@ public interface MemoryStore {
      * @return 成员数量
      */
     int zcard(int database, String key);
+    
+    /**
+     * 按分数范围获取成员
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param min 最小分数
+     * @param max 最大分数
+     * @param offset 偏移量
+     * @param count 数量
+     * @return 成员列表
+     */
+    java.util.List<String> zrangeByScore(int database, String key, double min, double max, int offset, int count);
+
     /**
      * 获取指定键占用的内存大小（字节）
      * @param database 数据库索引

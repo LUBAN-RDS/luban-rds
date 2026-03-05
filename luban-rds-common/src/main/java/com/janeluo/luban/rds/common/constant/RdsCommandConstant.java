@@ -3,6 +3,7 @@ package com.janeluo.luban.rds.common.constant;
 public class RdsCommandConstant {
     // 字符串命令
     public static final String SET = "SET";
+    public static final String SETNX = "SETNX";
     public static final String GET = "GET";
     public static final String INCR = "INCR";
     public static final String DECR = "DECR";
@@ -45,6 +46,7 @@ public class RdsCommandConstant {
     // 有序集合命令
     public static final String ZADD = "ZADD";
     public static final String ZRANGE = "ZRANGE";
+    public static final String ZRANGEBYSCORE = "ZRANGEBYSCORE";
     public static final String ZSCORE = "ZSCORE";
     public static final String ZREM = "ZREM";
     public static final String ZCARD = "ZCARD";

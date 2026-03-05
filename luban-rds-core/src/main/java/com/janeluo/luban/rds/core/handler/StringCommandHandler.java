@@ -13,6 +13,7 @@ public class StringCommandHandler implements CommandHandler {
     
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.SET,
+        RdsCommandConstant.SETNX,
         RdsCommandConstant.GET,
         RdsCommandConstant.INCR,
         RdsCommandConstant.DECR,
@@ -31,6 +32,8 @@ public class StringCommandHandler implements CommandHandler {
         switch (command) {
             case RdsCommandConstant.SET:
                 return handleSet(database, args, store);
+            case RdsCommandConstant.SETNX:
+                return handleSetNx(database, args, store);
             case RdsCommandConstant.GET:
                 return handleGet(database, args, store);
             case RdsCommandConstant.INCR:
@@ -74,6 +77,30 @@ public class StringCommandHandler implements CommandHandler {
         }
     }
     
+    private Object handleSetNx(int database, String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return RdsResponseConstant.wrongArgsError("setnx");
+        }
+        
+        String key = args[1];
+        String value = args[2];
+        Object existing = store.get(database, key);
+        if (existing == null) {
+            try {
+                store.set(database, key, value);
+                return RdsResponseConstant.ONE;
+            } catch (RuntimeException e) {
+                String msg = e.getMessage() != null ? e.getMessage() : "";
+                if (msg.startsWith("OOM command not allowed")) {
+                    RuntimeConfig.incErrorRepliesOom();
+                    return "-OOM command not allowed when used memory > 'maxmemory'\r\n";
+                }
+                throw e;
+            }
+        }
+        return RdsResponseConstant.ZERO;
+    }
+
     private Object handleGet(int database, String[] args, MemoryStore store) {
         if (args.length < 2) {
             return RdsResponseConstant.wrongArgsError("get");

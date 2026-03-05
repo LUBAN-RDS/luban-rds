@@ -300,6 +300,26 @@ public class LuaCommandHandler implements CommandHandler {
                 } else {
                     // 沙箱模式禁用时，不执行任何模块禁用逻辑，所有模块都可用
                 }
+
+                // 加载 struct 库以支持 Redisson 等客户端
+                globals.load(new StructLib());
+
+                // Polyfill for table.getn (Lua 5.1 compatibility)
+                LuaValue tableLib = globals.get("table");
+                if (tableLib.get("getn").isnil()) {
+                    tableLib.set("getn", new OneArgFunction() {
+                        @Override
+                        public LuaValue call(LuaValue arg) {
+                             return arg.len();
+                        }
+                    });
+                }
+                
+                // Polyfill for unpack (Lua 5.1 compatibility, LuaJ 5.2 uses table.unpack)
+                if (globals.get("unpack").isnil()) {
+                    globals.set("unpack", tableLib.get("unpack"));
+                }
+
                 LuaTable keysTable = new LuaTable();
                 for (int i = 0; i < keys.length; i++) {
                     keysTable.set(i + 1, LuaValue.valueOf(keys[i]));
