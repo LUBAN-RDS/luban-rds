@@ -247,6 +247,7 @@ public class RedisProtocolParser {
         }
         
         if (response instanceof byte[]) {
+            // 直接返回byte[]作为bulk string
             return serializeBulkString((byte[]) response);
         }
         

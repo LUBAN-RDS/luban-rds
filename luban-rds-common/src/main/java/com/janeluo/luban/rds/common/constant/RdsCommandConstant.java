@@ -13,6 +13,9 @@ public class RdsCommandConstant {
     public static final String STRLEN = "STRLEN";
     public static final String MSET = "MSET";
     public static final String MGET = "MGET";
+    public static final String GETSET = "GETSET";
+    public static final String SETRANGE = "SETRANGE";
+    public static final String GETRANGE = "GETRANGE";
     
     // 哈希命令
     public static final String HSET = "HSET";

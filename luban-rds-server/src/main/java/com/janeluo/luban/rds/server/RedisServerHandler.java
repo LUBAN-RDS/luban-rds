@@ -36,7 +36,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 "ZADD","ZRANGE","ZSCORE","ZREM","ZCARD",
                 "EXISTS","DEL","EXPIRE","TTL","FLUSHALL","TYPE","PING","ECHO","SELECT","INFO","SCAN","DBSIZE","TIME",
                 "AUTH",
-                "SUBSCRIBE","UNSUBSCRIBE","PUBLISH","PSUBSCRIBE","PUNSUBSCRIBE",
+                "SUBSCRIBE","UNSUBSCRIBE","PUBLISH","PSUBSCRIBE","PUNSUBSCRIBE","SSUBSCRIBE","SUNSUBSCRIBE",
                 "EVAL","EVALSHA","SCRIPT","SCRIPT LOAD","SCRIPT EXISTS","SCRIPT FLUSH","SCRIPT KILL",
                 "MULTI","EXEC","DISCARD","WATCH","UNWATCH","QUIT",
                 "MEMORY", "MONITOR",
@@ -65,7 +65,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 "HSET","HGET","HMSET","HMGET","HGETALL","HKEYS","HVALS","HLEN","HEXISTS","HDEL","HINCRBY",
                 "ZADD","ZREM","ZSCORE","ZRANK","ZREVRANK","ZRANGE","ZREVRANGE","ZRANGEBYSCORE","ZCARD","ZCOUNT","ZINCRBY",
                 "EXPIRE","PEXPIRE","TTL","PTTL","PERSIST","TYPE","KEYS","DEL","EXISTS","DBSIZE","FLUSHDB","FLUSHALL",
-                "SUBSCRIBE","UNSUBSCRIBE","PUBLISH","PSUBSCRIBE","PUNSUBSCRIBE",
+                "SUBSCRIBE","UNSUBSCRIBE","PUBLISH","PSUBSCRIBE","PUNSUBSCRIBE","SSUBSCRIBE","SUNSUBSCRIBE",
                 "EVAL","EVALSHA","SCRIPT","SCRIPT LOAD","SCRIPT EXISTS","SCRIPT FLUSH","SCRIPT KILL",
                 "MULTI","EXEC","DISCARD","WATCH","UNWATCH","QUIT",
                 "INFO", "MONITOR",
@@ -112,6 +112,21 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 }
             }
         }
+        
+        // Stream subscribers
+        java.util.List<Channel> streamSnapshot = new java.util.ArrayList<>(PUB_SUB_MANAGER.getStreamSubscribers(channel));
+        for (Channel ch : streamSnapshot) {
+            ByteBuf resp = SHARED_PROTOCOL_PARSER.serialize(java.util.Arrays.asList(
+                CMD_SMESSAGE, 
+                channel.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                message.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1)));
+            if (resp != null && resp.isReadable()) {
+                ch.writeAndFlush(resp);
+                receivers++;
+            } else if (resp != null) {
+                resp.release();
+            }
+        }
         return receivers;
     }
     
@@ -120,8 +135,11 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     private static final byte[] CMD_UNSUBSCRIBE = "unsubscribe".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
     private static final byte[] CMD_PSUBSCRIBE = "psubscribe".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
     private static final byte[] CMD_PUNSUBSCRIBE = "punsubscribe".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    private static final byte[] CMD_SSUBSCRIBE = "ssubscribe".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    private static final byte[] CMD_SUNSUBSCRIBE = "sunsubscribe".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
     private static final byte[] CMD_MESSAGE = "message".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
     private static final byte[] CMD_PMESSAGE = "pmessage".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+    private static final byte[] CMD_SMESSAGE = "smessage".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
     private static final byte[] EMPTY_BYTES = new byte[0];
     
     private final MemoryStore memoryStore;
@@ -175,7 +193,8 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             logger.debug("Command: {} Args: {}", commandName, java.util.Arrays.toString(args));
             TOTAL_COMMANDS_PROCESSED.incrementAndGet();
             int currentDatabase = clientInfo.getCurrentDatabase();
-            logger.debug("Processing command: {}", commandName);
+            logger.debug("Processing command: {} In Pub/Sub mode: {}", commandName, clientInfo.isInPubSubMode());
+
             if ("WATCH".equals(commandName)) {
                 logger.debug("Handling WATCH command");
                 handleWatchCommand(ctx, clientInfo, currentDatabase, args);
@@ -254,8 +273,11 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                         && !"UNSUBSCRIBE".equals(commandName)
                         && !"PSUBSCRIBE".equals(commandName)
                         && !"PUNSUBSCRIBE".equals(commandName)
-                        && !"PING".equals(commandName)) {
-                    ByteBuf errorBuffer = protocolParser.serialize("-ERR only (SUBSCRIBE/PSUBSCRIBE/UNSUBSCRIBE/PUNSUBSCRIBE/PING) allowed in Pub/Sub mode\r\n");
+                        && !"SSUBSCRIBE".equals(commandName)
+                        && !"SUNSUBSCRIBE".equals(commandName)
+                        && !"PING".equals(commandName)
+                        && !"PUBLISH".equals(commandName)) {
+                    ByteBuf errorBuffer = protocolParser.serialize("-ERR only (SUBSCRIBE/PSUBSCRIBE/UNSUBSCRIBE/PUNSUBSCRIBE/SSUBSCRIBE/SUNSUBSCRIBE/PING/PUBLISH) allowed in Pub/Sub mode\r\n");
                     if (errorBuffer != null && errorBuffer.isReadable()) {
                         ctx.writeAndFlush(errorBuffer);
                     } else if (errorBuffer != null) {
@@ -275,6 +297,12 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 return;
             } else if ("PUNSUBSCRIBE".equals(commandName)) {
                 handlePunsubscribe(ctx, args);
+                return;
+            } else if ("SSUBSCRIBE".equals(commandName)) {
+                handleSsubscribe(ctx, args);
+                return;
+            } else if ("SUNSUBSCRIBE".equals(commandName)) {
+                handleSunsubscribe(ctx, args);
                 return;
             } else if ("PUBLISH".equals(commandName)) {
                 handlePublish(ctx, args);
@@ -644,6 +672,89 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             ctx.writeAndFlush(countBuf);
         } else if (countBuf != null) {
             countBuf.release();
+        }
+    }
+
+    // 处理 SSUBSCRIBE 命令
+    private void handleSsubscribe(ChannelHandlerContext ctx, String[] args) {
+        if (args.length < 2) {
+            ByteBuf errorBuffer = protocolParser.serialize("-ERR wrong number of arguments for 'ssubscribe' command\r\n");
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
+            }
+            return;
+        }
+        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        for (int i = 1; i < args.length; i++) {
+            String streamName = args[i];
+            PUB_SUB_MANAGER.ssubscribe(ctx.channel(), streamName);
+            int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.streamSubscriptionCount(ctx.channel());
+            ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                CMD_SSUBSCRIBE, 
+                streamName.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                count));
+            if (resp != null && resp.isReadable()) {
+                ctx.writeAndFlush(resp);
+            } else if (resp != null) {
+                resp.release();
+            }
+        }
+        if (clientInfo != null) {
+            clientInfo.setInPubSubMode(PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) > 0 || PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel()) > 0 || PUB_SUB_MANAGER.streamSubscriptionCount(ctx.channel()) > 0);
+        }
+    }
+
+    // 处理 SUNSUBSCRIBE 命令
+    private void handleSunsubscribe(ChannelHandlerContext ctx, String[] args) {
+        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        if (args.length <= 1) {
+            java.util.Set<String> subs = PUB_SUB_MANAGER.streamSubscriptions(ctx.channel());
+            if (subs.isEmpty()) {
+                int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.streamSubscriptionCount(ctx.channel());
+                ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                    CMD_SUNSUBSCRIBE, 
+                    EMPTY_BYTES, 
+                    count));
+                if (resp != null && resp.isReadable()) {
+                    ctx.writeAndFlush(resp);
+                } else if (resp != null) {
+                    resp.release();
+                }
+            } else {
+                for (String s : subs.toArray(new String[0])) {
+                    PUB_SUB_MANAGER.sunsubscribe(ctx.channel(), s);
+                    int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.streamSubscriptionCount(ctx.channel());
+                    ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                        CMD_SUNSUBSCRIBE, 
+                        s.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                        count));
+                    if (resp != null && resp.isReadable()) {
+                        ctx.writeAndFlush(resp);
+                    } else if (resp != null) {
+                        resp.release();
+                    }
+                }
+            }
+        } else {
+            for (int i = 1; i < args.length; i++) {
+                String streamName = args[i];
+                PUB_SUB_MANAGER.sunsubscribe(ctx.channel(), streamName);
+                int count = PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel()) + PUB_SUB_MANAGER.streamSubscriptionCount(ctx.channel());
+                ByteBuf resp = protocolParser.serialize(java.util.Arrays.asList(
+                        CMD_SUNSUBSCRIBE, 
+                        streamName.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1), 
+                        count));
+                if (resp != null && resp.isReadable()) {
+                    ctx.writeAndFlush(resp);
+                } else if (resp != null) {
+                    resp.release();
+                }
+            }
+        }
+        if (clientInfo != null) {
+            clientInfo.setInPubSubMode(PUB_SUB_MANAGER.subscriptionCount(ctx.channel()) > 0 || PUB_SUB_MANAGER.patternSubscriptionCount(ctx.channel()) > 0 || PUB_SUB_MANAGER.streamSubscriptionCount(ctx.channel()) > 0);
         }
     }
     

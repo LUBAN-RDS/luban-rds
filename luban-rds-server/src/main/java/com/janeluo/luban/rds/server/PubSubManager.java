@@ -17,6 +17,8 @@ public class PubSubManager {
     private final Map<Channel, Set<String>> clientChannels = new ConcurrentHashMap<>();
     private final Map<String, Set<Channel>> patternSubscribers = new ConcurrentHashMap<>();
     private final Map<Channel, Set<String>> clientPatterns = new ConcurrentHashMap<>();
+    private final Map<String, Set<Channel>> streamSubscribers = new ConcurrentHashMap<>();
+    private final Map<Channel, Set<String>> clientStreams = new ConcurrentHashMap<>();
 
     public void subscribe(Channel channel, String topic) {
         channelSubscribers.computeIfAbsent(topic, k -> new CopyOnWriteArraySet<>()).add(channel);
@@ -62,6 +64,28 @@ public class PubSubManager {
         }
     }
 
+    public void ssubscribe(Channel channel, String stream) {
+        streamSubscribers.computeIfAbsent(stream, k -> new CopyOnWriteArraySet<>()).add(channel);
+        clientStreams.computeIfAbsent(channel, k -> new CopyOnWriteArraySet<>()).add(stream);
+    }
+
+    public void sunsubscribe(Channel channel, String stream) {
+        Set<Channel> subs = streamSubscribers.get(stream);
+        if (subs != null) {
+            subs.remove(channel);
+            if (subs.isEmpty()) {
+                streamSubscribers.remove(stream);
+            }
+        }
+        Set<String> streams = clientStreams.get(channel);
+        if (streams != null) {
+            streams.remove(stream);
+            if (streams.isEmpty()) {
+                clientStreams.remove(channel);
+            }
+        }
+    }
+
     public int unsubscribeAll(Channel channel) {
         int count = 0;
         Set<String> topics = clientChannels.remove(channel);
@@ -86,6 +110,20 @@ public class PubSubManager {
                     subs.remove(channel);
                     if (subs.isEmpty()) {
                         patternSubscribers.remove(p);
+                    }
+                }
+            }
+        }
+        
+        Set<String> streams = clientStreams.remove(channel);
+        if (streams != null && !streams.isEmpty()) {
+            count += streams.size();
+            for (String s : streams) {
+                Set<Channel> subs = streamSubscribers.get(s);
+                if (subs != null) {
+                    subs.remove(channel);
+                    if (subs.isEmpty()) {
+                        streamSubscribers.remove(s);
                     }
                 }
             }
@@ -136,8 +174,29 @@ public class PubSubManager {
         return patterns;
     }
 
+    public int streamSubscriptionCount(Channel channel) {
+        Set<String> streams = clientStreams.get(channel);
+        return streams == null ? 0 : streams.size();
+    }
+
+    public Set<String> streamSubscriptions(Channel channel) {
+        Set<String> streams = clientStreams.get(channel);
+        if (streams == null) {
+            return Collections.emptySet();
+        }
+        return streams;
+    }
+
     public Collection<Channel> subscribers(String topic) {
         Set<Channel> subs = channelSubscribers.get(topic);
+        if (subs == null) {
+            return Collections.emptyList();
+        }
+        return subs;
+    }
+
+    public Collection<Channel> getStreamSubscribers(String stream) {
+        Set<Channel> subs = streamSubscribers.get(stream);
         if (subs == null) {
             return Collections.emptyList();
         }
@@ -169,6 +228,7 @@ public class PubSubManager {
                 sIdx++;
             } else if (pChar == '*') {
                 if (pIdx + 1 == pLen) return true;
+                // 优化*的匹配逻辑，确保能正确匹配包含:的字符串
                 for (int i = sIdx; i <= sLen; i++) {
                     if (match(pattern.substring(pIdx + 1), string.substring(i))) {
                         return true;
