@@ -338,14 +338,20 @@ public class LuaCommandHandler implements CommandHandler {
                     globals.set("unpack", tableLib.get("unpack"));
                 }
 
+// Use raw bytes to create LuaString, preserving binary data exactly
+                // LuaValue.valueOf(String) would UTF-8 encode characters 0x80-0x9F, corrupting binary data
                 LuaTable keysTable = new LuaTable();
                 for (int i = 0; i < keys.length; i++) {
-                    keysTable.set(i + 1, LuaValue.valueOf(keys[i]));
+                    byte[] keyBytes = keys[i].getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                    LuaValue luaKey = org.luaj.vm2.LuaString.valueOf(keyBytes);
+                    keysTable.set(i + 1, luaKey);
                 }
                 globals.set("KEYS", keysTable);
                 LuaTable argvTable = new LuaTable();
                 for (int i = 0; i < argv.length; i++) {
-                    argvTable.set(i + 1, LuaValue.valueOf(argv[i]));
+                    byte[] argvBytes = argv[i].getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                    LuaValue luaArg = org.luaj.vm2.LuaString.valueOf(argvBytes);
+                    argvTable.set(i + 1, luaArg);
                 }
                 globals.set("ARGV", argvTable);
                 LuaTable redisTable = new LuaTable();
