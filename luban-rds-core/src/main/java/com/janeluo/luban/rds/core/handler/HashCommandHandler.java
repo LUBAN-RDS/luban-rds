@@ -151,6 +151,8 @@ public class HashCommandHandler implements CommandHandler {
         byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
         return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
     }
+    
+    
 
     private Object handleHMGet(int database, String[] args, MemoryStore store) {
         if (args.length < 3) {

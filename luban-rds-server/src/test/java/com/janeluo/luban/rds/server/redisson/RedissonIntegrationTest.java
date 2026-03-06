@@ -150,28 +150,6 @@ public class RedissonIntegrationTest extends RedissonTestBase {
     }
 
     @Test
-    @DisplayName("Test RMap with Object")
-    @Order(3)
-    void testMapObject() {
-        RMap<String, TestObject> map = redisson.getMap("testMapObject", new JsonJacksonCodec());
-        TestObject testObject = new TestObject("test", 123);
-        map.put("key1", testObject);
-        TestObject retrieved = map.get("key1");
-        assertEquals(testObject, retrieved);
-    }
-    
-    @Test
-    @DisplayName("Test RMap with Object for SerializationCodec")
-    @Order(3)
-    void testMapObject4SerializationCodec() {
-        RMap<String, TestObject> map = redisson.getMap("testMapObject4SerializationCodec", new SerializationCodec());
-        TestObject testObject = new TestObject("test", 123);
-        map.put("key1", testObject);
-        TestObject retrieved = map.get("key1");
-        assertEquals(testObject, retrieved);
-    }
-
-    @Test
     @DisplayName("Test RList")
     @Order(4)
     void testList() {
@@ -731,7 +709,29 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         System.out.println("Session deleted: " + deleted);
         assertTrue(deleted);
     }
-    
+
+    @Test
+    @DisplayName("Test RMap with Object")
+    @Order(17)
+    void testMapObject() {
+        RMap<String, TestObject> map = redisson.getMap("testMapObject", new JsonJacksonCodec());
+        TestObject testObject = new TestObject("test", 123);
+        map.put("key1", testObject);
+        TestObject retrieved = map.get("key1");
+        assertEquals(testObject, retrieved);
+    }
+
+@Test
+    @DisplayName("Test RMap with Object for SerializationCodec")
+    @Order(18)
+    void testMapObject4SerializationCodec() {
+        RMap<String, TestObject> map = redisson.getMap("testMapObject4SerializationCodec", new SerializationCodec());
+        TestObject testObject = new TestObject("test", 123);
+        map.put("key1", testObject);
+        TestObject retrieved = map.get("key1");
+        assertEquals(testObject, retrieved);
+    }
+
     // Serializable Test Object
     static class TestObject implements Serializable {
         private String name;
