@@ -18,15 +18,15 @@ Luban-RDS 是一个完全兼容 Redis 协议的轻量级内存数据库，使用
 - **完全兼容 Redis 协议**：支持标准 Redis 客户端（redis-cli、Jedis、Lettuce）连接
 - **轻量级设计**：核心依赖少，易于集成
 - **丰富的数据结构**：支持 String、Hash、List、Set、ZSet
-- **键过期机制**：实现惰性删除机制
+- **键过期机制**：实现惰性删除和主动定期清理相结合的策略
 - **内存淘汰策略**：支持 LRU、Random、TTL 等多种淘汰策略
-- **持久化支持**：支持 RDB 异步快照和 AOF 追加日志
+- **持久化支持**：支持 RDB 异步快照和 AOF 追加日志，完整保留 ZSet 分数
 - **安全认证**：支持 AUTH 命令进行密码验证
 - **多数据库**：支持 SELECT 命令切换数据库（默认 16 个）
 - **高性能网络**：基于 Netty 的 NIO 服务器，支持高并发连接
 - **Spring Boot 集成**：提供自动配置和 RedisTemplate
-- **线程安全**：基于 ConcurrentHashMap 和 Caffeine 实现的内存存储
-- **性能优化**：协议解析优化、响应缓存、数据结构直接操作
+- **线程安全**：基于 ConcurrentHashMap 和 Caffeine 实现的内存存储，分段锁保证并发安全
+- **性能优化**：协议解析优化、响应缓存、数据结构直接操作、原子性批量操作
 - **易于扩展**：模块化设计，支持命令和数据结构扩展
 - **发布/订阅**：支持 SUBSCRIBE、UNSUBSCRIBE、PUBLISH、PSUBSCRIBE、PUNSUBSCRIBE
 - **Lua 脚本**：支持 EVAL、EVALSHA、SCRIPT 命令族，完全兼容 Redis Lua 脚本

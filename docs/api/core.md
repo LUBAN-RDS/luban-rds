@@ -380,6 +380,14 @@ java.util.List<String> zrange(int database, String key, long start, long stop);
  * @return 成员数量
  */
 int zcard(int database, String key);
+
+/**
+ * 获取有序集合的所有成员和分数
+ * @param database 数据库索引
+ * @param key ZSet 键
+ * @return 成员和分数的映射，键不存在返回 null
+ */
+java.util.Map<String, Double> zgetAllWithScores(int database, String key);
 ```
 
 ## 2. CommandHandler 接口

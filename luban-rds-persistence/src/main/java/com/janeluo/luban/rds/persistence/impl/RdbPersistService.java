@@ -363,32 +363,31 @@ public class RdbPersistService implements PersistService {
     }
     
     private void writeKeyValue(DataOutputStream dos, int db, String key, Object value, MemoryStore memoryStore) throws IOException {
-        // 根据值的类型写入不同的指令
-        // 注意：必须先写opcode，再写key，最后写value，与读取顺序保持一致
         String type = memoryStore.type(db, key);
         switch (type) {
             case "string":
-                dos.writeByte(0x00); // 字符串类型
+                dos.writeByte(0x00);
                 writeString(dos, key);
                 writeString(dos, value.toString());
                 break;
             case "list":
-                dos.writeByte(0x01); // 列表类型
+                dos.writeByte(0x01);
                 writeString(dos, key);
                 writeList(dos, (List<?>) value);
                 break;
             case "set":
-                dos.writeByte(0x02); // 集合类型
+                dos.writeByte(0x02);
                 writeString(dos, key);
                 writeSet(dos, (java.util.Set<?>) value);
                 break;
             case "zset":
-                dos.writeByte(0x03); // 有序集合类型
+                dos.writeByte(0x03);
                 writeString(dos, key);
-                writeZSet(dos, (java.util.SortedSet<?>) value);
+                java.util.Map<String, Double> zsetWithScores = memoryStore.zgetAllWithScores(db, key);
+                writeZSetWithScores(dos, zsetWithScores);
                 break;
             case "hash":
-                dos.writeByte(0x04); // 哈希类型
+                dos.writeByte(0x04);
                 writeString(dos, key);
                 writeHash(dos, (java.util.Map<?, ?>) value);
                 break;
@@ -400,25 +399,23 @@ public class RdbPersistService implements PersistService {
     
     private void readKeyValue(DataInputStream dis, byte opcode, int db, MemoryStore memoryStore) throws IOException {
         try {
-            // 读取键
             String key = readString(dis);
             
-            // 读取值
             Object value = null;
             switch (opcode) {
-                case 0x00: // 字符串类型
+                case 0x00:
                     value = readString(dis);
                     break;
-                case 0x01: // 列表类型
+                case 0x01:
                     value = readList(dis);
                     break;
-                case 0x02: // 集合类型
+                case 0x02:
                     value = readSet(dis);
                     break;
-                case 0x03: // 有序集合类型
-                    value = readZSet(dis);
-                    break;
-                case 0x04: // 哈希类型
+                case 0x03:
+                    readZSetWithScores(dis, memoryStore, db, key);
+                    return;
+                case 0x04:
                     value = readHash(dis);
                     break;
                 default:
@@ -426,16 +423,13 @@ public class RdbPersistService implements PersistService {
                     break;
             }
             
-            // 存储键值对
             if (value != null) {
                 memoryStore.set(db, key, value);
-                // 打印加载的数据
                 logger.info("Loaded data from RDB: DB={}, Key={}, Value={}, Type=0x{}", db, key, value, Integer.toHexString(opcode));
             }
         } catch (EOFException e) {
-            // 文件读取完毕，正常退出
             logger.debug("End of file reached while reading key-value pair");
-            throw e; // 重新抛出异常，让上层处理
+            throw e;
         }
     }
     
@@ -488,7 +482,19 @@ public class RdbPersistService implements PersistService {
         writeLength(dos, zset.size());
         for (Object item : zset) {
             writeString(dos, item.toString());
-            writeDouble(dos, 0.0); // 简单实现，分数默认为0
+            writeDouble(dos, 0.0);
+        }
+    }
+    
+    private void writeZSetWithScores(DataOutputStream dos, java.util.Map<String, Double> zsetWithScores) throws IOException {
+        if (zsetWithScores == null) {
+            writeLength(dos, 0);
+            return;
+        }
+        writeLength(dos, zsetWithScores.size());
+        for (java.util.Map.Entry<String, Double> entry : zsetWithScores.entrySet()) {
+            writeString(dos, entry.getKey());
+            writeDouble(dos, entry.getValue());
         }
     }
     
@@ -497,9 +503,18 @@ public class RdbPersistService implements PersistService {
         java.util.SortedSet<Object> zset = new java.util.TreeSet<>();
         for (int i = 0; i < size; i++) {
             zset.add(readString(dis));
-            readDouble(dis); // 跳过分数
+            readDouble(dis);
         }
         return zset;
+    }
+    
+    private void readZSetWithScores(DataInputStream dis, MemoryStore memoryStore, int db, String key) throws IOException {
+        int size = readLength(dis);
+        for (int i = 0; i < size; i++) {
+            String member = readString(dis);
+            double score = readDouble(dis);
+            memoryStore.zadd(db, key, score, member);
+        }
     }
     
     private void writeHash(DataOutputStream dos, java.util.Map<?, ?> hash) throws IOException {

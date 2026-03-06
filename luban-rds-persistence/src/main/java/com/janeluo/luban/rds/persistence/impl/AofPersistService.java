@@ -283,31 +283,241 @@ public class AofPersistService implements PersistService {
         }
     }
     
+    private int currentDb = 0;
+    
     private void parseAndExecuteCommand(String line, MemoryStore memoryStore) {
-        // 简单实现，解析AOF文件中的命令
-        // 这里只处理基本的SET命令
-        if (line.startsWith("*")) {
-            // 解析Redis协议格式的命令
-            String[] parts = line.split("\\r\\n");
-            if (parts.length > 0) {
-                int argCount = Integer.parseInt(parts[0].substring(1));
-                if (argCount >= 1) {
-                    String command = parts[2];
-                    if (command.equalsIgnoreCase("SET")) {
-                        if (argCount >= 3) {
-                            String key = parts[4];
-                            String value = parts[6];
-                            memoryStore.set(0, key, value); // 默认数据库0
-                        }
-                    } else if (command.equalsIgnoreCase("SELECT")) {
-                        if (argCount >= 2) {
-                            int db = Integer.parseInt(parts[4]);
-                            // 切换数据库，但这里不需要特殊处理
+        if (!line.startsWith("*")) {
+            return;
+        }
+        
+        try {
+            java.util.List<String> args = parseRespArray(line);
+            if (args.isEmpty()) {
+                return;
+            }
+            
+            String command = args.get(0).toUpperCase();
+            
+            switch (command) {
+                case "SELECT":
+                    if (args.size() >= 2) {
+                        currentDb = Integer.parseInt(args.get(1));
+                    }
+                    break;
+                    
+                case "SET":
+                    if (args.size() >= 3) {
+                        String key = args.get(1);
+                        String value = args.get(2);
+                        if (args.size() >= 5 && args.get(3).equalsIgnoreCase("EX")) {
+                            long expireSeconds = Long.parseLong(args.get(4));
+                            memoryStore.setWithExpire(currentDb, key, value, expireSeconds);
+                        } else if (args.size() >= 5 && args.get(3).equalsIgnoreCase("PX")) {
+                            long expireMs = Long.parseLong(args.get(4));
+                            memoryStore.setWithExpireMs(currentDb, key, value, expireMs);
+                        } else {
+                            memoryStore.set(currentDb, key, value);
                         }
                     }
+                    break;
+                    
+                case "DEL":
+                    if (args.size() >= 2) {
+                        for (int i = 1; i < args.size(); i++) {
+                            memoryStore.del(currentDb, args.get(i));
+                        }
+                    }
+                    break;
+                    
+                case "EXPIRE":
+                    if (args.size() >= 3) {
+                        String key = args.get(1);
+                        long seconds = Long.parseLong(args.get(2));
+                        memoryStore.expire(currentDb, key, seconds);
+                    }
+                    break;
+                    
+                case "PEXPIRE":
+                    if (args.size() >= 3) {
+                        String key = args.get(1);
+                        long milliseconds = Long.parseLong(args.get(2));
+                        memoryStore.pexpire(currentDb, key, milliseconds);
+                    }
+                    break;
+                    
+                case "INCR":
+                case "INCRBY":
+                    if (args.size() >= 2) {
+                        String key = args.get(1);
+                        long increment = args.size() >= 3 ? Long.parseLong(args.get(2)) : 1;
+                        memoryStore.incrby(currentDb, key, increment);
+                    }
+                    break;
+                    
+                case "DECR":
+                case "DECRBY":
+                    if (args.size() >= 2) {
+                        String key = args.get(1);
+                        long decrement = args.size() >= 3 ? Long.parseLong(args.get(2)) : 1;
+                        memoryStore.incrby(currentDb, key, -decrement);
+                    }
+                    break;
+                    
+                case "MSET":
+                    if (args.size() >= 3) {
+                        String[] keysAndValues = args.subList(1, args.size()).toArray(new String[0]);
+                        memoryStore.mset(currentDb, keysAndValues);
+                    }
+                    break;
+                    
+                case "HSET":
+                case "HMSET":
+                    if (args.size() >= 4) {
+                        String key = args.get(1);
+                        String[] fieldsAndValues = args.subList(2, args.size()).toArray(new String[0]);
+                        memoryStore.hmset(currentDb, key, fieldsAndValues);
+                    }
+                    break;
+                    
+                case "HDEL":
+                    if (args.size() >= 3) {
+                        String key = args.get(1);
+                        String[] fields = args.subList(2, args.size()).toArray(new String[0]);
+                        memoryStore.hdel(currentDb, key, fields);
+                    }
+                    break;
+                    
+                case "HINCRBY":
+                    if (args.size() >= 4) {
+                        String key = args.get(1);
+                        String field = args.get(2);
+                        long increment = Long.parseLong(args.get(3));
+                        memoryStore.hincrby(currentDb, key, field, increment);
+                    }
+                    break;
+                    
+                case "LPUSH":
+                    if (args.size() >= 3) {
+                        String key = args.get(1);
+                        String[] values = args.subList(2, args.size()).toArray(new String[0]);
+                        memoryStore.lpush(currentDb, key, values);
+                    }
+                    break;
+                    
+                case "RPUSH":
+                    if (args.size() >= 3) {
+                        String key = args.get(1);
+                        String[] values = args.subList(2, args.size()).toArray(new String[0]);
+                        memoryStore.rpush(currentDb, key, values);
+                    }
+                    break;
+                    
+                case "LPOP":
+                    if (args.size() >= 2) {
+                        memoryStore.lpop(currentDb, args.get(1));
+                    }
+                    break;
+                    
+                case "RPOP":
+                    if (args.size() >= 2) {
+                        memoryStore.rpop(currentDb, args.get(1));
+                    }
+                    break;
+                    
+                case "LREM":
+                    if (args.size() >= 4) {
+                        String key = args.get(1);
+                        int count = Integer.parseInt(args.get(2));
+                        String value = args.get(3);
+                        memoryStore.lrem(currentDb, key, count, value);
+                    }
+                    break;
+                    
+                case "LSET":
+                    if (args.size() >= 4) {
+                        String key = args.get(1);
+                        int index = Integer.parseInt(args.get(2));
+                        String value = args.get(3);
+                        memoryStore.lset(currentDb, key, index, value);
+                    }
+                    break;
+                    
+                case "SADD":
+                    if (args.size() >= 3) {
+                        String key = args.get(1);
+                        String[] members = args.subList(2, args.size()).toArray(new String[0]);
+                        memoryStore.sadd(currentDb, key, members);
+                    }
+                    break;
+                    
+                case "SREM":
+                    if (args.size() >= 3) {
+                        String key = args.get(1);
+                        String[] members = args.subList(2, args.size()).toArray(new String[0]);
+                        memoryStore.srem(currentDb, key, members);
+                    }
+                    break;
+                    
+                case "ZADD":
+                    if (args.size() >= 4) {
+                        String key = args.get(1);
+                        for (int i = 2; i < args.size(); i += 2) {
+                            if (i + 1 < args.size()) {
+                                double score = Double.parseDouble(args.get(i));
+                                String member = args.get(i + 1);
+                                memoryStore.zadd(currentDb, key, score, member);
+                            }
+                        }
+                    }
+                    break;
+                    
+                case "ZREM":
+                    if (args.size() >= 3) {
+                        String key = args.get(1);
+                        String[] members = args.subList(2, args.size()).toArray(new String[0]);
+                        memoryStore.zrem(currentDb, key, members);
+                    }
+                    break;
+                    
+                case "FLUSHDB":
+                    memoryStore.flushdb(currentDb);
+                    break;
+                    
+                case "FLUSHALL":
+                    memoryStore.flushAll();
+                    break;
+                    
+                default:
+                    logger.debug("Unsupported AOF command: {}", command);
+            }
+        } catch (Exception e) {
+            logger.error("Error parsing AOF command: {}", line, e);
+        }
+    }
+    
+    private java.util.List<String> parseRespArray(String line) {
+        java.util.List<String> args = new java.util.ArrayList<>();
+        String[] parts = line.split("\\r\\n");
+        
+        if (parts.length < 1 || !parts[0].startsWith("*")) {
+            return args;
+        }
+        
+        int argCount = Integer.parseInt(parts[0].substring(1));
+        int partIndex = 1;
+        
+        for (int i = 0; i < argCount && partIndex < parts.length; i++) {
+            if (parts[partIndex].startsWith("$")) {
+                int length = Integer.parseInt(parts[partIndex].substring(1));
+                partIndex++;
+                if (partIndex < parts.length) {
+                    args.add(parts[partIndex]);
                 }
             }
+            partIndex++;
         }
+        
+        return args;
     }
     
     private void writeSelectCommand(FileWriter writer, int db) throws IOException {

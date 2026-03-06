@@ -12,9 +12,25 @@ title: 功能架构
 
 **核心功能**：定义了所有数据类型的操作方法
 
+**新增方法**：
+- `zgetAllWithScores(int database, String key)` - 获取 ZSet 所有成员及其分数，用于持久化
+
 ### 1.2 DefaultMemoryStore 实现
 
 **核心功能**：实现了 MemoryStore 接口，使用 Java 集合存储数据
+
+**并发安全特性**：
+- **分段锁机制**：使用 1024 个分段锁替代 String.intern()，避免内存泄漏
+- **原子性批量操作**：MSET 等批量操作使用同步块保证原子性
+- **竞态条件处理**：过期键检查使用双重检查锁定机制
+
+**过期键清理策略**：
+- **惰性删除**：访问键时检查是否过期，过期则删除
+- **主动清理**：后台定时任务（每 100ms）扫描并清理过期键
+- **清理限制**：每次最多清理 100 个过期键，避免阻塞主线程
+
+**资源管理**：
+- `close()` 方法：关闭内存存储，释放后台线程资源
 
 ## 2. 命令处理
 
@@ -91,9 +107,22 @@ title: 功能架构
 
 **技术实现**：使用 Kryo 序列化框架进行高效存储
 
+**数据完整性**：
+- 完整保存 ZSet 成员的分数值
+- 支持所有五种数据类型的完整序列化
+
 ### 5.2 AOF 持久化
 
 **核心功能**：将写命令追加到 AOF 文件
+
+**命令解析增强**：
+- 支持 20+ 种命令类型的完整解析
+- 字符串命令：SET、SETEX、PSETEX、SETNX、APPEND、INCR、DECR、INCRBY、DECRBY
+- 哈希命令：HSET、HMSET、HSETNX、HINCRBY、HINCRBYFLOAT、HDEL
+- 列表命令：LPUSH、RPUSH、LPOP、RPOP、LSET、LREM、LTRIM
+- 集合命令：SADD、SREM、SPOP
+- 有序集合命令：ZADD、ZREM、ZINCRBY
+- 通用命令：DEL、EXPIRE、PEXPIRE、EXPIREAT、PEXPIREAT、SELECT
 
 ### 5.3 数据恢复
 

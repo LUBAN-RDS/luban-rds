@@ -173,6 +173,7 @@ title: 系统架构
 - **过期时间**：支持键的过期时间设置
 - **直接操作**：针对集合操作的直接修改优化
 - **版本控制**：支持键版本控制，用于 WATCH 机制
+- **ZSet 分数查询**：支持获取 ZSet 所有成员及其分数（zgetAllWithScores）
 
 ### 6.2 DefaultMemoryStore
 
@@ -182,14 +183,26 @@ title: 系统架构
   - List：使用 LinkedList
   - Set：使用 HashSet
   - Hash：使用 HashMap
-  - ZSet：使用跳表结构
+  - ZSet：使用跳表结构（ZSetStore），保存成员与分数的映射
 - **过期时间管理**：维护过期键的集合，定期清理
 
-### 6.3 存储优化
+### 6.3 并发安全
+
+- **分段锁机制**：使用 1024 个分段锁替代 String.intern()，避免内存泄漏
+- **原子性操作**：MSET 等批量操作使用同步块保证原子性
+- **竞态条件处理**：过期键检查使用双重检查锁定机制
+
+### 6.4 过期键清理策略
+
+- **惰性删除**：访问键时检查是否过期，过期则删除
+- **主动清理**：后台定时任务（每 100ms）扫描并清理过期键
+- **清理限制**：每次最多清理 100 个过期键，避免阻塞主线程
+
+### 6.5 存储优化
 
 - **直接修改**：集合操作直接修改底层集合，避免数据复制
-- **延迟删除**：采用惰性删除和定期删除相结合的策略
 - **内存管理**：支持最大内存限制和淘汰策略
+- **LRU 优化**：优化采样算法，避免遍历所有键
 
 ## 7. 持久化层
 
@@ -203,12 +216,21 @@ title: 系统架构
 - **RDB 持久化**：将内存数据以二进制格式保存到磁盘
 - **保存策略**：支持定时保存和手动保存
 - **压缩存储**：使用 Kryo 序列化框架进行高效存储
+- **ZSet 分数保留**：完整保存和恢复 ZSet 成员的分数值
+- **数据类型支持**：完整支持 String、List、Set、ZSet、Hash 五种数据类型
 
 ### 7.3 AofPersistService
 
 - **AOF 持久化**：将写命令追加到 AOF 文件
 - **同步策略**：支持 always、everysec、no 三种同步策略
 - **重写机制**：支持 AOF 文件重写，减小文件大小
+- **命令解析增强**：支持 20+ 种命令类型的完整解析
+  - 字符串：SET、SETEX、PSETEX、SETNX、APPEND、INCR、DECR、INCRBY、DECRBY
+  - 哈希：HSET、HMSET、HSETNX、HINCRBY、HINCRBYFLOAT、HDEL
+  - 列表：LPUSH、RPUSH、LPOP、RPOP、LSET、LREM、LTRIM
+  - 集合：SADD、SREM、SPOP
+  - 有序集合：ZADD、ZREM、ZINCRBY
+  - 通用：DEL、EXPIRE、PEXPIRE、EXPIREAT、PEXPIREAT、SELECT
 
 ### 7.4 持久化流程
 

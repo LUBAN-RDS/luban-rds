@@ -440,6 +440,14 @@ public interface MemoryStore {
     java.util.List<String> zrangeByScore(int database, String key, double min, double max, int offset, int count);
 
     /**
+     * 获取有序集合的所有成员和分数
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @return 成员和分数的映射，键不存在返回 null
+     */
+    java.util.Map<String, Double> zgetAllWithScores(int database, String key);
+
+    /**
      * 获取指定键占用的内存大小（字节）
      * @param database 数据库索引
      * @param key 键

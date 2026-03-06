@@ -361,7 +361,8 @@ public class StringCommandHandler implements CommandHandler {
             return RdsResponseConstant.ZERO;
         }
         
-        return RdsResponseConstant.intResponse(value.toString().length());
+        byte[] bytes = value.toString().getBytes(StandardCharsets.ISO_8859_1);
+        return RdsResponseConstant.intResponse(bytes.length);
     }
 
     private Object handleMSet(int database, String[] args, MemoryStore store) {

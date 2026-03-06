@@ -15,6 +15,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class DefaultMemoryStore implements MemoryStore {
@@ -162,6 +165,19 @@ public class DefaultMemoryStore implements MemoryStore {
     // 数据库数量限制
     private int maxDatabases = 16;
     
+    // 分段锁配置，用于替代String.intern()避免内存泄漏
+    private static final int LOCK_STRIPE_COUNT = 1024;
+    private static final int LOCK_STRIPE_MASK = LOCK_STRIPE_COUNT - 1;
+    private final Object[] lockStripes = new Object[LOCK_STRIPE_COUNT];
+    
+    // 过期键主动清理机制
+    private final ScheduledExecutorService expirationExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "KeyExpiration-Worker");
+        t.setDaemon(true);
+        return t;
+    });
+    private static final int EXPIRE_CYCLE_KEYS = 100;
+    
     // 最大内存限制（字节），0表示不限制
     private long maxMemory = 0;
     
@@ -277,8 +293,9 @@ public class DefaultMemoryStore implements MemoryStore {
     }
     
     public DefaultMemoryStore() {
-        // 初始化默认数据库（0号数据库）
+        initLockStripes();
         getOrCreateDatabaseStore(0);
+        startExpirationTask();
     }
     
     /**
@@ -292,8 +309,9 @@ public class DefaultMemoryStore implements MemoryStore {
         this.maxDatabases = databases;
         this.maxMemory = maxMemory;
         this.maxMemoryPolicy = maxMemoryPolicy != null ? maxMemoryPolicy : POLICY_NOEVICTION;
-        // 初始化默认数据库（0号数据库）
+        initLockStripes();
         getOrCreateDatabaseStore(0);
+        startExpirationTask();
         
         logger.info("内存存储初始化: databases={}, maxMemory={}bytes, policy={}", 
                 databases, maxMemory, this.maxMemoryPolicy);
@@ -461,49 +479,44 @@ public class DefaultMemoryStore implements MemoryStore {
     private void fillLruPool(boolean volatileOnly) {
         long currentTime = System.currentTimeMillis();
         
-        // 收集所有数据库的键
-        List<Object[]> allKeys = new ArrayList<>(); // [database, key]
+        List<Object[]> sampledKeys = new ArrayList<>();
+        
         for (Map.Entry<Integer, DatabaseStore> dbEntry : databaseStores.entrySet()) {
             DatabaseStore store = dbEntry.getValue();
+            int dbKey = dbEntry.getKey();
+            
+            int sampled = 0;
+            int targetSample = Math.max(1, lruSampleSize / databaseStores.size());
+            
             for (String key : store.keySet.keySet()) {
-                allKeys.add(new Object[]{dbEntry.getKey(), key});
+                if (sampled >= targetSample) break;
+                
+                DatabaseStore currentStore = databaseStores.get(dbKey);
+                if (currentStore == null) continue;
+                
+                StoreValue value = currentStore.storage.getIfPresent(key);
+                if (value == null) continue;
+                
+                if (volatileOnly && !value.hasExpireTime()) {
+                    continue;
+                }
+                
+                long idleTime = currentTime - value.getLastAccessTime();
+                sampledKeys.add(new Object[]{dbKey, key, idleTime});
+                sampled++;
             }
         }
         
-        if (allKeys.isEmpty()) {
-            return;
-        }
-        
-        // 随机采样
-        int sampleCount = Math.min(lruSampleSize, allKeys.size());
-        for (int i = 0; i < sampleCount; i++) {
-            int idx = random.nextInt(allKeys.size());
-            Object[] entry = allKeys.get(idx);
+        for (Object[] entry : sampledKeys) {
             int database = (Integer) entry[0];
             String key = (String) entry[1];
+            long idleTime = (Long) entry[2];
             
-            DatabaseStore store = databaseStores.get(database);
-            if (store == null) continue;
-            
-            StoreValue value = store.storage.getIfPresent(key);
-            if (value == null) continue;
-            
-            // 检查 volatile 条件
-            if (volatileOnly && !value.hasExpireTime()) {
-                continue;
-            }
-            
-            // 计算空闲时间
-            long idleTime = currentTime - value.getLastAccessTime();
-            
-            // 尝试加入候选池
             LruPoolEntry poolEntry = new LruPoolEntry(database, key, idleTime);
             
             if (lruPool.size() < LRU_POOL_SIZE) {
-                // 池未满，直接加入
                 lruPool.add(poolEntry);
             } else {
-                // 池已满，检查是否比池中最小空闲时间的键更适合淘汰
                 LruPoolEntry smallest = lruPool.first();
                 if (idleTime > smallest.idleTime) {
                     lruPool.pollFirst();
@@ -669,16 +682,19 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         if (storeValue.isExpired()) {
-            // 删除过期键并更新内存统计
-            long freedMemory = storeValue.getEstimatedSize();
-            store.storage.invalidate(key);
-            store.keySet.remove(key);
-            updateMemory(-freedMemory);
+            synchronized (getLockForKey(database, key)) {
+                storeValue = store.storage.getIfPresent(key);
+                if (storeValue != null && storeValue.isExpired()) {
+                    long freedMemory = storeValue.getEstimatedSize();
+                    store.storage.invalidate(key);
+                    store.keySet.remove(key);
+                    updateMemory(-freedMemory);
+                }
+            }
             RuntimeConfig.incKeyspaceMisses();
             return null;
         }
         
-        // 更新访问时间（用于LRU）
         storeValue.updateAccessTime();
         RuntimeConfig.incKeyspaceHits();
         
@@ -779,11 +795,41 @@ public class DefaultMemoryStore implements MemoryStore {
         if (keysAndValues == null || keysAndValues.length % 2 != 0) {
             throw new IllegalArgumentException("wrong number of arguments for MSET");
         }
-        // 循环设置
-        for (int i = 0; i < keysAndValues.length; i += 2) {
-            String key = keysAndValues[i];
-            String value = keysAndValues[i+1];
-            set(database, key, value);
+        
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        
+        synchronized (store) {
+            long totalRequiredSize = 0;
+            java.util.Map<String, StoreValue> newValues = new java.util.LinkedHashMap<>();
+            java.util.Map<String, StoreValue> oldValues = new java.util.LinkedHashMap<>();
+            
+            for (int i = 0; i < keysAndValues.length; i += 2) {
+                String key = keysAndValues[i];
+                String value = keysAndValues[i + 1];
+                String type = getType(value);
+                StoreValue newValue = new StoreValue(value, type);
+                newValues.put(key, newValue);
+                totalRequiredSize += newValue.getEstimatedSize();
+                
+                StoreValue oldValue = store.storage.getIfPresent(key);
+                if (oldValue != null) {
+                    oldValues.put(key, oldValue);
+                    totalRequiredSize -= oldValue.getEstimatedSize();
+                }
+            }
+            
+            if (!tryEvictMemory(totalRequiredSize)) {
+                throw new RuntimeException("OOM command not allowed when used memory > 'maxmemory'");
+            }
+            
+            for (java.util.Map.Entry<String, StoreValue> entry : newValues.entrySet()) {
+                String key = entry.getKey();
+                StoreValue newValue = entry.getValue();
+                store.storage.put(key, newValue);
+                store.keySet.put(key, Boolean.TRUE);
+                updateMemory(newValue.getEstimatedSize());
+                bumpKeyVersion(database, key);
+            }
         }
     }
 
@@ -844,10 +890,74 @@ public class DefaultMemoryStore implements MemoryStore {
     }
 
     /**
+     * 初始化分段锁数组
+     */
+    private void initLockStripes() {
+        for (int i = 0; i < LOCK_STRIPE_COUNT; i++) {
+            lockStripes[i] = new Object();
+        }
+    }
+    
+    /**
+     * 启动过期键主动清理任务
+     */
+    private void startExpirationTask() {
+        expirationExecutor.scheduleAtFixedRate(() -> {
+            try {
+                expireCycle();
+            } catch (Exception e) {
+                logger.error("Error in expiration cycle", e);
+            }
+        }, 100, 100, TimeUnit.MILLISECONDS);
+    }
+    
+    /**
+     * 过期键清理循环（参考 Redis 的主动过期策略）
+     * 每次最多清理 EXPIRE_CYCLE_KEYS 个过期键
+     */
+    private void expireCycle() {
+        int expired = 0;
+        
+        for (Map.Entry<Integer, DatabaseStore> dbEntry : databaseStores.entrySet()) {
+            DatabaseStore store = dbEntry.getValue();
+            
+            for (String key : store.keySet.keySet()) {
+                if (expired >= EXPIRE_CYCLE_KEYS) {
+                    return;
+                }
+                
+                StoreValue value = store.storage.getIfPresent(key);
+                if (value != null && value.isExpired()) {
+                    del(dbEntry.getKey(), key);
+                    expired++;
+                }
+            }
+        }
+    }
+    
+    /**
+     * 关闭内存存储，释放资源
+     */
+    public void close() {
+        expirationExecutor.shutdown();
+        try {
+            if (!expirationExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                expirationExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            expirationExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
+    
+    /**
      * 获取指定键的锁对象，用于同步
+     * 使用分段锁替代String.intern()避免内存泄漏
      */
     private Object getLockForKey(int database, String key) {
-        return (database + ":" + key).intern();
+        int hash = (database + ":" + key).hashCode();
+        int stripe = Math.abs(hash & LOCK_STRIPE_MASK);
+        return lockStripes[stripe];
     }
 
     @Override
@@ -2299,6 +2409,26 @@ public class DefaultMemoryStore implements MemoryStore {
         
         RuntimeConfig.incKeyspaceHits();
         return java.util.Collections.emptyList();
+    }
+    
+    @Override
+    public java.util.Map<String, Double> zgetAllWithScores(int database, String key) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            RuntimeConfig.incKeyspaceMisses();
+            return null;
+        }
+        
+        Object val = storeValue.value;
+        if (val instanceof ZSetStore) {
+            RuntimeConfig.incKeyspaceHits();
+            return new java.util.HashMap<>(((ZSetStore) val).memberScores);
+        }
+        
+        RuntimeConfig.incKeyspaceHits();
+        return null;
     }
 
     @Override
