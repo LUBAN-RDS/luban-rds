@@ -7,6 +7,7 @@ import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
 import com.janeluo.luban.rds.core.slowlog.SlowLogManager;
 import com.janeluo.luban.rds.protocol.Command;
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelId;
@@ -1061,9 +1062,14 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     
     // 处理 EXEC 命令
     private void handleExecCommand(ChannelHandlerContext ctx, ClientInfo clientInfo) {
+        long execStartTime = System.nanoTime();
+        logger.info("[EXEC] 入口 - 时间戳: {}, 客户端: {}, 数据库: {}", 
+            execStartTime, ctx.channel().remoteAddress(), clientInfo.getCurrentDatabase());
+        
         try {
             // 检查是否在事务中
             if (!clientInfo.isInTransaction()) {
+                logger.warn("[EXEC] 分支判断 - 不在事务中，返回错误");
                 ByteBuf b = protocolParser.serialize("-ERR EXEC without MULTI");
                 if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                 else if (b != null) b.release();
@@ -1072,6 +1078,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             
             // 检查事务队列是否有错误
             if (clientInfo.isTxQueueError()) {
+                logger.warn("[EXEC] 分支判断 - 事务队列有错误，返回EXECABORT");
                 ByteBuf b = protocolParser.serialize("-EXECABORT Transaction discarded because of previous errors.");
                 if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                 else if (b != null) b.release();
@@ -1082,6 +1089,8 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             // 检查监视的键是否被修改
             boolean watchedChanged = false;
             java.util.Map<String, Long> watchedVersions = clientInfo.getWatchedVersions();
+            logger.debug("[EXEC] 分支判断 - 监视键数量: {}", watchedVersions.size());
+            
             if (!watchedVersions.isEmpty()) {
                 for (Map.Entry<String, Long> entry : watchedVersions.entrySet()) {
                     String keyWithDb = entry.getKey();
@@ -1092,12 +1101,16 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                         int db = Integer.parseInt(keyWithDb.substring(0, sepIndex));
                         String key = keyWithDb.substring(sepIndex + 1);
                         long currentVersion = memoryStore.getKeyVersion(db, key);
-                        if (currentVersion != entry.getValue()) {
+                        long watchedVersion = entry.getValue();
+                        logger.debug("[EXEC] 监视键检查 - key: {}, db: {}, 当前版本: {}, 监视版本: {}", 
+                            key, db, currentVersion, watchedVersion);
+                        if (currentVersion != watchedVersion) {
                             watchedChanged = true;
+                            logger.info("[EXEC] 分支判断 - 监视键被修改: {}", key);
                             break;
                         }
                     } catch (NumberFormatException ex) {
-                        // 忽略格式错误的键
+                        logger.warn("[EXEC] 异常捕获 - 键格式错误: {}", keyWithDb);
                         continue;
                     }
                 }
@@ -1105,6 +1118,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             
             // 如果监视的键被修改，放弃事务（返回 RESP Null Array）
             if (watchedChanged) {
+                logger.info("[EXEC] 分支判断 - 监视键被修改，返回Null Array");
                 ByteBuf b = protocolParser.serialize("*-1\r\n");
                 if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                 else if (b != null) b.release();
@@ -1114,9 +1128,12 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             
             // 执行事务队列中的命令
             java.util.List<Command> txQueue = clientInfo.getTxQueue();
+            int txQueueSize = txQueue.size();
+            logger.info("[EXEC] 数据处理 - 事务队列大小: {}", txQueueSize);
             
             // 限制事务队列大小，防止内存溢出
-            if (txQueue.size() > 1000) {
+            if (txQueueSize > 1000) {
+                logger.error("[EXEC] 分支判断 - 事务队列过大: {}", txQueueSize);
                 ByteBuf b = protocolParser.serialize("-ERR transaction queue too large");
                 if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                 else if (b != null) b.release();
@@ -1124,12 +1141,14 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 return;
             }
             
-            java.util.List<Object> results = new ArrayList<>(txQueue.size());
+            // 收集事务执行结果
+            java.util.List<Object> results = new ArrayList<>(txQueueSize);
             long startTime = System.currentTimeMillis();
             
             for (Command cmd : txQueue) {
                 // 检查执行时间，防止死循环
                 if (System.currentTimeMillis() - startTime > 5000) { // 5秒超时
+                    logger.error("[EXEC] 分支判断 - 事务执行超时");
                     ByteBuf b = protocolParser.serialize("-ERR transaction execution timed out");
                     if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                     else if (b != null) b.release();
@@ -1139,6 +1158,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 
                 String commandName = cmd.getName();
                 String[] args = cmd.getArgs();
+                logger.debug("[EXEC] 数据处理 - 执行命令: {}, 参数: {}", commandName, java.util.Arrays.toString(args));
                 
                 // 传递完整参数数组（包含命令名）
                 long cmdStartTime = System.nanoTime();
@@ -1146,31 +1166,117 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 // MONITOR hook for transaction commands
                 MonitorManager.getInstance().submit(clientInfo.getCurrentDatabase(), ctx.channel().remoteAddress().toString(), commandName, args);
 
-                Object response = commandHandler.handle(commandName, clientInfo.getCurrentDatabase(), args, memoryStore);
+                // 执行命令并获取原始结果
+                Object result;
+                if (commandName.equals("INCR") || commandName.equals("DECR") || commandName.equals("INCRBY") || commandName.equals("DECRBY")) {
+                    // 对于递增递减命令，直接调用内存存储的方法获取原始Long结果
+                    String key = args[1];
+                    long increment = 0;
+                    if (commandName.equals("INCR")) {
+                        increment = 1;
+                    } else if (commandName.equals("DECR")) {
+                        increment = -1;
+                    } else if (commandName.equals("INCRBY")) {
+                        increment = Long.parseLong(args[2]);
+                    } else if (commandName.equals("DECRBY")) {
+                        increment = -Long.parseLong(args[2]);
+                    }
+                    result = memoryStore.incrby(clientInfo.getCurrentDatabase(), key, increment);
+                    logger.debug("[EXEC] 数据处理 - 命令: {}, key: {}, increment: {}, 结果类型: {}, 结果值: {}", 
+                        commandName, key, increment, result != null ? result.getClass().getName() : "null", result);
+                } else if (commandName.equals("SET")) {
+                    // 对于SET命令，直接调用内存存储的方法
+                    String key = args[1];
+                    String value = args[2];
+                    memoryStore.set(clientInfo.getCurrentDatabase(), key, value);
+                    result = "OK";
+                    logger.debug("[EXEC] 数据处理 - 命令: SET, key: {}, 结果类型: String, 结果值: {}", key, result);
+                } else if (commandName.equals("GET")) {
+                    // 对于GET命令，直接调用内存存储的方法
+                    String key = args[1];
+                    result = memoryStore.get(clientInfo.getCurrentDatabase(), key);
+                    logger.debug("[EXEC] 数据处理 - 命令: GET, key: {}, 结果类型: {}, 结果值: {}", 
+                        key, result != null ? result.getClass().getName() : "null", result);
+                } else if (commandName.equals("DEL")) {
+                    // 对于DEL命令，直接调用内存存储的方法
+                    String key = args[1];
+                    result = memoryStore.del(clientInfo.getCurrentDatabase(), key) ? 1 : 0;
+                    logger.debug("[EXEC] 数据处理 - 命令: DEL, key: {}, 结果类型: Integer, 结果值: {}", key, result);
+                } else {
+                    // 对于其他命令，使用命令处理器
+                    Object response = commandHandler.handle(commandName, clientInfo.getCurrentDatabase(), args, memoryStore);
+                    result = response;
+                    logger.debug("[EXEC] 数据处理 - 命令: {}, 结果类型: {}, 结果值: {}", 
+                        commandName, result != null ? result.getClass().getName() : "null", result);
+                }
                 long cmdDuration = (System.nanoTime() - cmdStartTime) / 1000; // microseconds
                 SlowLogManager.getInstance().push(cmdDuration, java.util.Arrays.asList(args), ctx.channel().remoteAddress().toString(), clientInfo.getName());
                 
-                results.add(response);
+                results.add(result);
+                logger.debug("[EXEC] 数据处理 - 添加结果到列表, 当前结果数量: {}", results.size());
                 
                 // 特殊处理SELECT命令，更新客户端数据库状态
                 if ("SELECT".equals(commandName) && args.length >= 2) {
                     try {
                         int database = Integer.parseInt(args[1]);
                         clientInfo.setCurrentDatabase(database);
+                        logger.info("[EXEC] 数据处理 - 切换数据库: {}", database);
                     } catch (NumberFormatException ignored) {}
                 }
             }
             
-            // 返回执行结果
-            ByteBuf b = protocolParser.serialize(results);
-            if (b != null && b.isReadable()) {
-                ctx.writeAndFlush(b);
-            } else if (b != null) {
-                b.release();
+            // 返回执行结果 - 直接构建RESP响应字符串
+            logger.info("[EXEC] 数据处理 - 准备序列化结果, 结果数量: {}", results.size());
+            for (int i = 0; i < results.size(); i++) {
+                Object r = results.get(i);
+                logger.info("[EXEC] 数据处理 - 结果[{}]: 类型={}, 值={}", 
+                    i, r != null ? r.getClass().getName() : "null", r);
             }
+            
+            // 直接构建RESP响应字符串
+            StringBuilder respBuilder = new StringBuilder();
+            respBuilder.append("*").append(results.size()).append("\r\n");
+            
+            for (Object result : results) {
+                if (result == null) {
+                    respBuilder.append("$-1\r\n");
+                } else if (result instanceof Long || result instanceof Integer) {
+                    // 整数响应
+                    respBuilder.append(":").append(result).append("\r\n");
+                } else if (result instanceof String) {
+                    String str = (String) result;
+                    // 简单字符串响应（如OK）
+                    if ("OK".equals(str)) {
+                        respBuilder.append("+").append(str).append("\r\n");
+                    } else {
+                        // 批量字符串响应
+                        byte[] bytes = str.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                        respBuilder.append("$").append(bytes.length).append("\r\n").append(str).append("\r\n");
+                    }
+                } else if (result instanceof byte[]) {
+                    byte[] bytes = (byte[]) result;
+                    respBuilder.append("$").append(bytes.length).append("\r\n");
+                    respBuilder.append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1));
+                    respBuilder.append("\r\n");
+                } else {
+                    // 其他类型，转换为字符串
+                    String str = result.toString();
+                    byte[] bytes = str.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                    respBuilder.append("$").append(bytes.length).append("\r\n").append(str).append("\r\n");
+                }
+            }
+            
+            String respStr = respBuilder.toString();
+            logger.info("[EXEC] 出口 - 发送响应 (str): {}", respStr.replace("\r\n", "\\r\\n"));
+            
+            ByteBuf b = Unpooled.directBuffer(respStr.length());
+            b.writeBytes(respStr.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            ctx.writeAndFlush(b);
             
             // 重置事务状态
             clientInfo.resetTransaction();
+            long execEndTime = System.nanoTime();
+            logger.info("[EXEC] 出口 - 事务完成, 耗时: {} ns", (execEndTime - execStartTime));
         } catch (Exception e) {
             logger.error("Error handling EXEC command", e);
             ByteBuf b = protocolParser.serialize("-ERR Error handling EXEC command");
@@ -1242,5 +1348,19 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             b.release();
             ctx.close();
         }
+    }
+    
+    // 辅助方法：将ByteBuf转换为十六进制字符串
+    private String bytesToHex(ByteBuf buf) {
+        StringBuilder sb = new StringBuilder();
+        while (buf.isReadable()) {
+            byte b = buf.readByte();
+            sb.append(String.format("%02x ", b));
+            if (b >= 32 && b <= 126) {
+                sb.append('(').append((char) b).append(')');
+            }
+        }
+        buf.release();
+        return sb.toString();
     }
 }

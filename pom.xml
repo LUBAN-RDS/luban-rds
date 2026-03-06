@@ -89,11 +89,18 @@
                 <scope>test</scope>
             </dependency>
             
-            <!-- Caffeine -->
+<!-- Caffeine -->
             <dependency>
                 <groupId>com.github.ben-manes.caffeine</groupId>
                 <artifactId>caffeine</artifactId>
                 <version>3.2.3</version>
+            </dependency>
+
+            <!-- Kryo -->
+            <dependency>
+                <groupId>com.esotericsoftware</groupId>
+                <artifactId>kryo</artifactId>
+                <version>5.6.0</version>
             </dependency>
 
             <!-- 本项目模块 -->

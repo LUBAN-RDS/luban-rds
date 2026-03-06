@@ -563,7 +563,35 @@ public class RedisProtocolParser {
         }
         
         if (value instanceof String) {
-            return serializeBulkString((String) value);
+            String str = (String) value;
+            if (str.startsWith(":")) {
+                // 整数响应，解析为Long类型后序列化
+                try {
+                    // 提取数字部分（去掉":"和"\r\n"）
+                    String numStr = str.substring(1).trim();
+                    long num = Long.parseLong(numStr);
+                    return serializeInteger(num);
+                } catch (NumberFormatException e) {
+                    // 如果解析失败，直接写入原字符串
+                    ByteBuf buffer = Unpooled.directBuffer(str.length());
+                    buffer.writeBytes(str.getBytes(StandardCharsets.UTF_8));
+                    return buffer;
+                }
+            } else if (str.startsWith("+") || str.startsWith("-") || str.startsWith("*") ||
+                str.startsWith("%") || str.startsWith("~") || str.startsWith("|") || str.startsWith("_") ||
+                str.startsWith(",") || str.startsWith("#") || str.startsWith("(")) {
+                // Simple strings, errors, arrays, and RESP3 types use UTF-8
+                ByteBuf buffer = Unpooled.directBuffer(str.length());
+                buffer.writeBytes(str.getBytes(StandardCharsets.UTF_8));
+                return buffer;
+            }
+            if (str.startsWith("$")) {
+                // Bulk strings are binary-safe, use ISO-8859-1
+                ByteBuf buffer = Unpooled.directBuffer(str.length());
+                buffer.writeBytes(str.getBytes(StandardCharsets.ISO_8859_1));
+                return buffer;
+            }
+            return serializeBulkString(str);
         }
         
         if (value instanceof Long || value instanceof Integer) {

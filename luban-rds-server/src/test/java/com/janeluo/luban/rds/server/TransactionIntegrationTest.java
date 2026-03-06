@@ -1,5 +1,7 @@
 package com.janeluo.luban.rds.server;
+
 import com.janeluo.luban.rds.common.config.RdsConfig;
+import com.janeluo.luban.rds.server.NettyRedisServer;
 import org.junit.Test;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.Transaction;
@@ -14,15 +16,12 @@ public class TransactionIntegrationTest {
         NettyRedisServer server = new NettyRedisServer(config);
         server.start();
         
-        // 给服务器一些启动时间
         Thread.sleep(1000);
         
-        // 创建 Jedis 池，设置更长的超时时间
         JedisPoolConfig poolConfig = new JedisPoolConfig();
         JedisPool jedisPool = new JedisPool(poolConfig, "localhost", config.getPort(), 10000);
         
         try (Jedis j1 = jedisPool.getResource()) {
-            // 给连接一些时间建立
             Thread.sleep(500);
             
             j1.del("t:key");
@@ -32,13 +31,22 @@ public class TransactionIntegrationTest {
             t.incrBy("t:key", 5);
             java.util.List<Object> res = t.exec();
             assertNotNull(res);
+            System.out.println("DEBUG: res.size() = " + res.size());
+            for (int i = 0; i < res.size(); i++) {
+                Object item = res.get(i);
+                System.out.println("DEBUG: res[" + i + "] type = " + (item != null ? item.getClass().getName() : "null"));
+                if (item instanceof byte[]) {
+                    System.out.println("DEBUG: res[" + i + "] value (as string) = " + new String((byte[]) item));
+                } else {
+                    System.out.println("DEBUG: res[" + i + "] value = " + item);
+                }
+            }
             assertEquals(2, res.size());
             assertEquals(1L, ((Number) res.get(0)).longValue());
             assertEquals(6L, ((Number) res.get(1)).longValue());
             String val = j1.get("t:key");
             assertEquals("6", val);
         } finally {
-            // 给服务器一些时间处理最后的请求
             Thread.sleep(500);
             jedisPool.close();
             server.stop();
@@ -52,17 +60,14 @@ public class TransactionIntegrationTest {
         NettyRedisServer server = new NettyRedisServer(config);
         server.start();
         
-        // 给服务器一些启动时间
         Thread.sleep(1000);
         
-        // 创建 Jedis 池，设置更长的超时时间
         JedisPoolConfig poolConfig = new JedisPoolConfig();
         JedisPool jedisPool1 = new JedisPool(poolConfig, "localhost", config.getPort(), 10000);
         JedisPool jedisPool2 = new JedisPool(poolConfig, "localhost", config.getPort(), 10000);
         
         try (Jedis j1 = jedisPool1.getResource();
              Jedis j2 = jedisPool2.getResource()) {
-            // 给连接一些时间建立
             Thread.sleep(500);
             
             j1.del("w:key");
@@ -70,18 +75,15 @@ public class TransactionIntegrationTest {
             Transaction t2 = j1.multi();
             t2.set("w:key", "a");
             
-            // 给服务器一些时间处理 WATCH 命令
             Thread.sleep(500);
             
             j2.set("w:key", "b");
             
-            // 给服务器一些时间处理 SET 命令
             Thread.sleep(500);
             
             java.util.List<Object> res = t2.exec();
             assertNull(res);
         } finally {
-            // 给服务器一些时间处理最后的请求
             Thread.sleep(500);
             jedisPool1.close();
             jedisPool2.close();
