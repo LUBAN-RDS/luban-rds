@@ -48,6 +48,14 @@ title: 功能架构
 
 **核心功能**：提供安全的 Lua 执行环境
 
+### 3.4 Redis API 支持
+
+- `redis.call()` - 执行 Redis 命令，错误会向上传播
+- `redis.pcall()` - 执行 Redis 命令，错误会被捕获
+- `redis.error_reply()` - 返回错误响应
+- `redis.status_reply()` - 返回状态响应
+- `redis.sha1hex()` - 计算字符串的 SHA1 哈希值
+
 ## 4. 发布订阅
 
 ### 4.1 PubSubManager
@@ -70,12 +78,18 @@ title: 功能架构
 - 订阅确认：`["subscribe", "channel", count]`
 - 取消订阅确认：`["unsubscribe", "channel", count]`
 - 消息推送：`["message", "channel", "message"]`
+- 模式订阅确认：`["psubscribe", "pattern", count]`
+- 模式消息推送：`["pmessage", "pattern", "channel", "message"]`
+- 流订阅确认：`["ssubscribe", "channel", count]`
+- 流消息推送：`["smessage", "channel", "message"]`
 
 ## 5. 持久化
 
 ### 5.1 RDB 持久化
 
 **核心功能**：将内存数据以二进制格式保存到磁盘
+
+**技术实现**：使用 Kryo 序列化框架进行高效存储
 
 ### 5.2 AOF 持久化
 
@@ -89,7 +103,7 @@ title: 功能架构
 
 ### 6.1 NettyRedisServer
 
-**核心功能**：基于 Netty 的 Redis 服务器实现
+**核心功能**：基于 Netty 4.2 的高性能 Redis 服务器实现
 
 ### 6.2 RedisServerHandler
 
@@ -194,7 +208,35 @@ title: 功能架构
 - **历史快照**：新连接的监控客户端可立即获取最近 1MB 的命令历史。
 - **服务端过滤**：支持按数据库 ID 或命令模式在服务端过滤，减少网络传输。
 
-## 14. 总结
+### 13.2 SLOWLOG 命令
+
+**核心功能**：记录慢查询日志，帮助识别性能瓶颈
+
+**特性**：
+- 记录执行时间超过阈值的命令
+- 支持获取、清空慢查询日志
+- 记录命令参数、执行时间、客户端地址等信息
+
+## 14. 事务支持
+
+### 14.1 事务命令
+
+**核心功能**：提供完整的事务支持
+
+**命令**：
+- `MULTI` - 开始事务
+- `EXEC` - 执行事务
+- `DISCARD` - 取消事务
+- `WATCH` - 监视键
+- `UNWATCH` - 取消监视
+
+### 14.2 事务行为
+
+- 使用 WATCH 监视的键在 EXEC 前如果发生变更，EXEC 返回 Null Array
+- 事务入队阶段若存在参数错误，EXEC 返回 EXECABORT
+- 事务内 SELECT 更新客户端数据库状态
+
+## 15. 总结
 
 Luban-RDS 的功能架构设计具有以下特点：
 
@@ -206,7 +248,7 @@ Luban-RDS 的功能架构设计具有以下特点：
 - 扩展性：支持命令扩展、存储扩展和插件系统
 - 易用性：提供 Spring Boot 集成，便于在 Spring 应用中使用
 
-## 15. 下一步
+## 16. 下一步
 
 - [设计决策](./design.md)：了解重要设计选择的理由和权衡
 - [部署指南](../deployment/)：学习如何部署和配置 Luban-RDS

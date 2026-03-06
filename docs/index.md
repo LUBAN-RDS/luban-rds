@@ -1,6 +1,6 @@
 ---
 title: Luban-RDS 文档
-last_updated: 2026-03-04
+last_updated: 2026-03-06
 version: 1.0.0-SNAPSHOT
 ---
 
@@ -40,7 +40,7 @@ version: 1.0.0-SNAPSHOT
 | 📡 **协议兼容** | 完整支持 RESP 协议，兼容所有 Redis 客户端 |
 | 💾 **持久化** | 支持 RDB 快照和 AOF 日志双重持久化机制 |
 | 🔒 **安全可控** | Lua 脚本沙箱模式，细粒度权限控制 |
-| 📊 **可观测** | 内置 MONITOR、SLOWLOG 监控命令，实时性能追踪 |
+| 📊 **可观测** | 内置 MONITOR、SLOWLOG、MEMORY 监控命令，实时性能追踪 |
 | 🌱 **Spring 集成** | 提供 Spring Boot Starter，开箱即用 |
 
 ---
@@ -83,22 +83,24 @@ version: 1.0.0-SNAPSHOT
 - ✅ **事务支持**: MULTI/EXEC/DISCARD/WATCH 事务命令
 
 #### 📡 协议与网络
-- ✅ **RESP 协议**: 完整实现 Redis Serialization Protocol
+- ✅ **RESP 协议**: 完整实现 Redis Serialization Protocol，支持 RESP2 和 RESP3
 - ✅ **Pipeline**: 支持命令管道，批量执行提升性能
-- ✅ **Pub/Sub**: 发布订阅模式，支持消息推送
+- ✅ **Pub/Sub**: 发布订阅模式，支持频道订阅、模式订阅和流订阅
 
 #### 💾 持久化
-- ✅ **RDB 快照**: 内存数据快照持久化
+- ✅ **RDB 快照**: 内存数据快照持久化，使用 Kryo 序列化
 - ✅ **AOF 日志**: 命令追加式持久化
 
 #### 🔧 脚本与扩展
 - ✅ **Lua 脚本**: 集成 LuaJ 引擎，支持 EVAL/EVALSHA
 - ✅ **沙箱模式**: 可配置的安全脚本执行环境
-- ✅ **Redis API**: 完整的 `redis.call()` / `redis.pcall()` 支持
+- ✅ **Redis API**: 完整的 `redis.call()` / `redis.pcall()` / `redis.sha1hex()` 支持
 
 #### 📊 监控与性能
 - ✅ **MONITOR**: 实时命令监控（<40ns 开销）
 - ✅ **SLOWLOG**: 慢查询日志记录
+- ✅ **MEMORY**: 内存使用分析和诊断
+- ✅ **INFO**: 服务器状态信息聚合
 - ✅ **Benchmark**: 内置性能测试工具
 
 #### 🌱 生态集成

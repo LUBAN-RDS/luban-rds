@@ -4,7 +4,7 @@ title: 高级功能
 
 # 高级功能
 
-本部分介绍了 Luban-RDS 的高级功能和特性，包括持久化、Lua 脚本、发布订阅等。
+本部分介绍了 Luban-RDS 的高级功能和特性，包括持久化、Lua 脚本、发布订阅、事务、监控等。
 
 ## 1. 持久化
 
@@ -81,10 +81,6 @@ BGREWRITEAOF
 - 文件较大
 - 恢复速度较慢
 
-### 1.3 混合持久化
-
-（如果支持）结合 RDB 和 AOF 的优点，提高数据安全性和恢复速度。
-
 ## 2. Lua 脚本
 
 Luban-RDS 使用 LuaJ 引擎实现 Lua 脚本支持，提供与 Redis 完全兼容的 Lua 执行环境。
@@ -138,7 +134,7 @@ Lua 脚本中可以使用以下 Redis API：
 
 ## 3. 发布订阅
 
-Luban-RDS 支持频道订阅和消息广播功能。
+Luban-RDS 支持频道订阅、模式订阅和消息广播功能。
 
 ### 3.1 基本操作
 
@@ -152,7 +148,10 @@ SUBSCRIBE channel
 SUBSCRIBE channel1 channel2
 
 # 模式订阅
-PSUBSCRIBE channel*
+PSUBSCRIBE channel:*
+
+# 流订阅
+SSUBSCRIBE stream:*
 ```
 
 **发布消息**：
@@ -171,7 +170,10 @@ UNSUBSCRIBE channel
 UNSUBSCRIBE
 
 # 取消模式订阅
-PUNSUBSCRIBE channel*
+PUNSUBSCRIBE channel:*
+
+# 取消流订阅
+SUNSUBSCRIBE stream:*
 ```
 
 ### 3.2 消息格式
@@ -179,6 +181,8 @@ PUNSUBSCRIBE channel*
 - **订阅确认**：`["subscribe", "channel", count]`
 - **取消订阅确认**：`["unsubscribe", "channel", count]`
 - **消息推送**：`["message", "channel", "message"]`
+- **模式订阅确认**：`["psubscribe", "pattern", count]`
+- **模式消息推送**：`["pmessage", "pattern", "channel", "message"]`
 
 ### 3.3 使用场景
 
@@ -189,7 +193,7 @@ PUNSUBSCRIBE channel*
 
 ## 4. 事务
 
-（如果支持）Luban-RDS 可能支持基本的事务功能。
+Luban-RDS 提供完整的事务支持，包括 MULTI、EXEC、DISCARD、WATCH、UNWATCH 命令。
 
 ### 4.1 基本操作
 
@@ -207,6 +211,28 @@ EXEC
 # 取消事务
 DISCARD
 ```
+
+### 4.2 WATCH 机制
+
+```bash
+# 监视键
+WATCH key1 key2
+
+# 开始事务
+MULTI
+
+# 执行命令
+SET key1 newvalue
+
+# 提交事务（如果 key1 或 key2 被修改，返回 Null Array）
+EXEC
+```
+
+### 4.3 事务行为说明
+
+- 使用 WATCH 监视的键在 EXEC 前如果发生变更，EXEC 返回 Null Array（RESP: `*-1\r\n`），事务不执行
+- 事务入队阶段若存在参数错误，EXEC 返回 EXECABORT 并丢弃整个事务
+- 事务内 SELECT 更新客户端数据库状态
 
 ## 5. 管道
 
@@ -241,7 +267,45 @@ client.close();
 
 ## 6. 监控
 
-### 6.1 性能监控
+### 6.1 实时监控（MONITOR）
+
+MONITOR 命令提供实时命令监控能力：
+
+```bash
+# 监控所有命令
+MONITOR
+
+# 仅监控数据库 0 的命令
+MONITOR DB 0
+
+# 仅监控 SET 开头的命令
+MONITOR MATCH ^SET.*
+```
+
+**输出格式**：
+```
+<timestamp> [db <dbid> <client-addr>] "<command>" "<arg1>" "<arg2>" ...
+```
+
+例如：
+```
+1614850000.123456 [0 127.0.0.1:54321] "SET" "key" "value"
+```
+
+### 6.2 慢查询日志（SLOWLOG）
+
+```bash
+# 获取慢查询日志
+SLOWLOG GET 10
+
+# 获取慢查询日志长度
+SLOWLOG LEN
+
+# 清空慢查询日志
+SLOWLOG RESET
+```
+
+### 6.3 性能监控
 
 使用 `INFO` 命令获取服务器性能指标：
 
@@ -259,9 +323,21 @@ INFO stats
 INFO commandstats
 ```
 
-### 6.2 慢查询日志
+### 6.4 内存分析（MEMORY）
 
-（如果支持）记录执行时间超过阈值的命令。
+```bash
+# 估算键占用的内存
+MEMORY USAGE mykey
+
+# 获取内存统计信息
+MEMORY STATS
+
+# 触发内存清理
+MEMORY PURGE
+
+# 获取内存诊断报告
+MEMORY DOCTOR
+```
 
 ## 7. 安全
 
@@ -302,9 +378,8 @@ Luban-RDS 提供了 Spring Boot starter 模块，方便在 Spring Boot 应用中
 ### 8.1 添加依赖
 
 ```xml
-
 <dependency>
-    <groupId>com.janeluocom.janeluo</groupId>
+    <groupId>com.janeluo.luban</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
     <version>1.0.0</version>
 </dependency>

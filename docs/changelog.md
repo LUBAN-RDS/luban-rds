@@ -1,6 +1,6 @@
 ---
 title: 更新日志
-last_updated: 2026-03-04
+last_updated: 2026-03-07
 version: 1.0.0-SNAPSHOT
 ---
 # Changelog
@@ -15,10 +15,26 @@ version: 1.0.0-SNAPSHOT
 - 完整 RESP3 协议支持，包括新数据类型（Map、Set、Null、Boolean、Double、Big Number）
 - 协议版本自动检测和切换，支持 RESP2 和 RESP3 客户端
 - 优化 Lua 脚本处理器的字符串编码处理，符合 Redis 规范
+- 模式订阅支持（PSUBSCRIBE/PUNSUBSCRIBE）
+- 流订阅支持（SSUBSCRIBE/SUNSUBSCRIBE）
+- 慢查询日志功能（SLOWLOG GET/LEN/RESET）
+- 扩展字符串命令：SETNX, GETSET, SETRANGE, GETRANGE, PSETEX
+- 扩展集合命令：SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF
+- 扩展有序集合命令：ZREVRANGE, ZRANGEBYSCORE, ZRANK, ZREVRANK, ZCOUNT, ZINCRBY
+- 扩展列表命令：LINDEX, LSET, LREM
+- 扩展哈希命令：HSETNX, HINCRBY, HSCAN
+- 客户端管理命令：CLIENT LIST, CLIENT KILL, CLIENT SETNAME, CLIENT GETNAME
+- 键版本控制机制，支持 WATCH 乐观锁
 
 ### Changed
 
-- 无
+- 升级 Netty 版本至 4.2.10.Final
+- 升级 Spring Boot 版本至 2.7.18
+- 升级 Caffeine 版本至 3.2.3
+- 升级 Guava 版本至 33.5.0-jre
+- 升级 Kryo 版本至 5.6.0
+- RDB 持久化改用 Kryo 序列化框架
+- MONITOR 命令支持 DB 和 MATCH 过滤参数
 
 ### Deprecated
 
@@ -30,11 +46,12 @@ version: 1.0.0-SNAPSHOT
 
 ### Fixed
 
-- 无
+- 修复事务执行时的响应序列化问题
+- 修复 WATCH 机制在多数据库场景下的键版本检查
 
 ### Security
 
-- 无
+- 增强 Lua 脚本沙箱安全性
 
 ## [1.0.0] - 2026-03-04
 
@@ -50,6 +67,8 @@ version: 1.0.0-SNAPSHOT
 - Spring Boot Starter 自动配置集成
 - 内存统计与 MEMORY 命令族
 - 高性能 MONITOR 命令与事件管线
+- 批量命令支持：MSET, MGET, HMSET, HMGET, DEL (多键)
+- 多元素推入：LPUSH/RPUSH/SADD/ZADD 支持多元素
 
 ### Changed
 
