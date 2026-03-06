@@ -4,7 +4,17 @@ import com.janeluo.luban.rds.core.store.MemoryStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * 内嵌Redis服务器
+ * 
+ * <p>提供内嵌模式的Redis服务器实现，适用于测试和嵌入式场景。
+ * 支持随机端口分配，方便并行测试。
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class EmbeddedRedisServer implements RedisServer {
+    
     private static final Logger logger = LoggerFactory.getLogger(EmbeddedRedisServer.class);
     
     private final NettyRedisServer nettyServer;

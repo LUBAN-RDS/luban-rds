@@ -4,9 +4,34 @@ import com.janeluo.luban.rds.persistence.impl.AofPersistService;
 import com.janeluo.luban.rds.persistence.impl.RdbPersistService;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 
+/**
+ * 持久化服务工厂
+ * 
+ * <p>根据配置创建相应的持久化服务实例，支持：
+ * <ul>
+ *   <li>RDB - 快照持久化</li>
+ *   <li>AOF - 追加文件持久化</li>
+ *   <li>BOTH - 同时使用RDB和AOF</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class PersistServiceFactory {
+    
+    /**
+     * RDB持久化模式常量
+     */
     public static final String PERSIST_MODE_RDB = "rdb";
+    
+    /**
+     * AOF持久化模式常量
+     */
     public static final String PERSIST_MODE_AOF = "aof";
+    
+    /**
+     * 混合持久化模式常量
+     */
     public static final String PERSIST_MODE_BOTH = "both";
     
     /**

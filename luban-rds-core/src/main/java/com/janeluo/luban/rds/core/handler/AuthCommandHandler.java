@@ -6,11 +6,19 @@ import com.google.common.collect.Sets;
 import java.util.Set;
 
 /**
- * AUTH 命令处理器
- * 用于处理客户端密码验证
+ * AUTH命令处理器
+ * 
+ * <p>处理Redis AUTH命令，用于客户端密码验证。
+ * 当服务器配置了requirepass时，客户端需要先通过AUTH命令验证才能执行其他命令。
+ * 
+ * @author janeluo
+ * @since 1.0.0
  */
 public class AuthCommandHandler implements CommandHandler {
     
+    /**
+     * 支持的命令集合
+     */
     private final Set<String> supportedCommands = Sets.newHashSet("AUTH");
     
     /**

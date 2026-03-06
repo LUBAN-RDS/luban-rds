@@ -23,8 +23,32 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Redis服务器命令处理器
+ * 
+ * <p>负责处理客户端连接和命令执行，是服务器的核心处理组件。
+ * 
+ * <p>主要功能：
+ * <ul>
+ *   <li>RESP协议解析和命令分发</li>
+ *   <li>客户端连接和状态管理</li>
+ *   <li>Pub/Sub消息订阅发布</li>
+ *   <li>事务支持（MULTI/EXEC/DISCARD/WATCH）</li>
+ *   <li>慢日志记录</li>
+ *   <li>命令监控（MONITOR）</li>
+ *   <li>认证（AUTH）</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class RedisServerHandler extends ChannelInboundHandlerAdapter {
+    
     private static final Logger logger = LoggerFactory.getLogger(RedisServerHandler.class);
+    
+    /**
+     * 已知命令集合
+     */
     private static final java.util.Set<String> KNOWN_COMMANDS = new HashSet<>();
     static {
         String[] names = new String[]{

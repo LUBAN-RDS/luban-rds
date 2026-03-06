@@ -9,6 +9,22 @@ import com.google.common.collect.Sets;
 import java.util.List;
 import java.util.Set;
 
+/**
+ * List类型命令处理器
+ * 
+ * <p>负责处理Redis List类型相关的所有命令，包括：
+ * <ul>
+ *   <li>LPUSH/RPUSH - 列表头部/尾部插入操作</li>
+ *   <li>LPOP/RPOP - 列表头部/尾部弹出操作</li>
+ *   <li>LLEN - 列表长度获取</li>
+ *   <li>LRANGE - 列表范围获取</li>
+ *   <li>LREM - 列表元素删除</li>
+ *   <li>LINDEX/LSET - 列表索引访问和设置</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class ListCommandHandler implements CommandHandler {
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.LPUSH,

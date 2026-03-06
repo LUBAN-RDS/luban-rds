@@ -5,7 +5,27 @@ import com.google.common.collect.Maps;
 
 import java.util.Map;
 
+/**
+ * 默认命令处理器
+ * 
+ * <p>负责管理所有命令处理器的注册和路由分发。
+ * 根据命令名称将请求路由到对应的处理器执行。
+ * 
+ * <p>支持的功能：
+ * <ul>
+ *   <li>命令处理器动态注册</li>
+ *   <li>命令路由分发</li>
+ *   <li>访问密码验证支持</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class DefaultCommandHandler {
+    
+    /**
+     * 命令处理器映射表
+     */
     private final Map<String, CommandHandler> commandHandlers = Maps.newConcurrentMap();
     
     /**

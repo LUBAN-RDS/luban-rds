@@ -9,8 +9,24 @@ import com.janeluo.luban.rds.core.store.MemoryStore;
 import java.util.List;
 import java.util.Set;
 
+/**
+ * SLOWLOG命令处理器
+ * 
+ * <p>处理Redis慢日志相关命令，包括：
+ * <ul>
+ *   <li>SLOWLOG GET [count] - 获取慢日志条目</li>
+ *   <li>SLOWLOG LEN - 获取慢日志条目数量</li>
+ *   <li>SLOWLOG RESET - 重置慢日志</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class SlowLogCommandHandler implements CommandHandler {
 
+    /**
+     * 支持的命令集合
+     */
     private final Set<String> supportedCommands = Sets.newHashSet("SLOWLOG");
 
     @Override

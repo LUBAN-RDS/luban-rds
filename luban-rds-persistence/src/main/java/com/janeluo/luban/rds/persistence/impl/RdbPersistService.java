@@ -12,17 +12,31 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * RDB 持久化服务
+ * RDB持久化服务
  * 
- * 参考 Redis 的 BGSAVE 实现，采用异步方式进行持久化：
- * 1. 使用独立线程池执行持久化任务
- * 2. 使用 NIO 提高 I/O 性能
- * 3. 支持写时复制（COW）语义，避免阻塞主线程
- * 4. 使用临时文件 + 原子重命名，保证数据一致性
+ * <p>参考Redis的BGSAVE实现，采用异步方式进行持久化：
+ * <ul>
+ *   <li>使用独立线程池执行持久化任务</li>
+ *   <li>使用NIO提高I/O性能</li>
+ *   <li>支持写时复制（COW）语义，避免阻塞主线程</li>
+ *   <li>使用临时文件+原子重命名，保证数据一致性</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
  */
 public class RdbPersistService implements PersistService {
+    
     private static final Logger logger = LoggerFactory.getLogger(RdbPersistService.class);
+    
+    /**
+     * RDB文件名
+     */
     private static final String RDB_FILE_NAME = "dump.rdb";
+    
+    /**
+     * RDB临时文件名
+     */
     private static final String RDB_TEMP_FILE_NAME = "temp-dump.rdb";
     
     private final String dataDir;

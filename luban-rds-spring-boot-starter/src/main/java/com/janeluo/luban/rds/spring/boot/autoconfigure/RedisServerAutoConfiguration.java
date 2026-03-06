@@ -12,10 +12,20 @@ import org.springframework.context.annotation.Configuration;
 
 import javax.annotation.PreDestroy;
 
+/**
+ * Redis服务器自动配置类
+ * 
+ * <p>Spring Boot自动配置类，用于创建和管理内嵌Redis服务器实例。
+ * 当配置属性 spring.redis.embedded.enabled=true 时自动激活。
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 @Configuration
 @EnableConfigurationProperties(RedisServerProperties.class)
 @ConditionalOnProperty(name = "spring.redis.embedded.enabled", havingValue = "true")
 public class RedisServerAutoConfiguration {
+    
     private static final Logger logger = LoggerFactory.getLogger(RedisServerAutoConfiguration.class);
     
     private RedisServer redisServer;

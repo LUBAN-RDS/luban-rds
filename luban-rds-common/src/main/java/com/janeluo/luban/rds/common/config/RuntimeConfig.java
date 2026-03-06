@@ -1,34 +1,88 @@
 package com.janeluo.luban.rds.common.config;
 
-public class RuntimeConfig {
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * 运行时配置类
+ * 管理服务器运行时的各种配置参数和统计信息
+ */
+public final class RuntimeConfig {
+
+    /** Lua 脚本执行超时时间（毫秒） */
     private static volatile long luaScriptTimeoutMs = 5000L;
-    private static final java.util.concurrent.atomic.AtomicLong luaMaxReturnBytes = new java.util.concurrent.atomic.AtomicLong(1048576);
-    private static final java.util.concurrent.atomic.AtomicLong luaMaxScriptBytes = new java.util.concurrent.atomic.AtomicLong(65536);
-    private static final java.util.concurrent.atomic.AtomicInteger cachedScriptsCount = new java.util.concurrent.atomic.AtomicInteger(0);
-    private static final java.util.concurrent.atomic.AtomicLong cachedScriptsBytes = new java.util.concurrent.atomic.AtomicLong(0);
-    private static final java.util.concurrent.atomic.AtomicLong scriptExecutions = new java.util.concurrent.atomic.AtomicLong(0);
-    private static final java.util.concurrent.atomic.AtomicLong scriptTimeouts = new java.util.concurrent.atomic.AtomicLong(0);
-    private static final java.util.concurrent.atomic.AtomicLong scriptKills = new java.util.concurrent.atomic.AtomicLong(0);
-    private static final java.util.concurrent.atomic.AtomicLong scriptTotalTimeMs = new java.util.concurrent.atomic.AtomicLong(0);
-    private static final java.util.concurrent.atomic.AtomicLong scriptMaxTimeMs = new java.util.concurrent.atomic.AtomicLong(0);
-    private static final java.util.concurrent.atomic.AtomicLong keyspaceHits = new java.util.concurrent.atomic.AtomicLong(0);
-    private static final java.util.concurrent.atomic.AtomicLong keyspaceMisses = new java.util.concurrent.atomic.AtomicLong(0);
+
+    /** Lua 脚本最大返回字节数 */
+    private static final AtomicLong luaMaxReturnBytes = new AtomicLong(1048576);
+
+    /** Lua 脚本最大字节数 */
+    private static final AtomicLong luaMaxScriptBytes = new AtomicLong(65536);
+
+    /** 缓存的脚本数量 */
+    private static final AtomicInteger cachedScriptsCount = new AtomicInteger(0);
+
+    /** 缓存的脚本字节数 */
+    private static final AtomicLong cachedScriptsBytes = new AtomicLong(0);
+
+    /** 脚本执行次数 */
+    private static final AtomicLong scriptExecutions = new AtomicLong(0);
+
+    /** 脚本超时次数 */
+    private static final AtomicLong scriptTimeouts = new AtomicLong(0);
+
+    /** 脚本终止次数 */
+    private static final AtomicLong scriptKills = new AtomicLong(0);
+
+    /** 脚本执行总时间（毫秒） */
+    private static final AtomicLong scriptTotalTimeMs = new AtomicLong(0);
+
+    /** 脚本最大执行时间（毫秒） */
+    private static final AtomicLong scriptMaxTimeMs = new AtomicLong(0);
+
+    /** 键空间命中次数 */
+    private static final AtomicLong keyspaceHits = new AtomicLong(0);
+
+    /** 键空间未命中次数 */
+    private static final AtomicLong keyspaceMisses = new AtomicLong(0);
+
+    /** 是否启用指标统计 */
     private static volatile boolean metricsEnabled = true;
-    private static final java.util.concurrent.atomic.AtomicLong lastResetTimeMs = new java.util.concurrent.atomic.AtomicLong(0);
-    private static final java.util.concurrent.atomic.AtomicLong errorRepliesTotal = new java.util.concurrent.atomic.AtomicLong(0);
-    private static final java.util.concurrent.atomic.AtomicLong errorRepliesOom = new java.util.concurrent.atomic.AtomicLong(0);
+
+    /** 上次重置时间（毫秒） */
+    private static final AtomicLong lastResetTimeMs = new AtomicLong(0);
+
+    /** 错误响应总数 */
+    private static final AtomicLong errorRepliesTotal = new AtomicLong(0);
+
+    /** OOM 错误响应数 */
+    private static final AtomicLong errorRepliesOom = new AtomicLong(0);
+
+    /** 是否启用 Lua 沙箱模式 */
     private static volatile boolean luaSandboxEnabled = true;
+
+    /** Lua 允许的模块列表（逗号分隔） */
     private static volatile String luaAllowedModules = "";
-    private static final java.util.concurrent.atomic.AtomicLong luaMaxOpsPerScript = new java.util.concurrent.atomic.AtomicLong(1000);
+
+    /** Lua 脚本最大操作数 */
+    private static final AtomicLong luaMaxOpsPerScript = new AtomicLong(1000);
+
+    /** Lua 脚本让步间隔（毫秒） */
     private static volatile long luaYieldMs = 1;
+
+    /** Lua 阻止的函数列表（逗号分隔） */
     private static volatile String luaBlockedFunctions = "";
-    
-    // SlowLog configuration
-    private static volatile long slowlogLogSlowerThan = 10000; // 10000 microseconds (10ms)
+
+    /** 慢查询日志阈值（微秒），默认 10000 微秒（10ms） */
+    private static volatile long slowlogLogSlowerThan = 10000;
+
+    /** 慢查询日志最大长度，默认 128 */
     private static volatile long slowlogMaxLen = 128;
-    
-    // Monitor configuration
+
+    /** 监控最大客户端连接数，默认 100 */
     private static volatile int monitorMaxClients = 100;
+
+    private RuntimeConfig() {
+    }
 
     public static long getLuaScriptTimeoutMs() {
         return luaScriptTimeoutMs;
@@ -46,8 +100,11 @@ public class RuntimeConfig {
         return luaMaxReturnBytes.get();
     }
 
-    public static void setLuaMaxReturnBytes(long v) {
-        if (v <= 0) v = 1048576;
+    public static void setLuaMaxReturnBytes(long value) {
+        long v = value;
+        if (v <= 0) {
+            v = 1048576;
+        }
         luaMaxReturnBytes.set(v);
     }
 
@@ -55,8 +112,11 @@ public class RuntimeConfig {
         return luaMaxScriptBytes.get();
     }
 
-    public static void setLuaMaxScriptBytes(long v) {
-        if (v <= 0) v = 65536;
+    public static void setLuaMaxScriptBytes(long value) {
+        long v = value;
+        if (v <= 0) {
+            v = 65536;
+        }
         luaMaxScriptBytes.set(v);
     }
 
@@ -117,13 +177,19 @@ public class RuntimeConfig {
     }
 
     public static void recordScriptDuration(long ms) {
-        if (ms < 0) return;
-        if (!metricsEnabled) return;
+        if (ms < 0) {
+            return;
+        }
+        if (!metricsEnabled) {
+            return;
+        }
         scriptTotalTimeMs.addAndGet(ms);
         long prev;
         do {
             prev = scriptMaxTimeMs.get();
-            if (ms <= prev) break;
+            if (ms <= prev) {
+                break;
+            }
         } while (!scriptMaxTimeMs.compareAndSet(prev, ms));
     }
 
@@ -208,48 +274,64 @@ public class RuntimeConfig {
     public static void setLuaSandboxEnabled(boolean enabled) {
         luaSandboxEnabled = enabled;
     }
-    
+
     public static void setLuaAllowedModules(String csv) {
-        if (csv == null) csv = "";
-        luaAllowedModules = csv.trim();
+        String value = csv;
+        if (value == null) {
+            value = "";
+        }
+        luaAllowedModules = value.trim();
     }
-    
+
     public static String getLuaAllowedModules() {
         return luaAllowedModules;
     }
-    
+
     public static boolean isModuleAllowed(String name) {
-        if (luaAllowedModules == null || luaAllowedModules.isEmpty()) return false;
+        if (luaAllowedModules == null || luaAllowedModules.isEmpty()) {
+            return false;
+        }
         String[] parts = luaAllowedModules.split(",");
-        for (String p : parts) {
-            if (p.trim().equalsIgnoreCase(name)) return true;
+        for (String part : parts) {
+            if (part.trim().equalsIgnoreCase(name)) {
+                return true;
+            }
         }
         return false;
     }
-    
+
     public static long getLuaMaxOpsPerScript() {
         return luaMaxOpsPerScript.get();
     }
-    
-    public static void setLuaMaxOpsPerScript(long v) {
-        if (v <= 0) v = 1000;
+
+    public static void setLuaMaxOpsPerScript(long value) {
+        long v = value;
+        if (v <= 0) {
+            v = 1000;
+        }
         luaMaxOpsPerScript.set(v);
     }
-    
+
     public static long getLuaYieldMs() {
         return luaYieldMs;
     }
-    
+
     public static void setLuaYieldMs(long ms) {
-        if (ms < 0) ms = 0;
-        luaYieldMs = ms;
+        long value = ms;
+        if (value < 0) {
+            value = 0;
+        }
+        luaYieldMs = value;
     }
-    
+
     public static void setLuaBlockedFunctions(String csv) {
-        if (csv == null) csv = "";
-        luaBlockedFunctions = csv.trim();
+        String value = csv;
+        if (value == null) {
+            value = "";
+        }
+        luaBlockedFunctions = value.trim();
     }
-    
+
     public static String getLuaBlockedFunctions() {
         return luaBlockedFunctions;
     }
@@ -267,8 +349,11 @@ public class RuntimeConfig {
     }
 
     public static void setSlowlogMaxLen(long len) {
-        if (len < 0) len = 0;
-        slowlogMaxLen = len;
+        long value = len;
+        if (value < 0) {
+            value = 0;
+        }
+        slowlogMaxLen = value;
     }
 
     public static int getMonitorMaxClients() {
@@ -276,7 +361,10 @@ public class RuntimeConfig {
     }
 
     public static void setMonitorMaxClients(int maxClients) {
-        if (maxClients < 0) maxClients = 0;
-        monitorMaxClients = maxClients;
+        int value = maxClients;
+        if (value < 0) {
+            value = 0;
+        }
+        monitorMaxClients = value;
     }
 }

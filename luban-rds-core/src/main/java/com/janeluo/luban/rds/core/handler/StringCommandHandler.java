@@ -11,6 +11,22 @@ import com.janeluo.luban.rds.common.context.PubSubService;
 import java.nio.charset.StandardCharsets;
 import java.util.Set;
 
+/**
+ * String类型命令处理器
+ * 
+ * <p>负责处理Redis String类型相关的所有命令，包括：
+ * <ul>
+ *   <li>SET/SETNX/GET - 基本的设置和获取操作</li>
+ *   <li>INCR/DECR/INCRBY/DECRBY - 数值增减操作</li>
+ *   <li>APPEND/STRLEN - 字符串追加和长度操作</li>
+ *   <li>MSET/MGET - 批量设置和获取操作</li>
+ *   <li>GETSET/SETRANGE/GETRANGE - 高级字符串操作</li>
+ *   <li>PSETEX - 带过期时间的设置操作</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class StringCommandHandler implements CommandHandler {
     
     private final Set<String> supportedCommands = Sets.newHashSet(

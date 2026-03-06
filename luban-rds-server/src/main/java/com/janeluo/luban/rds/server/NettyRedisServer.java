@@ -22,7 +22,26 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 基于Netty的Redis服务器实现
+ * 
+ * <p>提供完整的Redis协议兼容服务器实现，支持：
+ * <ul>
+ *   <li>RESP协议解析和响应</li>
+ *   <li>多种数据类型操作（String、Hash、List、Set、ZSet）</li>
+ *   <li>Pub/Sub消息订阅发布</li>
+ *   <li>事务支持（MULTI/EXEC/DISCARD/WATCH）</li>
+ *   <li>Lua脚本执行</li>
+ *   <li>持久化（RDB/AOF）</li>
+ *   <li>慢日志记录</li>
+ *   <li>命令监控（MONITOR）</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class NettyRedisServer implements RedisServer {
+    
     private static final Logger logger = LoggerFactory.getLogger(NettyRedisServer.class);
     
     private final int port;

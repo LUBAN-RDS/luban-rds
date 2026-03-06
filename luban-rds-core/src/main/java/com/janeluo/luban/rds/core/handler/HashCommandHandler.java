@@ -12,6 +12,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Hash类型命令处理器
+ * 
+ * <p>负责处理Redis Hash类型相关的所有命令，包括：
+ * <ul>
+ *   <li>HSET/HSETNX/HMSET - 字段设置操作</li>
+ *   <li>HGET/HMGET/HGETALL - 字段获取操作</li>
+ *   <li>HDEL/HEXISTS - 字段删除和存在检查</li>
+ *   <li>HKEYS/HVALS/HLEN - Hash结构信息操作</li>
+ *   <li>HINCRBY - 字段数值增减操作</li>
+ *   <li>HSCAN - Hash迭代扫描操作</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class HashCommandHandler implements CommandHandler {
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.HSET,

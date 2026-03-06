@@ -5,7 +5,26 @@ import com.google.common.collect.Sets;
 
 import java.util.Set;
 
+/**
+ * CLIENT命令处理器
+ * 
+ * <p>处理Redis CLIENT相关命令，包括：
+ * <ul>
+ *   <li>CLIENT KILL - 关闭客户端连接</li>
+ *   <li>CLIENT LIST - 列出客户端连接</li>
+ *   <li>CLIENT GETNAME - 获取客户端名称</li>
+ *   <li>CLIENT SETNAME - 设置客户端名称</li>
+ *   <li>CLIENT PAUSE - 暂停客户端命令处理</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class ClientCommandHandler implements CommandHandler {
+    
+    /**
+     * 支持的命令集合
+     */
     private final Set<String> supportedCommands = Sets.newHashSet(
         "CLIENT"
     );

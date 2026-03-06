@@ -8,17 +8,40 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Redis模板类
+ * 
+ * <p>提供简化的Redis操作接口，类似于Spring Data Redis的RedisTemplate。
+ * 直接操作MemoryStore，无需网络开销。
+ * 
+ * <p>支持的操作：
+ * <ul>
+ *   <li>字符串操作（set、get、incr、decr）</li>
+ *   <li>哈希操作（hset、hget、hgetAll）</li>
+ *   <li>列表操作（lpush、lpop、llen）</li>
+ *   <li>集合操作（sadd、smembers、scard）</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 @Component
 public class RedisTemplate {
+    
+    /**
+     * 默认数据库索引
+     */
+    private static final int DEFAULT_DATABASE = 0;
+    
+    /**
+     * 内存存储实例
+     */
     private final MemoryStore memoryStore;
     
     @Autowired
     public RedisTemplate(MemoryStore memoryStore) {
         this.memoryStore = memoryStore;
     }
-    
-    // 默认数据库索引
-    private static final int DEFAULT_DATABASE = 0;
     
     // 字符串操作
     public void set(String key, String value) {

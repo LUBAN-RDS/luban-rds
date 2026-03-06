@@ -16,8 +16,22 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Implementation of the Lua struct library for Luban-RDS.
- * Supports a subset of format specifiers used by Redis/Redisson.
+ * Lua struct库实现
+ * 
+ * <p>为Luban-RDS提供Lua struct库支持，用于二进制数据的打包和解包。
+ * 支持Redis/Redisson使用的格式说明符子集。
+ * 
+ * <p>支持的格式说明符：
+ * <ul>
+ *   <li>&gt; - 大端字节序</li>
+ *   <li>&lt; - 小端字节序（默认）</li>
+ *   <li>d - double（8字节）</li>
+ *   <li>L/l - unsigned/signed long（4字节）</li>
+ *   <li>I/i - unsigned/signed int（4字节）</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
  */
 public class StructLib extends TwoArgFunction {
 

@@ -10,14 +10,48 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 
 /**
- * Pub/Sub 管理器：维护频道到订阅者以及订阅者到频道的映射
+ * Pub/Sub管理器
+ * 
+ * <p>维护频道到订阅者以及订阅者到频道的双向映射，支持：
+ * <ul>
+ *   <li>普通频道订阅（SUBSCRIBE/UNSUBSCRIBE）</li>
+ *   <li>模式频道订阅（PSUBSCRIBE/PUNSUBSCRIBE）</li>
+ *   <li>流订阅（SSUBSCRIBE/SUNSUBSCRIBE）</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
  */
 public class PubSubManager {
+    
+    /**
+     * 频道到订阅者集合的映射
+     */
     private final Map<String, Set<Channel>> channelSubscribers = new ConcurrentHashMap<>();
+    
+    /**
+     * 客户端到订阅频道集合的映射
+     */
     private final Map<Channel, Set<String>> clientChannels = new ConcurrentHashMap<>();
+    
+    /**
+     * 模式到订阅者集合的映射
+     */
     private final Map<String, Set<Channel>> patternSubscribers = new ConcurrentHashMap<>();
+    
+    /**
+     * 客户端到订阅模式集合的映射
+     */
     private final Map<Channel, Set<String>> clientPatterns = new ConcurrentHashMap<>();
+    
+    /**
+     * 流到订阅者集合的映射
+     */
     private final Map<String, Set<Channel>> streamSubscribers = new ConcurrentHashMap<>();
+    
+    /**
+     * 客户端到订阅流集合的映射
+     */
     private final Map<Channel, Set<String>> clientStreams = new ConcurrentHashMap<>();
 
     public void subscribe(Channel channel, String topic) {

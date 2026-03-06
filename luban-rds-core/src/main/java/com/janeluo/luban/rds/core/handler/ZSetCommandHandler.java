@@ -5,8 +5,23 @@ import com.janeluo.luban.rds.common.constant.RdsCommandConstant;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.google.common.collect.Sets;
 
-import java.util.*;
+import java.util.Set;
 
+/**
+ * ZSet（有序集合）类型命令处理器
+ * 
+ * <p>负责处理Redis ZSet类型相关的所有命令，包括：
+ * <ul>
+ *   <li>ZADD - 有序集合元素添加</li>
+ *   <li>ZRANGE/ZRANGEBYSCORE - 有序集合范围获取</li>
+ *   <li>ZSCORE - 元素分数获取</li>
+ *   <li>ZREM - 有序集合元素删除</li>
+ *   <li>ZCARD - 有序集合基数获取</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class ZSetCommandHandler implements CommandHandler {
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.ZADD,

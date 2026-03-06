@@ -13,7 +13,26 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Luban RDS 信息提供者实现
+ * Luban RDS信息提供者
+ * 
+ * <p>提供INFO命令所需的各部分信息，包括：
+ * <ul>
+ *   <li>Server - 服务器信息</li>
+ *   <li>Clients - 客户端信息</li>
+ *   <li>Memory - 内存信息</li>
+ *   <li>Persistence - 持久化信息</li>
+ *   <li>Stats - 统计信息</li>
+ *   <li>Replication - 复制信息</li>
+ *   <li>CPU - CPU信息</li>
+ *   <li>CommandStats - 命令统计</li>
+ *   <li>Cluster - 集群信息</li>
+ *   <li>Keyspace - 键空间信息</li>
+ *   <li>Modules - 模块信息</li>
+ *   <li>ErrorStats - 错误统计</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
  */
 public class LubanInfoProvider implements InfoProvider {
     

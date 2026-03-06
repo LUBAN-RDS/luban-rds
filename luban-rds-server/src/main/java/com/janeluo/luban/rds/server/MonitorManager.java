@@ -16,11 +16,29 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 /**
- * Manages MONITOR clients and broadcasts commands.
- * Implements a high-performance, non-blocking design using a ring buffer and asynchronous worker.
+ * MONITOR客户端管理器
+ * 
+ * <p>管理MONITOR客户端并广播命令，采用高性能非阻塞设计，
+ * 使用环形缓冲区和异步工作线程实现。
+ * 
+ * <p>特性：
+ * <ul>
+ *   <li>无锁环形缓冲区实现高吞吐量</li>
+ *   <li>异步工作线程处理命令广播</li>
+ *   <li>支持历史命令回放</li>
+ *   <li>支持数据库和模式过滤</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
  */
 public class MonitorManager {
+    
     private static final Logger logger = LoggerFactory.getLogger(MonitorManager.class);
+    
+    /**
+     * 单例实例
+     */
     private static final MonitorManager INSTANCE = new MonitorManager();
 
     // History Ring Buffer (Stores logs for new clients)

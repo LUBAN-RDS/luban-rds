@@ -8,12 +8,41 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Manages slow logs.
+ * 慢日志管理器
+ * 
+ * <p>负责记录和管理慢日志条目，采用单例模式实现。
+ * 慢日志记录执行时间超过阈值的命令，用于性能分析和问题排查。
+ * 
+ * <p>特性：
+ * <ul>
+ *   <li>线程安全的日志记录</li>
+ *   <li>可配置的慢日志阈值和最大条目数</li>
+ *   <li>支持日志查询、计数和重置</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
  */
 public class SlowLogManager {
+    
+    /**
+     * 单例实例
+     */
     private static final SlowLogManager INSTANCE = new SlowLogManager();
+    
+    /**
+     * 慢日志链表
+     */
     private final LinkedList<SlowLogEntry> slowLogs = new LinkedList<>();
+    
+    /**
+     * 当前ID计数器
+     */
     private final AtomicLong currentId = new AtomicLong(0);
+    
+    /**
+     * 读写锁，保证线程安全
+     */
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
     private SlowLogManager() {}

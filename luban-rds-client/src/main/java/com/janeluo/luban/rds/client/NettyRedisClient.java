@@ -15,7 +15,22 @@ import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * 基于Netty的Redis客户端实现
+ * 
+ * <p>提供完整的Redis客户端功能，支持：
+ * <ul>
+ *   <li>字符串、哈希、列表、集合、有序集合操作</li>
+ *   <li>键过期和通用操作</li>
+ *   <li>连接管理和自动重连</li>
+ *   <li>异步响应处理</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class NettyRedisClient implements RedisClient {
+    
     private static final Logger logger = LoggerFactory.getLogger(NettyRedisClient.class);
     
     private final String host;

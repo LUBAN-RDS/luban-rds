@@ -9,7 +9,13 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Legacy InfoProvider implementation to support existing tests and fallback behavior.
+ * 传统InfoProvider实现
+ * 
+ * <p>用于支持现有测试和回退行为的INFO命令信息提供者。
+ * 提供服务器、客户端、内存、持久化、统计、复制、CPU等各部分信息。
+ * 
+ * @author janeluo
+ * @since 1.0.0
  */
 public class LegacyInfoProvider implements InfoProvider {
     

@@ -17,8 +17,20 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * MEMORY 命令处理器
- * 支持子命令：USAGE, STATS, PURGE, MALLOC-STATS, DOCTOR, HELP
+ * MEMORY命令处理器
+ * 
+ * <p>处理Redis内存相关命令，包括：
+ * <ul>
+ *   <li>MEMORY USAGE key [SAMPLES count] - 获取键的内存使用量</li>
+ *   <li>MEMORY STATS - 获取内存统计信息</li>
+ *   <li>MEMORY PURGE - 清除内存碎片</li>
+ *   <li>MEMORY MALLOC-STATS - 获取内存分配统计</li>
+ *   <li>MEMORY DOCTOR - 内存诊断建议</li>
+ *   <li>MEMORY HELP - 获取帮助信息</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
  */
 public class RdsMemoryCommandHandler implements CommandHandler {
 

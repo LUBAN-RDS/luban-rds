@@ -13,6 +13,26 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
+/**
+ * 通用命令处理器
+ * 
+ * <p>负责处理Redis通用命令，包括：
+ * <ul>
+ *   <li>EXISTS/DEL/TYPE - 键操作命令</li>
+ *   <li>EXPIRE/PEXPIRE/TTL/PTTL - 过期时间相关命令</li>
+ *   <li>FLUSHALL/FLUSHDB/DBSIZE - 数据库操作命令</li>
+ *   <li>PING/ECHO/TIME/LASTSAVE - 服务器信息命令</li>
+ *   <li>INFO/SELECT/SCAN - 管理命令</li>
+ *   <li>CONFIG GET/SET/RESETSTAT - 配置命令</li>
+ *   <li>COMMAND/COMMAND COUNT/COMMAND INFO - 命令信息命令</li>
+ *   <li>DEBUG OBJECT/DEBUG SEGFAULT - 调试命令</li>
+ *   <li>BGREWRITEAOF/BGSAVE - 持久化命令</li>
+ *   <li>CLUSTER SLOTS - 集群命令</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class CommonCommandHandler implements CommandHandler {
     
     private final Set<String> supportedCommands = Sets.newHashSet(

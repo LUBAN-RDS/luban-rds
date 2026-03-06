@@ -13,8 +13,27 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * AOF持久化服务
+ * 
+ * <p>实现Redis AOF（Append Only File）持久化机制：
+ * <ul>
+ *   <li>记录所有写命令到AOF文件</li>
+ *   <li>支持定期fsync确保数据落盘</li>
+ *   <li>支持AOF重写压缩文件大小</li>
+ *   <li>启动时重放AOF命令恢复数据</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class AofPersistService implements PersistService {
+    
     private static final Logger logger = LoggerFactory.getLogger(AofPersistService.class);
+    
+    /**
+     * AOF文件名
+     */
     private static final String AOF_FILE_NAME = "appendonly.aof";
     private final String aofFilePath;
     private final String aofTempFilePath;

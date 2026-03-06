@@ -5,7 +5,20 @@ import com.google.common.collect.Sets;
 
 import java.util.Set;
 
+/**
+ * SELECT命令处理器
+ * 
+ * <p>处理Redis SELECT命令，用于切换当前数据库。
+ * 注意：实际切换逻辑在RedisServerHandler中实现，此处仅做参数验证。
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class SelectCommandHandler implements CommandHandler {
+    
+    /**
+     * 支持的命令集合
+     */
     private final Set<String> supportedCommands = Sets.newHashSet(
         "SELECT"
     );

@@ -7,6 +7,20 @@ import com.google.common.collect.Sets;
 
 import java.util.Set;
 
+/**
+ * Set类型命令处理器
+ * 
+ * <p>负责处理Redis Set类型相关的所有命令，包括：
+ * <ul>
+ *   <li>SADD/SREM - 集合元素添加和删除</li>
+ *   <li>SMEMBERS/SISMEMBER - 集合成员获取和检查</li>
+ *   <li>SCARD - 集合基数获取</li>
+ *   <li>SINTER/SUNION/SDIFF - 集合交集/并集/差集操作</li>
+ * </ul>
+ * 
+ * @author janeluo
+ * @since 1.0.0
+ */
 public class SetCommandHandler implements CommandHandler {
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.SADD,
