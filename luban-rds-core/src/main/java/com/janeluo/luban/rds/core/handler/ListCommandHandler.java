@@ -18,7 +18,8 @@ public class ListCommandHandler implements CommandHandler {
         RdsCommandConstant.LLEN,
         RdsCommandConstant.LRANGE,
         RdsCommandConstant.LREM,
-        RdsCommandConstant.LINDEX
+        RdsCommandConstant.LINDEX,
+        RdsCommandConstant.LSET
     );
     
     @Override
@@ -42,6 +43,8 @@ public class ListCommandHandler implements CommandHandler {
                 return handleLRem(database, args, store);
             case RdsCommandConstant.LINDEX:
                 return handleLIndex(database, args, store);
+            case RdsCommandConstant.LSET:
+                return handleLSet(database, args, store);
             default:
                 return "-ERR unknown command\r\n";
         }
@@ -177,6 +180,38 @@ public class ListCommandHandler implements CommandHandler {
             return "$" + byteLen + "\r\n" + value + "\r\n";
         } catch (RuntimeException e) {
              if (e.getMessage() != null && e.getMessage().startsWith("WRONGTYPE")) {
+                return "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+            }
+            throw e;
+        }
+    }
+    
+    private Object handleLSet(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'lset' command\r\n";
+        }
+        
+        String key = args[1];
+        int index;
+        try {
+            index = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        String value = args[3];
+        
+        try {
+            store.lset(database, key, index, value);
+            return "+OK\r\n";
+        } catch (RuntimeException e) {
+            String msg = e.getMessage();
+            if (msg != null && msg.startsWith("ERR no such key")) {
+                return "-ERR no such key\r\n";
+            }
+            if (msg != null && msg.startsWith("ERR index out of range")) {
+                return "-ERR index out of range\r\n";
+            }
+            if (msg != null && msg.startsWith("WRONGTYPE")) {
                 return "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
             }
             throw e;

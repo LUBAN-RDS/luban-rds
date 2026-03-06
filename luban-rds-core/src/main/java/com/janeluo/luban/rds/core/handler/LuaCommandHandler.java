@@ -34,9 +34,12 @@ public class LuaCommandHandler implements CommandHandler {
     private volatile Thread currentScriptThread;
     private volatile boolean scriptRunning = false;
     private volatile long scriptTimeoutMs = 5000L;
-    
+
     /** 脚本缓存，key 为脚本 SHA1，value 为脚本文本。 */
     private final Map<String, String> scriptCache = Maps.newConcurrentMap();
+
+    /** 共享的命令处理器实例，用于 Lua 脚本中的 redis.call */
+    private static final DefaultCommandHandler SHARED_COMMAND_HANDLER = new DefaultCommandHandler();
     
     @Override
     public Set<String> supportedCommands() {
@@ -564,9 +567,9 @@ public class LuaCommandHandler implements CommandHandler {
                 }
             }
             
-            DefaultCommandHandler commandHandler = new DefaultCommandHandler();
+            // 使用共享的命令处理器实例，避免每次创建新的处理器
             String[] argsArray = argList.toArray(new String[0]);
-            Object result = commandHandler.handle(command, database, argsArray, store);
+            Object result = SHARED_COMMAND_HANDLER.handle(command, database, argsArray, store);
             
             return convertRedisResponseToLuaValue(result);
         }

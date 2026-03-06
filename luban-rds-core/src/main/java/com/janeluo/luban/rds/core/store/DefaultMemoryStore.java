@@ -796,7 +796,60 @@ public class DefaultMemoryStore implements MemoryStore {
         return result;
     }
 
-    
+    @Override
+    public long incrby(int database, String key, long increment) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+
+        // 使用同步块确保原子性
+        synchronized (getLockForKey(database, key)) {
+            StoreValue storeValue = store.storage.getIfPresent(key);
+            long currentValue = 0;
+
+            if (storeValue != null && !storeValue.isExpired()) {
+                Object val = storeValue.value;
+                if (val instanceof String) {
+                    try {
+                        currentValue = Long.parseLong((String) val);
+                    } catch (NumberFormatException e) {
+                        throw new RuntimeException("ERR value is not an integer or out of range");
+                    }
+                } else {
+                    throw new RuntimeException("ERR value is not an integer or out of range");
+                }
+            }
+
+            long newValue = currentValue + increment;
+            String newValueStr = String.valueOf(newValue);
+
+            // 保留原有的过期时间
+            Long expireTime = null;
+            if (storeValue != null) {
+                expireTime = storeValue.getExpireTime();
+            }
+
+            if (expireTime != null && expireTime > 0) {
+                long ttl = expireTime - System.currentTimeMillis();
+                if (ttl > 0) {
+                    setWithExpireMs(database, key, newValueStr, ttl);
+                } else {
+                    // 已过期，设置为无过期时间
+                    set(database, key, newValueStr);
+                }
+            } else {
+                set(database, key, newValueStr);
+            }
+
+            return newValue;
+        }
+    }
+
+    /**
+     * 获取指定键的锁对象，用于同步
+     */
+    private Object getLockForKey(int database, String key) {
+        return (database + ":" + key).intern();
+    }
+
     @Override
     public boolean del(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
@@ -1724,6 +1777,38 @@ public class DefaultMemoryStore implements MemoryStore {
     }
     
     @Override
+    public void lset(int database, String key, int index, String value) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            throw new RuntimeException("ERR no such key");
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof java.util.List)) {
+            throw new RuntimeException("WRONGTYPE Operation against a key holding the wrong kind of value");
+        }
+        
+        @SuppressWarnings("unchecked")
+        java.util.List<String> list = (java.util.List<String>) val;
+        int size = list.size();
+        
+        int actualIndex;
+        if (index >= 0) {
+            actualIndex = index;
+        } else {
+            actualIndex = size + index;
+        }
+        
+        if (actualIndex < 0 || actualIndex >= size) {
+            throw new RuntimeException("ERR index out of range");
+        }
+        
+        list.set(actualIndex, value);
+    }
+    
+    @Override
     public java.util.List<String> lrange(int database, String key, long start, long stop) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.getIfPresent(key);
@@ -1910,6 +1995,51 @@ public class DefaultMemoryStore implements MemoryStore {
         
         RuntimeConfig.incKeyspaceHits();
         return 0;
+    }
+
+    @Override
+    public java.util.Set<String> sinter(int database, String... keys) {
+        java.util.Set<String> result = null;
+        
+        for (String key : keys) {
+            java.util.Set<String> set = smembers(database, key);
+            if (result == null) {
+                result = new java.util.HashSet<>(set);
+            } else {
+                result.retainAll(set);
+            }
+            if (result.isEmpty()) {
+                break;
+            }
+        }
+        
+        return result != null ? result : java.util.Collections.emptySet();
+    }
+
+    @Override
+    public java.util.Set<String> sunion(int database, String... keys) {
+        java.util.Set<String> result = new java.util.HashSet<>();
+        
+        for (String key : keys) {
+            result.addAll(smembers(database, key));
+        }
+        
+        return result;
+    }
+
+    @Override
+    public java.util.Set<String> sdiff(int database, String... keys) {
+        if (keys.length == 0) {
+            return java.util.Collections.emptySet();
+        }
+        
+        java.util.Set<String> result = new java.util.HashSet<>(smembers(database, keys[0]));
+        
+        for (int i = 1; i < keys.length; i++) {
+            result.removeAll(smembers(database, keys[i]));
+        }
+        
+        return result;
     }
     
     // ==================== ZSet 操作优化实现 ====================

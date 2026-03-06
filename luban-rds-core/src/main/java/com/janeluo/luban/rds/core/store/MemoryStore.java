@@ -58,7 +58,7 @@ public interface MemoryStore {
     }
     
     boolean exists(int database, String key);
-    
+
     long ttl(int database, String key);
 
     /**
@@ -71,6 +71,15 @@ public interface MemoryStore {
         long ttl = ttl(database, key);
         return ttl > 0 ? ttl * 1000 : ttl;
     }
+
+    /**
+     * 原子递增操作
+     * @param database 数据库索引
+     * @param key 键
+     * @param increment 递增值
+     * @return 递增后的新值
+     */
+    long incrby(int database, String key, long increment);
     
     void flushAll();
     
@@ -282,6 +291,16 @@ public interface MemoryStore {
     String lindex(int database, String key, int index);
 
     /**
+     * 设置列表指定索引的元素
+     * @param database 数据库索引
+     * @param key 列表键
+     * @param index 索引
+     * @param value 元素值
+     * @throws RuntimeException 如果键不存在或索引越界
+     */
+    void lset(int database, String key, int index, String value);
+
+    /**
      * 获取列表指定范围的元素
      * @param database 数据库索引
      * @param key List 键
@@ -335,7 +354,31 @@ public interface MemoryStore {
      * @return 成员数量
      */
     int scard(int database, String key);
-    
+
+    /**
+     * 返回多个集合的交集
+     * @param database 数据库索引
+     * @param keys 集合键数组
+     * @return 交集结果
+     */
+    java.util.Set<String> sinter(int database, String... keys);
+
+    /**
+     * 返回多个集合的并集
+     * @param database 数据库索引
+     * @param keys 集合键数组
+     * @return 并集结果
+     */
+    java.util.Set<String> sunion(int database, String... keys);
+
+    /**
+     * 返回多个集合的差集
+     * @param database 数据库索引
+     * @param keys 集合键数组（第一个集合为基准）
+     * @return 差集结果
+     */
+    java.util.Set<String> sdiff(int database, String... keys);
+
     // ==================== ZSet 操作优化接口 ====================
     
     /**

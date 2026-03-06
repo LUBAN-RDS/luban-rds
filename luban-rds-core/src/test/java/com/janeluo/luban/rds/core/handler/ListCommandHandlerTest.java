@@ -288,7 +288,7 @@ public class ListCommandHandlerTest {
     @Test
     public void testSupportedCommands() {
         java.util.Set<String> supportedCommands = handler.supportedCommands();
-        assertEquals(8, supportedCommands.size());
+        assertEquals(9, supportedCommands.size());
         assert(supportedCommands.contains("LPUSH"));
         assert(supportedCommands.contains("RPUSH"));
         assert(supportedCommands.contains("LPOP"));
@@ -297,5 +297,6 @@ public class ListCommandHandlerTest {
         assert(supportedCommands.contains("LRANGE"));
         assert(supportedCommands.contains("LREM"));
         assert(supportedCommands.contains("LINDEX"));
+        assert(supportedCommands.contains("LSET"));
     }
 }

@@ -16,6 +16,7 @@ public class RdsCommandConstant {
     public static final String GETSET = "GETSET";
     public static final String SETRANGE = "SETRANGE";
     public static final String GETRANGE = "GETRANGE";
+    public static final String PSETEX = "PSETEX";
     
     // 哈希命令
     public static final String HSET = "HSET";
@@ -41,6 +42,7 @@ public class RdsCommandConstant {
     public static final String LRANGE = "LRANGE";
     public static final String LREM = "LREM";
     public static final String LINDEX = "LINDEX";
+    public static final String LSET = "LSET";
     
     // 集合命令
     public static final String SADD = "SADD";
@@ -48,6 +50,9 @@ public class RdsCommandConstant {
     public static final String SMEMBERS = "SMEMBERS";
     public static final String SISMEMBER = "SISMEMBER";
     public static final String SCARD = "SCARD";
+    public static final String SINTER = "SINTER";
+    public static final String SUNION = "SUNION";
+    public static final String SDIFF = "SDIFF";
     
     // 有序集合命令
     public static final String ZADD = "ZADD";

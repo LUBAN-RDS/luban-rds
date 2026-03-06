@@ -13,7 +13,10 @@ public class SetCommandHandler implements CommandHandler {
         RdsCommandConstant.SREM,
         RdsCommandConstant.SMEMBERS,
         RdsCommandConstant.SISMEMBER,
-        RdsCommandConstant.SCARD
+        RdsCommandConstant.SCARD,
+        RdsCommandConstant.SINTER,
+        RdsCommandConstant.SUNION,
+        RdsCommandConstant.SDIFF
     );
     
     @Override
@@ -31,6 +34,12 @@ public class SetCommandHandler implements CommandHandler {
                 return handleSIsMember(database, args, store);
             case RdsCommandConstant.SCARD:
                 return handleSCard(database, args, store);
+            case RdsCommandConstant.SINTER:
+                return handleSInter(database, args, store);
+            case RdsCommandConstant.SUNION:
+                return handleSUnion(database, args, store);
+            case RdsCommandConstant.SDIFF:
+                return handleSDiff(database, args, store);
             default:
                 return "-ERR unknown command\r\n";
         }
@@ -118,6 +127,69 @@ public class SetCommandHandler implements CommandHandler {
         int size = store.scard(database, key);
         
         return ":" + size + "\r\n";
+    }
+    
+    private Object handleSInter(int database, String[] args, MemoryStore store) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'sinter' command\r\n";
+        }
+        
+        String[] keys = new String[args.length - 1];
+        System.arraycopy(args, 1, keys, 0, keys.length);
+        
+        Set<String> result = store.sinter(database, keys);
+        
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(result.size()).append("\r\n");
+        
+        for (String value : result) {
+            byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            sb.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        }
+        
+        return sb.toString();
+    }
+    
+    private Object handleSUnion(int database, String[] args, MemoryStore store) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'sunion' command\r\n";
+        }
+        
+        String[] keys = new String[args.length - 1];
+        System.arraycopy(args, 1, keys, 0, keys.length);
+        
+        Set<String> result = store.sunion(database, keys);
+        
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(result.size()).append("\r\n");
+        
+        for (String value : result) {
+            byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            sb.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        }
+        
+        return sb.toString();
+    }
+    
+    private Object handleSDiff(int database, String[] args, MemoryStore store) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'sdiff' command\r\n";
+        }
+        
+        String[] keys = new String[args.length - 1];
+        System.arraycopy(args, 1, keys, 0, keys.length);
+        
+        Set<String> result = store.sdiff(database, keys);
+        
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(result.size()).append("\r\n");
+        
+        for (String value : result) {
+            byte[] bytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            sb.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        }
+        
+        return sb.toString();
     }
     
     @Override

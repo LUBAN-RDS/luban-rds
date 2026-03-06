@@ -27,7 +27,8 @@ public class StringCommandHandler implements CommandHandler {
         RdsCommandConstant.MGET,
         RdsCommandConstant.GETSET,
         RdsCommandConstant.SETRANGE,
-        RdsCommandConstant.GETRANGE
+        RdsCommandConstant.GETRANGE,
+        RdsCommandConstant.PSETEX
     );
     
     @Override
@@ -63,6 +64,8 @@ public class StringCommandHandler implements CommandHandler {
                 return handleSetRange(database, args, store);
             case RdsCommandConstant.GETRANGE:
                 return handleGetRange(database, args, store);
+            case RdsCommandConstant.PSETEX:
+                return handlePSetEx(database, args, store);
             default:
                 return "-ERR unknown command\r\n";
         }
@@ -217,26 +220,17 @@ public class StringCommandHandler implements CommandHandler {
         if (args.length < 2) {
             return "-ERR wrong number of arguments for 'incr' command\r\n";
         }
-        
+
         String key = args[1];
-        Object value = store.get(database, key);
-        long num = 0;
-        
-        if (value != null) {
-            try {
-                num = Long.parseLong(value.toString());
-            } catch (NumberFormatException e) {
-                return RdsResponseConstant.ERR_NOT_INTEGER;
-            }
-        }
-        
-        num++;
         try {
-            store.set(database, key, String.valueOf(num));
+            long newValue = store.incrby(database, key, 1);
             publishKeyspaceNotification(database, key, "incr");
-            return RdsResponseConstant.intResponse(num);
+            return RdsResponseConstant.intResponse(newValue);
         } catch (RuntimeException e) {
             String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.contains("not an integer")) {
+                return RdsResponseConstant.ERR_NOT_INTEGER;
+            }
             if (msg.startsWith("OOM command not allowed")) {
                 RuntimeConfig.incErrorRepliesOom();
                 return "-OOM command not allowed when used memory > 'maxmemory'\r\n";
@@ -249,26 +243,17 @@ public class StringCommandHandler implements CommandHandler {
         if (args.length < 2) {
             return "-ERR wrong number of arguments for 'decr' command\r\n";
         }
-        
+
         String key = args[1];
-        Object value = store.get(database, key);
-        long num = 0;
-        
-        if (value != null) {
-            try {
-                num = Long.parseLong(value.toString());
-            } catch (NumberFormatException e) {
-                return RdsResponseConstant.ERR_NOT_INTEGER;
-            }
-        }
-        
-        num--;
         try {
-            store.set(database, key, String.valueOf(num));
+            long newValue = store.incrby(database, key, -1);
             publishKeyspaceNotification(database, key, "decr");
-            return RdsResponseConstant.intResponse(num);
+            return RdsResponseConstant.intResponse(newValue);
         } catch (RuntimeException e) {
             String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.contains("not an integer")) {
+                return RdsResponseConstant.ERR_NOT_INTEGER;
+            }
             if (msg.startsWith("OOM command not allowed")) {
                 RuntimeConfig.incErrorRepliesOom();
                 return "-OOM command not allowed when used memory > 'maxmemory'\r\n";
@@ -276,39 +261,30 @@ public class StringCommandHandler implements CommandHandler {
             throw e;
         }
     }
-    
+
     private Object handleIncrBy(int database, String[] args, MemoryStore store) {
         if (args.length < 3) {
             return RdsResponseConstant.wrongArgsError("incrby");
         }
-        
+
         String key = args[1];
         long increment;
-        
+
         try {
             increment = Long.parseLong(args[2]);
         } catch (NumberFormatException e) {
             return RdsResponseConstant.ERR_NOT_INTEGER;
         }
-        
-        Object value = store.get(database, key);
-        long num = 0;
-        
-        if (value != null) {
-            try {
-                num = Long.parseLong(value.toString());
-            } catch (NumberFormatException e) {
-                return RdsResponseConstant.ERR_NOT_INTEGER;
-            }
-        }
-        
-        num += increment;
+
         try {
-            store.set(database, key, String.valueOf(num));
+            long newValue = store.incrby(database, key, increment);
             publishKeyspaceNotification(database, key, "incrby");
-            return RdsResponseConstant.intResponse(num);
+            return RdsResponseConstant.intResponse(newValue);
         } catch (RuntimeException e) {
             String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.contains("not an integer")) {
+                return RdsResponseConstant.ERR_NOT_INTEGER;
+            }
             if (msg.startsWith("OOM command not allowed")) {
                 RuntimeConfig.incErrorRepliesOom();
                 return "-OOM command not allowed when used memory > 'maxmemory'\r\n";
@@ -316,36 +292,36 @@ public class StringCommandHandler implements CommandHandler {
             throw e;
         }
     }
-    
+
     private Object handleDecrBy(int database, String[] args, MemoryStore store) {
         if (args.length < 3) {
             return RdsResponseConstant.wrongArgsError("decrby");
         }
-        
+
         String key = args[1];
         long decrement;
-        
+
         try {
             decrement = Long.parseLong(args[2]);
         } catch (NumberFormatException e) {
             return RdsResponseConstant.ERR_NOT_INTEGER;
         }
-        
-        Object value = store.get(database, key);
-        long num = 0;
-        
-        if (value != null) {
-            try {
-                num = Long.parseLong(value.toString());
-            } catch (NumberFormatException e) {
+
+        try {
+            long newValue = store.incrby(database, key, -decrement);
+            publishKeyspaceNotification(database, key, "decrby");
+            return RdsResponseConstant.intResponse(newValue);
+        } catch (RuntimeException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.contains("not an integer")) {
                 return RdsResponseConstant.ERR_NOT_INTEGER;
             }
+            if (msg.startsWith("OOM command not allowed")) {
+                RuntimeConfig.incErrorRepliesOom();
+                return "-OOM command not allowed when used memory > 'maxmemory'\r\n";
+            }
+            throw e;
         }
-        
-        num -= decrement;
-        store.set(database, key, String.valueOf(num));
-        publishKeyspaceNotification(database, key, "decrby");
-        return RdsResponseConstant.intResponse(num);
     }
     
     private Object handleAppend(int database, String[] args, MemoryStore store) {
@@ -570,6 +546,39 @@ public class StringCommandHandler implements CommandHandler {
             }
         }
         return sb.toString();
+    }
+    
+    /**
+     * 处理PSETEX命令 - 设置键值并指定过期时间（毫秒）
+     */
+    private Object handlePSetEx(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'psetex' command\r\n";
+        }
+        
+        String key = args[1];
+        long milliseconds;
+        
+        try {
+            milliseconds = Long.parseLong(args[2]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        String value = args[3];
+        
+        try {
+            store.setWithExpireMs(database, key, value, milliseconds);
+            publishKeyspaceNotification(database, key, "psetex");
+            return RdsResponseConstant.OK;
+        } catch (RuntimeException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.startsWith("OOM command not allowed")) {
+                RuntimeConfig.incErrorRepliesOom();
+                return "-OOM command not allowed when used memory > 'maxmemory'\r\n";
+            }
+            throw e;
+        }
     }
     
     @Override
