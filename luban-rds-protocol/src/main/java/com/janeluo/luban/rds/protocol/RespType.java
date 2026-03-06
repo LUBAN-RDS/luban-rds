@@ -5,7 +5,15 @@ public enum RespType {
     ERROR('-'),
     INTEGER(':'),
     BULK_STRING('$'),
-    ARRAY('*');
+    ARRAY('*'),
+    // RESP3 new types
+    MAP('%'),
+    SET('~'),
+    ATTRIBUTE('|'),
+    NULL('_'),
+    DOUBLE(','),
+    BOOLEAN('#'),
+    BIG_NUMBER('(');
     
     private final char prefix;
     

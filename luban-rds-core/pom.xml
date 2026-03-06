@@ -19,6 +19,14 @@
             <artifactId>luban-rds-common</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-protocol</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-all</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
         </dependency>

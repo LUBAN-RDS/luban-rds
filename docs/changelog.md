@@ -12,7 +12,9 @@ version: 1.0.0-SNAPSHOT
 
 ### Added
 
-- 无
+- 完整 RESP3 协议支持，包括新数据类型（Map、Set、Null、Boolean、Double、Big Number）
+- 协议版本自动检测和切换，支持 RESP2 和 RESP3 客户端
+- 优化 Lua 脚本处理器的字符串编码处理，符合 Redis 规范
 
 ### Changed
 

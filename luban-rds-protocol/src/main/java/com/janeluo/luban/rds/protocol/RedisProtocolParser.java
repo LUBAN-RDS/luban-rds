@@ -92,7 +92,7 @@ public class RedisProtocolParser {
         return null;
     }
     
-    private int parseInteger(ByteBuf buffer) {
+    public int parseInteger(ByteBuf buffer) {
         int result = 0;
         boolean negative = false;
         byte b;
@@ -169,6 +169,21 @@ public class RedisProtocolParser {
                 return parseBulkString(buffer);
             case '*':
                 return parseArrayValues(buffer);
+            // RESP3 new types
+            case '%':
+                return parseMapValues(buffer);
+            case '~':
+                return parseSetValues(buffer);
+            case '|':
+                return parseAttributeValues(buffer);
+            case '_':
+                return parseNull(buffer);
+            case ',':
+                return parseDouble(buffer);
+            case '#':
+                return parseBoolean(buffer);
+            case '(':
+                return parseBigNumber(buffer);
             default:
                 buffer.resetReaderIndex();
                 return null;
@@ -242,6 +257,144 @@ public class RedisProtocolParser {
     }
     
     /**
+     * 解析 RESP3 Map 类型
+     */
+    private java.util.Map<Object, Object> parseMapValues(ByteBuf buffer) {
+        int length = parseInteger(buffer);
+        if (length < 0) {
+            return null;
+        }
+        
+        java.util.Map<Object, Object> map = new java.util.HashMap<>(length);
+        for (int i = 0; i < length; i++) {
+            if (!buffer.isReadable()) {
+                buffer.resetReaderIndex();
+                return null;
+            }
+            
+            Object key = parseResp(buffer);
+            if (key == null) {
+                buffer.resetReaderIndex();
+                return null;
+            }
+            
+            if (!buffer.isReadable()) {
+                buffer.resetReaderIndex();
+                return null;
+            }
+            
+            Object value = parseResp(buffer);
+            if (value == null) {
+                buffer.resetReaderIndex();
+                return null;
+            }
+            
+            map.put(key, value);
+        }
+        
+        return map;
+    }
+    
+    /**
+     * 解析 RESP3 Set 类型
+     */
+    private java.util.Set<Object> parseSetValues(ByteBuf buffer) {
+        int length = parseInteger(buffer);
+        if (length < 0) {
+            return null;
+        }
+        
+        java.util.Set<Object> set = new java.util.HashSet<>(length);
+        for (int i = 0; i < length; i++) {
+            if (!buffer.isReadable()) {
+                buffer.resetReaderIndex();
+                return null;
+            }
+            
+            Object value = parseResp(buffer);
+            if (value == null) {
+                buffer.resetReaderIndex();
+                return null;
+            }
+            
+            set.add(value);
+        }
+        
+        return set;
+    }
+    
+    /**
+     * 解析 RESP3 Attribute 类型
+     */
+    private java.util.Map<Object, Object> parseAttributeValues(ByteBuf buffer) {
+        return parseMapValues(buffer);
+    }
+    
+    /**
+     * 解析 RESP3 Null 类型
+     */
+    private Object parseNull(ByteBuf buffer) {
+        if (!buffer.isReadable()) {
+            buffer.resetReaderIndex();
+            return null;
+        }
+        
+        byte b = buffer.readByte();
+        if (b == '\r') {
+            if (buffer.readableBytes() > 0 && buffer.readByte() == '\n') {
+                return null;
+            }
+        }
+        
+        buffer.resetReaderIndex();
+        return null;
+    }
+    
+    /**
+     * 解析 RESP3 Double 类型
+     */
+    private Double parseDouble(ByteBuf buffer) {
+        String value = parseLineUtf8(buffer);
+        if (value == null) {
+            return null;
+        }
+        
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+    
+    /**
+     * 解析 RESP3 Boolean 类型
+     */
+    private Boolean parseBoolean(ByteBuf buffer) {
+        if (!buffer.isReadable()) {
+            buffer.resetReaderIndex();
+            return null;
+        }
+        
+        byte b = buffer.readByte();
+        if (b == 't' || b == 'f') {
+            if (buffer.readableBytes() >= 1 && buffer.readByte() == '\r' && 
+                buffer.readableBytes() >= 1 && buffer.readByte() == '\n') {
+                return b == 't';
+            }
+        }
+        
+        buffer.resetReaderIndex();
+        return null;
+    }
+    
+    /**
+     * 解析 RESP3 Big Number 类型
+     */
+    private String parseBigNumber(ByteBuf buffer) {
+        return parseLineUtf8(buffer);
+    }
+    
+    /**
      * 序列化响应对象为 RESP 格式
      */
     public ByteBuf serialize(Object response) {
@@ -255,8 +408,10 @@ public class RedisProtocolParser {
         
         if (response instanceof String) {
             String str = (String) response;
-            if (str.startsWith("+") || str.startsWith("-") || str.startsWith(":") || str.startsWith("*")) {
-                // Simple strings, errors, integers, and arrays use UTF-8
+            if (str.startsWith("+") || str.startsWith("-") || str.startsWith(":") || str.startsWith("*") ||
+                str.startsWith("%") || str.startsWith("~") || str.startsWith("|") || str.startsWith("_") ||
+                str.startsWith(",") || str.startsWith("#") || str.startsWith("(")) {
+                // Simple strings, errors, integers, arrays, and RESP3 types use UTF-8
                 ByteBuf buffer = Unpooled.directBuffer(str.length());
                 buffer.writeBytes(str.getBytes(StandardCharsets.UTF_8));
                 return buffer;
@@ -278,8 +433,24 @@ public class RedisProtocolParser {
             return serializeInteger(((Number) response).longValue());
         }
         
+        if (response instanceof Double) {
+            return serializeDouble(((Double) response));
+        }
+        
+        if (response instanceof Boolean) {
+            return serializeBoolean(((Boolean) response));
+        }
+        
         if (response instanceof List) {
             return serializeArray((List<?>) response);
+        }
+        
+        if (response instanceof java.util.Map) {
+            return serializeMap((java.util.Map<?, ?>) response);
+        }
+        
+        if (response instanceof java.util.Set) {
+            return serializeSet((java.util.Set<?>) response);
         }
         
         return serializeBulkString(response.toString());
@@ -403,7 +574,95 @@ public class RedisProtocolParser {
     }
     
     private ByteBuf serializeNull() {
-        return Unpooled.directBuffer(5).writeBytes("$-1\r\n".getBytes(StandardCharsets.UTF_8));
+        return Unpooled.directBuffer(3).writeBytes("_\r\n".getBytes(StandardCharsets.UTF_8));
+    }
+    
+    /**
+     * 序列化 RESP3 Map 类型
+     */
+    private ByteBuf serializeMap(java.util.Map<?, ?> map) {
+        if (map == null) {
+            return Unpooled.directBuffer(5).writeBytes("%-1\r\n".getBytes(StandardCharsets.UTF_8));
+        }
+        
+        byte[] lengthBytes = longToBytes(map.size());
+        int estimatedSize = 1 + lengthBytes.length + 2 + map.size() * 32;
+        ByteBuf buffer = Unpooled.directBuffer(estimatedSize);
+        buffer.writeByte('%');
+        buffer.writeBytes(lengthBytes);
+        buffer.writeBytes(CRLF);
+        
+        for (java.util.Map.Entry<?, ?> entry : map.entrySet()) {
+            ByteBuf keyBuffer = serializeArrayItem(entry.getKey());
+            buffer.writeBytes(keyBuffer);
+            keyBuffer.release();
+            
+            ByteBuf valueBuffer = serializeArrayItem(entry.getValue());
+            buffer.writeBytes(valueBuffer);
+            valueBuffer.release();
+        }
+        
+        return buffer;
+    }
+    
+    /**
+     * 序列化 RESP3 Set 类型
+     */
+    private ByteBuf serializeSet(java.util.Set<?> set) {
+        if (set == null) {
+            return Unpooled.directBuffer(5).writeBytes("~-1\r\n".getBytes(StandardCharsets.UTF_8));
+        }
+        
+        byte[] lengthBytes = longToBytes(set.size());
+        int estimatedSize = 1 + lengthBytes.length + 2 + set.size() * 16;
+        ByteBuf buffer = Unpooled.directBuffer(estimatedSize);
+        buffer.writeByte('~');
+        buffer.writeBytes(lengthBytes);
+        buffer.writeBytes(CRLF);
+        
+        for (Object value : set) {
+            ByteBuf itemBuffer = serializeArrayItem(value);
+            buffer.writeBytes(itemBuffer);
+            itemBuffer.release();
+        }
+        
+        return buffer;
+    }
+    
+    /**
+     * 序列化 RESP3 Double 类型
+     */
+    private ByteBuf serializeDouble(Double value) {
+        String str = value.toString();
+        byte[] bytes = str.getBytes(StandardCharsets.UTF_8);
+        ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
+        buffer.writeByte(',');
+        buffer.writeBytes(bytes);
+        buffer.writeBytes(CRLF);
+        return buffer;
+    }
+    
+    /**
+     * 序列化 RESP3 Boolean 类型
+     */
+    private ByteBuf serializeBoolean(Boolean value) {
+        byte[] bytes = value ? "t\r\n".getBytes(StandardCharsets.UTF_8) : "f\r\n".getBytes(StandardCharsets.UTF_8);
+        ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length);
+        buffer.writeByte('#');
+        buffer.writeBytes(bytes);
+        return buffer;
+    }
+    
+    /**
+     * 序列化 RESP3 Big Number 类型
+     */
+    private ByteBuf serializeBigNumber(String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
+        buffer.writeByte('(');
+        buffer.writeBytes(bytes);
+        buffer.writeBytes(CRLF);
+        return buffer;
     }
     
     private byte[] longToBytes(long value) {

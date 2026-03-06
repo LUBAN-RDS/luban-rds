@@ -454,9 +454,18 @@ public class LuaCommandHandler implements CommandHandler {
         } else if (value.isnumber()) {
             return ":" + value.toint() + "\r\n";
         } else if (value.isstring()) {
-            String str = value.tojstring();
-            byte[] bytes = str.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-            return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
+            // 处理LuaString，确保二进制安全
+            if (value instanceof org.luaj.vm2.LuaString) {
+                org.luaj.vm2.LuaString luaString = (org.luaj.vm2.LuaString) value;
+                byte[] bytes = new byte[luaString.length()];
+                luaString.copyInto(0, bytes, 0, bytes.length);
+                return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
+            } else {
+                // 其他字符串类型
+                String str = value.tojstring();
+                byte[] bytes = str.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
+            }
         } else if (value.istable()) {
             LuaTable table = (LuaTable) value;
             int length = table.length();
@@ -641,14 +650,16 @@ public class LuaCommandHandler implements CommandHandler {
                 }
                 if (start + length > str.length()) {
                     if (str.length() >= 2) {
-                        String value = str.substring(start, str.length() - 2);
-                        return LuaValue.valueOf(value);
+                        // 处理二进制数据，确保安全转换
+                        byte[] bytes = str.substring(start, str.length() - 2).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                        return org.luaj.vm2.LuaString.valueOf(bytes);
                     } else {
                         return LuaValue.FALSE;
                     }
                 } else {
-                    String value = str.substring(start, start + length);
-                    return LuaValue.valueOf(value);
+                    // 处理二进制数据，确保安全转换
+                    byte[] bytes = str.substring(start, start + length).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                    return org.luaj.vm2.LuaString.valueOf(bytes);
                 }
             } catch (NumberFormatException e) {
                 return LuaValue.FALSE;
@@ -715,15 +726,17 @@ public class LuaCommandHandler implements CommandHandler {
                         int start = lenPos + 2;
                         if (start + l > str.length()) {
                             if (str.length() >= 2) {
-                                String value = str.substring(start, str.length() - 2);
-                                table.set(elementIndex++, LuaValue.valueOf(value));
+                                // 处理二进制数据，确保安全转换
+                                byte[] bytes = str.substring(start, str.length() - 2).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                                table.set(elementIndex++, org.luaj.vm2.LuaString.valueOf(bytes));
                             } else {
                                 table.set(elementIndex++, LuaValue.FALSE);
                             }
                             index = str.length();
                         } else {
-                            String value = str.substring(start, start + l);
-                            table.set(elementIndex++, LuaValue.valueOf(value));
+                            // 处理二进制数据，确保安全转换
+                            byte[] bytes = str.substring(start, start + l).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                            table.set(elementIndex++, org.luaj.vm2.LuaString.valueOf(bytes));
                             index = start + l + 2;
                         }
                     }
@@ -734,6 +747,107 @@ public class LuaCommandHandler implements CommandHandler {
                     }
                     String msg = str.substring(index + 1, end);
                     throw new RuntimeException(msg);
+                } else if (c == '%') {
+                    // RESP3 Map类型
+                    int mapLenEnd = str.indexOf("\r\n", index + 1);
+                    if (mapLenEnd == -1) {
+                        break;
+                    }
+                    String mapLenStr = str.substring(index + 1, mapLenEnd);
+                    int mapLen;
+                    try {
+                        mapLen = Integer.parseInt(mapLenStr);
+                    } catch (NumberFormatException e) {
+                        table.set(elementIndex++, LuaValue.FALSE);
+                        index = mapLenEnd + 2;
+                        continue;
+                    }
+                    LuaTable mapTable = new LuaTable();
+                    int mapIndex = mapLenEnd + 2;
+                    for (int i = 0; i < mapLen; i++) {
+                        // 解析key
+                        if (mapIndex >= str.length()) break;
+                        char keyPrefix = str.charAt(mapIndex);
+                        LuaValue keyValue = parseResp3Value(str, mapIndex);
+                        if (keyValue.isnil()) break;
+                        mapIndex = getNextIndex(str, mapIndex);
+                        if (mapIndex >= str.length()) break;
+                        // 解析value
+                        char valuePrefix = str.charAt(mapIndex);
+                        LuaValue valueValue = parseResp3Value(str, mapIndex);
+                        if (valueValue.isnil()) break;
+                        mapTable.set(keyValue, valueValue);
+                        mapIndex = getNextIndex(str, mapIndex);
+                    }
+                    table.set(elementIndex++, mapTable);
+                    index = mapIndex;
+                } else if (c == '~') {
+                    // RESP3 Set类型
+                    int setLenEnd = str.indexOf("\r\n", index + 1);
+                    if (setLenEnd == -1) {
+                        break;
+                    }
+                    String setLenStr = str.substring(index + 1, setLenEnd);
+                    int setLen;
+                    try {
+                        setLen = Integer.parseInt(setLenStr);
+                    } catch (NumberFormatException e) {
+                        table.set(elementIndex++, LuaValue.FALSE);
+                        index = setLenEnd + 2;
+                        continue;
+                    }
+                    LuaTable setTable = new LuaTable();
+                    int setIndex = setLenEnd + 2;
+                    for (int i = 0; i < setLen; i++) {
+                        if (setIndex >= str.length()) break;
+                        LuaValue setValue = parseResp3Value(str, setIndex);
+                        if (setValue.isnil()) break;
+                        setTable.set(i + 1, setValue);
+                        setIndex = getNextIndex(str, setIndex);
+                    }
+                    table.set(elementIndex++, setTable);
+                    index = setIndex;
+                } else if (c == '_') {
+                    // RESP3 Null类型
+                    int nullEnd = str.indexOf("\r\n", index + 1);
+                    if (nullEnd == -1) {
+                        break;
+                    }
+                    table.set(elementIndex++, LuaValue.NIL);
+                    index = nullEnd + 2;
+                } else if (c == ',') {
+                    // RESP3 Double类型
+                    int doubleEnd = str.indexOf("\r\n", index + 1);
+                    if (doubleEnd == -1) {
+                        break;
+                    }
+                    String doubleStr = str.substring(index + 1, doubleEnd);
+                    try {
+                        double d = Double.parseDouble(doubleStr);
+                        table.set(elementIndex++, LuaValue.valueOf(d));
+                    } catch (NumberFormatException e) {
+                        table.set(elementIndex++, LuaValue.FALSE);
+                    }
+                    index = doubleEnd + 2;
+                } else if (c == '#') {
+                    // RESP3 Boolean类型
+                    int boolEnd = str.indexOf("\r\n", index + 1);
+                    if (boolEnd == -1) {
+                        break;
+                    }
+                    char boolChar = str.charAt(index + 1);
+                    boolean boolValue = boolChar == 't';
+                    table.set(elementIndex++, LuaValue.valueOf(boolValue));
+                    index = boolEnd + 2;
+                } else if (c == '(') {
+                    // RESP3 Big Number类型
+                    int bigNumEnd = str.indexOf("\r\n", index + 1);
+                    if (bigNumEnd == -1) {
+                        break;
+                    }
+                    String bigNumStr = str.substring(index + 1, bigNumEnd);
+                    table.set(elementIndex++, LuaValue.valueOf(bigNumStr));
+                    index = bigNumEnd + 2;
                 } else {
                     break;
                 }
@@ -746,8 +860,264 @@ public class LuaCommandHandler implements CommandHandler {
             }
             String msg = str.substring(1, end);
             throw new RuntimeException(msg);
+        } else if (prefix == '%') {
+            // RESP3 Map类型
+            int lenEnd = str.indexOf("\r\n", 1);
+            if (lenEnd <= 1) {
+                return LuaValue.FALSE;
+            }
+            String lenStr = str.substring(1, lenEnd);
+            int len;
+            try {
+                len = Integer.parseInt(lenStr);
+            } catch (NumberFormatException e) {
+                return LuaValue.FALSE;
+            }
+            LuaTable mapTable = new LuaTable();
+            int index = lenEnd + 2;
+            for (int i = 0; i < len; i++) {
+                if (index >= str.length()) break;
+                // 解析key
+                LuaValue keyValue = parseResp3Value(str, index);
+                if (keyValue.isnil()) break;
+                index = getNextIndex(str, index);
+                if (index >= str.length()) break;
+                // 解析value
+                LuaValue valueValue = parseResp3Value(str, index);
+                if (valueValue.isnil()) break;
+                mapTable.set(keyValue, valueValue);
+                index = getNextIndex(str, index);
+            }
+            return mapTable;
+        } else if (prefix == '~') {
+            // RESP3 Set类型
+            int lenEnd = str.indexOf("\r\n", 1);
+            if (lenEnd <= 1) {
+                return LuaValue.FALSE;
+            }
+            String lenStr = str.substring(1, lenEnd);
+            int len;
+            try {
+                len = Integer.parseInt(lenStr);
+            } catch (NumberFormatException e) {
+                return LuaValue.FALSE;
+            }
+            LuaTable setTable = new LuaTable();
+            int index = lenEnd + 2;
+            for (int i = 0; i < len; i++) {
+                if (index >= str.length()) break;
+                LuaValue setValue = parseResp3Value(str, index);
+                if (setValue.isnil()) break;
+                setTable.set(i + 1, setValue);
+                index = getNextIndex(str, index);
+            }
+            return setTable;
+        } else if (prefix == '|') {
+            // RESP3 Attribute类型（处理为Map）
+            int lenEnd = str.indexOf("\r\n", 1);
+            if (lenEnd <= 1) {
+                return LuaValue.FALSE;
+            }
+            String lenStr = str.substring(1, lenEnd);
+            int len;
+            try {
+                len = Integer.parseInt(lenStr);
+            } catch (NumberFormatException e) {
+                return LuaValue.FALSE;
+            }
+            LuaTable attrTable = new LuaTable();
+            int index = lenEnd + 2;
+            for (int i = 0; i < len; i++) {
+                if (index >= str.length()) break;
+                // 解析key
+                LuaValue keyValue = parseResp3Value(str, index);
+                if (keyValue.isnil()) break;
+                index = getNextIndex(str, index);
+                if (index >= str.length()) break;
+                // 解析value
+                LuaValue valueValue = parseResp3Value(str, index);
+                if (valueValue.isnil()) break;
+                attrTable.set(keyValue, valueValue);
+                index = getNextIndex(str, index);
+            }
+            return attrTable;
+        } else if (prefix == '_') {
+            // RESP3 Null类型
+            return LuaValue.NIL;
+        } else if (prefix == ',') {
+            // RESP3 Double类型
+            int end = str.indexOf("\r\n", 1);
+            if (end <= 1) {
+                return LuaValue.FALSE;
+            }
+            String doubleStr = str.substring(1, end);
+            try {
+                double d = Double.parseDouble(doubleStr);
+                return LuaValue.valueOf(d);
+            } catch (NumberFormatException e) {
+                return LuaValue.FALSE;
+            }
+        } else if (prefix == '#') {
+            // RESP3 Boolean类型
+            int end = str.indexOf("\r\n", 1);
+            if (end <= 1) {
+                return LuaValue.FALSE;
+            }
+            char boolChar = str.charAt(1);
+            boolean boolValue = boolChar == 't';
+            return LuaValue.valueOf(boolValue);
+        } else if (prefix == '(') {
+            // RESP3 Big Number类型
+            int end = str.indexOf("\r\n", 1);
+            if (end <= 1) {
+                return LuaValue.FALSE;
+            }
+            String bigNumStr = str.substring(1, end);
+            return LuaValue.valueOf(bigNumStr);
         } else {
             return LuaValue.FALSE;
+        }
+    }
+    
+    /**
+     * 解析RESP3值
+     */
+    private static LuaValue parseResp3Value(String str, int index) {
+        if (index >= str.length()) {
+            return LuaValue.NIL;
+        }
+        char prefix = str.charAt(index);
+        if (prefix == '+') {
+            int end = str.indexOf("\r\n", index);
+            if (end == -1) {
+                return LuaValue.NIL;
+            }
+            String value = str.substring(index + 1, end);
+            return LuaValue.valueOf(value);
+        } else if (prefix == ':') {
+            int end = str.indexOf("\r\n", index);
+            if (end == -1) {
+                return LuaValue.NIL;
+            }
+            String numStr = str.substring(index + 1, end);
+            try {
+                long v = Long.parseLong(numStr);
+                return LuaValue.valueOf(v);
+            } catch (NumberFormatException e) {
+                return LuaValue.FALSE;
+            }
+        } else if (prefix == '$') {
+            if (str.startsWith("$-1\r\n", index)) {
+                return LuaValue.FALSE;
+            }
+            int lenEnd = str.indexOf("\r\n", index);
+            if (lenEnd == -1) {
+                return LuaValue.NIL;
+            }
+            String lenStr = str.substring(index + 1, lenEnd);
+            try {
+                int length = Integer.parseInt(lenStr);
+                int start = lenEnd + 2;
+                if (length < 0) {
+                    return LuaValue.FALSE;
+                }
+                if (start + length > str.length()) {
+                    if (str.length() >= 2) {
+                        byte[] bytes = str.substring(start, str.length() - 2).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                        return org.luaj.vm2.LuaString.valueOf(bytes);
+                    } else {
+                        return LuaValue.FALSE;
+                    }
+                } else {
+                    byte[] bytes = str.substring(start, start + length).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                    return org.luaj.vm2.LuaString.valueOf(bytes);
+                }
+            } catch (NumberFormatException e) {
+                return LuaValue.FALSE;
+            }
+        } else if (prefix == '_') {
+            return LuaValue.NIL;
+        } else if (prefix == ',') {
+            int end = str.indexOf("\r\n", index + 1);
+            if (end == -1) {
+                return LuaValue.NIL;
+            }
+            String doubleStr = str.substring(index + 1, end);
+            try {
+                double d = Double.parseDouble(doubleStr);
+                return LuaValue.valueOf(d);
+            } catch (NumberFormatException e) {
+                return LuaValue.FALSE;
+            }
+        } else if (prefix == '#') {
+            int end = str.indexOf("\r\n", index + 1);
+            if (end == -1) {
+                return LuaValue.NIL;
+            }
+            char boolChar = str.charAt(index + 1);
+            boolean boolValue = boolChar == 't';
+            return LuaValue.valueOf(boolValue);
+        } else if (prefix == '(') {
+            int end = str.indexOf("\r\n", index + 1);
+            if (end == -1) {
+                return LuaValue.NIL;
+            }
+            String bigNumStr = str.substring(index + 1, end);
+            return LuaValue.valueOf(bigNumStr);
+        } else {
+            return LuaValue.NIL;
+        }
+    }
+    
+    /**
+     * 获取下一个RESP值的起始索引
+     */
+    private static int getNextIndex(String str, int index) {
+        if (index >= str.length()) {
+            return index;
+        }
+        char prefix = str.charAt(index);
+        if (prefix == '+' || prefix == '-' || prefix == ':' || prefix == '_' || prefix == ',' || prefix == '#' || prefix == '(') {
+            int end = str.indexOf("\r\n", index);
+            return end == -1 ? str.length() : end + 2;
+        } else if (prefix == '$') {
+            int lenEnd = str.indexOf("\r\n", index);
+            if (lenEnd == -1) {
+                return str.length();
+            }
+            String lenStr = str.substring(index + 1, lenEnd);
+            try {
+                int length = Integer.parseInt(lenStr);
+                int start = lenEnd + 2;
+                return start + length + 2;
+            } catch (NumberFormatException e) {
+                return lenEnd + 2;
+            }
+        } else if (prefix == '*' || prefix == '%' || prefix == '~' || prefix == '|') {
+            int lenEnd = str.indexOf("\r\n", index + 1);
+            if (lenEnd == -1) {
+                return str.length();
+            }
+            String lenStr = str.substring(index + 1, lenEnd);
+            try {
+                int length = Integer.parseInt(lenStr);
+                int currentIndex = lenEnd + 2;
+                for (int i = 0; i < length; i++) {
+                    if (prefix == '*' || prefix == '~') {
+                        // 数组或集合，每个元素是一个值
+                        currentIndex = getNextIndex(str, currentIndex);
+                    } else if (prefix == '%' || prefix == '|') {
+                        // Map或Attribute，每个元素是key-value对
+                        currentIndex = getNextIndex(str, currentIndex);
+                        currentIndex = getNextIndex(str, currentIndex);
+                    }
+                }
+                return currentIndex;
+            } catch (NumberFormatException e) {
+                return lenEnd + 2;
+            }
+        } else {
+            return str.length();
         }
     }
 

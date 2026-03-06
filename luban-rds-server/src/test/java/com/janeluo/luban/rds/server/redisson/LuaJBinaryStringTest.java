@@ -26,12 +26,11 @@ class LuaJBinaryStringTest {
         String strFromBytes = new String(binaryData, StandardCharsets.ISO_8859_1);
         System.out.println("String from bytes (ISO-8859-1): length=" + strFromBytes.length());
         
-        // 使用 LuaValue.valueOf 转换为 LuaString
-        LuaValue luaValue = LuaValue.valueOf(strFromBytes);
-        System.out.println("LuaValue type: " + luaValue.typename());
+        // 直接使用 LuaString.valueOf(byte[]) 转换，避免字符串编码问题
+        LuaString luaString = LuaString.valueOf(binaryData);
+        System.out.println("LuaString type: " + luaString.typename());
         
         // 获取 LuaString 的字节
-        LuaString luaString = luaValue.checkstring();
         byte[] luaBytes = new byte[luaString.length()];
         luaString.copyInto(0, luaBytes, 0, luaBytes.length);
         
@@ -51,9 +50,8 @@ class LuaJBinaryStringTest {
         for (int b = 0; b < 256; b++) {
             byte[] testData = new byte[]{(byte) b};
             
-            String str = new String(testData, StandardCharsets.ISO_8859_1);
-            LuaValue luaValue = LuaValue.valueOf(str);
-            LuaString luaString = luaValue.checkstring();
+            // 直接使用 LuaString.valueOf(byte[]) 转换，避免字符串编码问题
+            LuaString luaString = LuaString.valueOf(testData);
             byte[] result = new byte[luaString.length()];
             luaString.copyInto(0, result, 0, result.length);
             
@@ -75,10 +73,8 @@ class LuaJBinaryStringTest {
         
         byte[] javaMagic = new byte[]{(byte) 0xAC, (byte) 0xED, 0x00, 0x05};
         
-        // 通过 LuaJ 处理
-        String str = new String(javaMagic, StandardCharsets.ISO_8859_1);
-        LuaValue luaValue = LuaValue.valueOf(str);
-        LuaString luaString = luaValue.checkstring();
+        // 通过 LuaJ 处理，直接使用 LuaString.valueOf(byte[])
+        LuaString luaString = LuaString.valueOf(javaMagic);
         byte[] result = new byte[luaString.length()];
         luaString.copyInto(0, result, 0, result.length);
         
@@ -99,12 +95,10 @@ class LuaJBinaryStringTest {
             (byte) 0x9C, (byte) 0x9D, (byte) 0x9E, (byte) 0x9F
         };
         
-        String str = new String(problematic, StandardCharsets.ISO_8859_1);
-        System.out.println("String length: " + str.length());
-        System.out.println("String char values: " + charValues(str));
+        // 直接使用 LuaString.valueOf(byte[]) 转换，避免字符串编码问题
+        System.out.println("Byte array length: " + problematic.length);
         
-        LuaValue luaValue = LuaValue.valueOf(str);
-        LuaString luaString = luaValue.checkstring();
+        LuaString luaString = LuaString.valueOf(problematic);
         byte[] result = new byte[luaString.length()];
         luaString.copyInto(0, result, 0, result.length);
         

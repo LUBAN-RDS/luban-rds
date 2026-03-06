@@ -173,6 +173,13 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 clientInfo.updateLastActiveTime();
                 clientInfo.getInboundBuf().writeBytes(buffer);
                 while (true) {
+                    // 检查是否需要检测协议版本
+                    if (clientInfo.getProtocolVersion() == ProtocolVersion.RESP2) {
+                        // 检测是否是RESP3的HELLO命令
+                        if (detectResp3Hello(clientInfo.getInboundBuf(), ctx, clientInfo)) {
+                            continue;
+                        }
+                    }
                     Command command = protocolParser.parse(clientInfo.getInboundBuf());
                     if (command == null) {
                         break;
@@ -183,6 +190,116 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 buffer.release();
             }
         }
+    }
+    
+    /**
+     * 检测RESP3的HELLO命令
+     * RESP3客户端会发送HELLO命令来协商协议版本
+     */
+    private boolean detectResp3Hello(ByteBuf buffer, ChannelHandlerContext ctx, ClientInfo clientInfo) {
+        if (!buffer.isReadable()) {
+            return false;
+        }
+        
+        // 保存当前缓冲区位置
+        int startIndex = buffer.readerIndex();
+        
+        try {
+            byte firstByte = buffer.readByte();
+            
+            if (firstByte == '*') {
+                // 解析数组长度
+                int length = parseInteger(buffer);
+                if (length >= 2) {
+                    if (buffer.readableBytes() > 0) {
+                        byte type = buffer.readByte();
+                        if (type == '$') {
+                            // 解析命令长度
+                            int cmdLength = parseInteger(buffer);
+                            if (cmdLength > 0 && buffer.readableBytes() >= cmdLength + 2) {
+                                // 读取命令名称
+                                byte[] cmdBytes = new byte[cmdLength];
+                                buffer.readBytes(cmdBytes);
+                                String commandName = new String(cmdBytes, java.nio.charset.StandardCharsets.UTF_8);
+                                
+                                if ("HELLO".equalsIgnoreCase(commandName)) {
+                                    // 读取协议版本参数
+                                    if (buffer.readableBytes() > 0) {
+                                        type = buffer.readByte();
+                                        if (type == '$') {
+                                            // 解析版本长度
+                                            int versionLength = parseInteger(buffer);
+                                            if (versionLength > 0 && buffer.readableBytes() >= versionLength + 2) {
+                                                // 读取版本号
+                                                byte[] versionBytes = new byte[versionLength];
+                                                buffer.readBytes(versionBytes);
+                                                String version = new String(versionBytes, java.nio.charset.StandardCharsets.UTF_8);
+                                                
+                                                if ("3".equals(version)) {
+                                                    // 切换到RESP3
+                                                    clientInfo.setProtocolVersion(ProtocolVersion.RESP3);
+                                                    // 响应HELLO命令
+                                                    java.util.Map<String, Object> response = new java.util.HashMap<>();
+                                                    response.put("server", "Luban-RDS");
+                                                    response.put("version", "1.0.0");
+                                                    response.put("proto", 3);
+                                                    response.put("id", ctx.channel().id().asLongText());
+                                                    response.put("mode", "standalone");
+                                                    response.put("role", "master");
+                                                    response.put("modules", new java.util.ArrayList<>());
+                                                    ByteBuf respBuffer = protocolParser.serialize(response);
+                                                    if (respBuffer != null && respBuffer.isReadable()) {
+                                                        ctx.writeAndFlush(respBuffer);
+                                                    } else if (respBuffer != null) {
+                                                        respBuffer.release();
+                                                    }
+                                                    return true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // 发生异常时，重置缓冲区位置
+            buffer.readerIndex(startIndex);
+            return false;
+        }
+        
+        // 没有检测到HELLO 3命令，重置缓冲区位置
+        buffer.readerIndex(startIndex);
+        return false;
+    }
+    
+    /**
+     * 解析整数，使用本地实现避免依赖protocolParser的public方法
+     */
+    private int parseInteger(ByteBuf buffer) {
+        int result = 0;
+        boolean negative = false;
+        byte b;
+        
+        while (buffer.isReadable()) {
+            b = buffer.readByte();
+            if (b == '\r') {
+                if (buffer.readableBytes() > 0 && buffer.readByte() == '\n') {
+                    break;
+                }
+                return -1;
+            } else if (b == '-') {
+                negative = true;
+            } else if (b >= '0' && b <= '9') {
+                result = result * 10 + (b - '0');
+            } else {
+                return -1;
+            }
+        }
+        
+        return negative ? -result : result;
     }
     
     private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Command command) {
@@ -377,6 +494,11 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         }
     }
     
+    // 协议版本枚举
+    private enum ProtocolVersion {
+        RESP2, RESP3
+    }
+    
     // 客户端信息类
     private static class ClientInfo {
         private final String name;
@@ -391,6 +513,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         private boolean txQueueError;
         private final java.util.Map<String, Long> watchedVersions = new HashMap<>();
         private final io.netty.buffer.ByteBuf inboundBuf = io.netty.buffer.Unpooled.buffer();
+        private ProtocolVersion protocolVersion = ProtocolVersion.RESP2; // 默认使用RESP2
         
         public ClientInfo(String name) {
             this.name = name;
@@ -401,6 +524,14 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             this.inTransaction = false;
             this.txQueue = new ArrayList<>();
             this.txQueueError = false;
+        }
+        
+        public ProtocolVersion getProtocolVersion() {
+            return protocolVersion;
+        }
+        
+        public void setProtocolVersion(ProtocolVersion protocolVersion) {
+            this.protocolVersion = protocolVersion;
         }
         
         public String getName() {
