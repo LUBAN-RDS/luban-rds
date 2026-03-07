@@ -1,0 +1,235 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: luban-rds
+  labels:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: namespace
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: luban-rds-config
+  namespace: luban-rds
+  labels:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: configmap
+data:
+  luban-rds.conf: |
+    bind 0.0.0.0
+    port 9736
+    tcp-backlog 511
+    timeout 0
+    tcp-keepalive 300
+    daemonize no
+    loglevel notice
+    logfile ""
+    databases 16
+    persist-mode rdb
+    dir /data
+    dbfilename dump.rdb
+    rdb-save-interval 60
+    appendfilename appendonly.aof
+    appendfsync everysec
+    aof-fsync-interval 1
+    maxmemory 0
+    maxmemory-policy noeviction
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: luban-rds-secret
+  namespace: luban-rds
+  labels:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: secret
+type: Opaque
+stringData:
+  requirepass: ""
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: luban-rds
+  namespace: luban-rds
+  labels:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: service
+spec:
+  type: ClusterIP
+  ports:
+    - name: redis
+      port: 9736
+      targetPort: 9736
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: server
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: luban-rds-headless
+  namespace: luban-rds
+  labels:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: service
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: redis
+      port: 9736
+      targetPort: 9736
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: luban-rds
+  namespace: luban-rds
+  labels:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: luban-rds
+      app.kubernetes.io/component: server
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: luban-rds
+        app.kubernetes.io/component: server
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9736"
+    spec:
+      serviceAccountName: luban-rds
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: luban-rds
+          image: luban-rds:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: redis
+              containerPort: 9736
+              protocol: TCP
+          env:
+            - name: LUBAN_RDS_PORT
+              value: "9736"
+            - name: LUBAN_RDS_BIND
+              value: "0.0.0.0"
+            - name: LUBAN_RDS_DATA_DIR
+              value: "/data"
+            - name: LUBAN_RDS_PERSIST_MODE
+              value: "rdb"
+            - name: LUBAN_RDS_MAXMEMORY
+              value: "0"
+            - name: LUBAN_RDS_DATABASES
+              value: "16"
+            - name: LUBAN_RDS_REQUIREPASS
+              valueFrom:
+                secretKeyRef:
+                  name: luban-rds-secret
+                  key: requirepass
+                  optional: true
+            - name: JAVA_OPTS
+              value: "-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=50 -XX:+UseStringDeduplication"
+          resources:
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: logs
+              mountPath: /logs
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+          livenessProbe:
+            exec:
+              command:
+                - /app/healthcheck.sh
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /app/healthcheck.sh
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: luban-rds-data
+        - name: logs
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: luban-rds-config
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: luban-rds-data
+  namespace: luban-rds
+  labels:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: luban-rds
+  namespace: luban-rds
+  labels:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: serviceaccount
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: luban-rds-pdb
+  namespace: luban-rds
+  labels:
+    app.kubernetes.io/name: luban-rds
+    app.kubernetes.io/component: pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: luban-rds
+      app.kubernetes.io/component: server

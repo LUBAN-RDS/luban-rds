@@ -108,139 +108,310 @@ java -jar luban-rds-bin-1.0.0.jar
 
 ### 2.3 Docker 部署
 
-**步骤 1：拉取镜像**
+Luban-RDS 提供完整的 Docker 支持，包括多阶段构建、健康检查和非 root 用户运行。
+
+#### 2.3.1 使用 Docker Compose（推荐）
+
+**步骤 1：克隆项目**
 ```bash
-docker pull your-org/luban-rds:1.0.0
+git clone https://github.com/LUBAN-RDS/luban-rds.git
+cd luban-rds
+```
+
+**步骤 2：配置环境变量**
+```bash
+# 复制环境变量模板
+cp .env.example .env
+
+# 编辑配置（可选）
+vim .env
+```
+
+**步骤 3：启动服务**
+```bash
+# 启动服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+
+# 查看服务状态
+docker-compose ps
+```
+
+**步骤 4：验证服务**
+```bash
+# 使用 redis-cli 连接
+redis-cli -h localhost -p 9736 PING
+```
+
+#### 2.3.2 使用 Docker 命令
+
+**步骤 1：构建镜像**
+```bash
+# 在项目根目录执行
+docker build -t luban-rds:1.0.0 .
 ```
 
 **步骤 2：运行容器**
 ```bash
 # 基本运行
-docker run -d --name luban-rds -p 9736:9736 your-org/luban-rds:1.0.0
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.0
 
-# 带持久化
+# 带持久化存储
 docker run -d --name luban-rds \
   -p 9736:9736 \
-  -v /path/to/data:/data \
-  your-org/luban-rds:1.0.0
+  -v luban-rds-data:/data \
+  luban-rds:1.0.0
 
 # 带自定义配置
 docker run -d --name luban-rds \
   -p 9736:9736 \
-  -v /path/to/conf/luban-rds.conf:/etc/luban-rds.conf \
-  your-org/luban-rds:1.0.0
+  -v /path/to/luban-rds.conf:/app/config/luban-rds.conf:ro \
+  -v luban-rds-data:/data \
+  luban-rds:1.0.0
+
+# 带密码认证
+docker run -d --name luban-rds \
+  -p 9736:9736 \
+  -v luban-rds-data:/data \
+  -e LUBAN_RDS_REQUIREPASS=your-secure-password \
+  luban-rds:1.0.0
+
+# 带资源限制
+docker run -d --name luban-rds \
+  -p 9736:9736 \
+  -v luban-rds-data:/data \
+  --memory="1g" \
+  --cpus="2" \
+  luban-rds:1.0.0
 ```
 
-**步骤 3：构建自定义镜像（可选）**
+**步骤 3：管理容器**
 ```bash
-# 在项目根目录创建 Dockerfile
-cat > Dockerfile << EOF
-FROM openjdk:11-jre-slim
+# 查看容器状态
+docker ps
 
-WORKDIR /app
+# 查看日志
+docker logs -f luban-rds
 
-COPY luban-rds-bin/target/luban-rds-bin-1.0.0.jar /app/
+# 进入容器
+docker exec -it luban-rds sh
 
-EXPOSE 9736
+# 停止容器
+docker stop luban-rds
 
-CMD ["java", "-jar", "luban-rds-bin-1.0.0.jar"]
-EOF
+# 启动容器
+docker start luban-rds
 
-# 构建镜像
-docker build -t your-org/luban-rds:1.0.0 .
+# 删除容器
+docker rm -f luban-rds
 ```
+
+#### 2.3.3 Docker 环境变量
+
+| 变量名 | 描述 | 默认值 |
+|--------|------|--------|
+| `LUBAN_RDS_PORT` | 服务监听端口 | 9736 |
+| `LUBAN_RDS_BIND` | 绑定地址 | 0.0.0.0 |
+| `LUBAN_RDS_DATA_DIR` | 数据存储目录 | /data |
+| `LUBAN_RDS_PERSIST_MODE` | 持久化模式（rdb/aof/mixed/none） | rdb |
+| `LUBAN_RDS_MAXMEMORY` | 最大内存限制（字节） | 0（无限制） |
+| `LUBAN_RDS_DATABASES` | 数据库数量 | 16 |
+| `LUBAN_RDS_REQUIREPASS` | 访问密码 | 空 |
+| `LUBAN_RDS_TIMEOUT` | 客户端超时（秒） | 0 |
+| `LUBAN_RDS_TCP_KEEPALIVE` | TCP 保活时间（秒） | 300 |
+| `LUBAN_RDS_MAXMEMORY_POLICY` | 内存淘汰策略 | noeviction |
+| `LUBAN_RDS_SLOWLOG_SLOWER_THAN` | 慢查询阈值（微秒） | 10000 |
+| `LUBAN_RDS_SLOWLOG_MAX_LEN` | 慢查询日志最大长度 | 128 |
+| `JAVA_OPTS` | JVM 参数 | -Xms256m -Xmx512m |
+
+#### 2.3.4 Docker Compose 配置示例
+
+```yaml
+version: '3.8'
+
+services:
+  luban-rds:
+    image: luban-rds:1.0.0
+    container_name: luban-rds
+    restart: unless-stopped
+    ports:
+      - "9736:9736"
+    environment:
+      - LUBAN_RDS_PORT=9736
+      - LUBAN_RDS_PERSIST_MODE=rdb
+      - LUBAN_RDS_MAXMEMORY=1073741824
+      - JAVA_OPTS=-Xms512m -Xmx1g -XX:+UseG1GC
+    volumes:
+      - luban-rds-data:/data
+      - luban-rds-logs:/logs
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+volumes:
+  luban-rds-data:
+  luban-rds-logs:
+```
+
+#### 2.3.5 Dockerfile 特性
+
+Luban-RDS 的 Dockerfile 遵循行业最佳实践：
+
+- **多阶段构建**：减小镜像体积，构建阶段与运行时分离
+- **非 root 用户**：使用 `luban` 用户（UID 1000）运行，提高安全性
+- **健康检查**：内置健康检查脚本，支持容器编排工具监控
+- **最小化镜像**：基于 Alpine Linux，镜像体积小
+- **层缓存优化**：优化 Dockerfile 指令顺序，提高构建效率
+- **安全加固**：禁用特权、只读文件系统选项支持
 
 ### 2.4 Kubernetes 部署
 
-**步骤 1：创建部署配置**
+Luban-RDS 提供完整的 Kubernetes 部署清单，支持生产环境部署。
+
+#### 2.4.1 快速部署
+
+**步骤 1：应用部署配置**
+```bash
+# 应用完整的 Kubernetes 配置
+kubectl apply -f docker/kubernetes.yaml
+
+# 查看部署状态
+kubectl get pods -n luban-rds
+
+# 查看服务
+kubectl get svc -n luban-rds
+```
+
+**步骤 2：验证部署**
+```bash
+# 端口转发测试
+kubectl port-forward svc/luban-rds 9736:9736 -n luban-rds
+
+# 在另一个终端测试连接
+redis-cli -h localhost -p 9736 PING
+```
+
+#### 2.4.2 Kubernetes 资源说明
+
+部署清单包含以下 Kubernetes 资源：
+
+| 资源类型 | 名称 | 描述 |
+|----------|------|------|
+| Namespace | luban-rds | 命名空间 |
+| ConfigMap | luban-rds-config | 配置文件 |
+| Secret | luban-rds-secret | 敏感信息（密码） |
+| Service | luban-rds | ClusterIP 服务 |
+| Service | luban-rds-headless | Headless 服务 |
+| Deployment | luban-rds | 部署控制器 |
+| PersistentVolumeClaim | luban-rds-data | 持久化存储 |
+| ServiceAccount | luban-rds | 服务账户 |
+| PodDisruptionBudget | luban-rds-pdb | Pod 中断预算 |
+
+#### 2.4.3 自定义部署配置
+
+**创建自定义配置**
 ```yaml
-# luban-rds-deployment.yaml
+# custom-luban-rds.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: luban-rds-config
+  namespace: luban-rds
+data:
+  luban-rds.conf: |
+    bind 0.0.0.0
+    port 9736
+    databases 32
+    maxmemory 2147483648
+    maxmemory-policy allkeys-lru
+    persist-mode rdb
+    dir /data
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: luban-rds-secret
+  namespace: luban-rds
+type: Opaque
+stringData:
+  requirepass: "your-secure-password"
+```
+
+**应用自定义配置**
+```bash
+kubectl apply -f custom-luban-rds.yaml
+```
+
+#### 2.4.4 水平扩展（StatefulSet）
+
+对于需要持久化数据的多副本部署，建议使用 StatefulSet：
+
+```yaml
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: luban-rds
-  labels:
-    app: luban-rds
+  namespace: luban-rds
 spec:
-  replicas: 1
+  serviceName: luban-rds-headless
+  replicas: 3
   selector:
     matchLabels:
-      app: luban-rds
+      app.kubernetes.io/name: luban-rds
   template:
     metadata:
       labels:
-        app: luban-rds
+        app.kubernetes.io/name: luban-rds
     spec:
       containers:
-      - name: luban-rds
-        image: your-org/luban-rds:1.0.0
-        ports:
-        - containerPort: 9736
+        - name: luban-rds
+          image: luban-rds:1.0.0
+          ports:
+            - containerPort: 9736
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
         resources:
-          limits:
-            memory: "2Gi"
-            cpu: "1"
           requests:
-            memory: "1Gi"
-            cpu: "500m"
-        volumeMounts:
-        - name: data
-          mountPath: /data
-      volumes:
-      - name: data
-        emptyDir: {}
+            storage: 10Gi
 ```
 
-**步骤 2：创建服务配置**
-```yaml
-# luban-rds-service.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: luban-rds
-spec:
-  selector:
-    app: luban-rds
-  ports:
-  - port: 9736
-    targetPort: 9736
-  type: ClusterIP
-```
+#### 2.4.5 监控和日志
 
-**步骤 3：应用配置**
+**查看 Pod 日志**
 ```bash
-# 部署应用
-kubectl apply -f luban-rds-deployment.yaml
+# 查看日志
+kubectl logs -f deployment/luban-rds -n luban-rds
 
-# 创建服务
-kubectl apply -f luban-rds-service.yaml
-
-# 查看状态
-kubectl get pods
-kubectl get services
+# 查看特定 Pod 日志
+kubectl logs -f <pod-name> -n luban-rds
 ```
 
-**步骤 4：使用持久卷（可选）**
-```yaml
-# luban-rds-pvc.yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: luban-rds-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
-```
+**查看资源使用**
+```bash
+# 查看 Pod 资源使用
+kubectl top pods -n luban-rds
 
-更新 deployment.yaml，使用 PVC：
-```yaml
-volumes:
-- name: data
-  persistentVolumeClaim:
-    claimName: luban-rds-pvc
+# 查看事件
+kubectl get events -n luban-rds --sort-by='.lastTimestamp'
 ```
 
 ### 2.5 Spring Boot 集成

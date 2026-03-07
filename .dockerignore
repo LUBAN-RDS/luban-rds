@@ -1,0 +1,62 @@
+# Maven build artifacts
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDE files
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+docs/
+*.md
+!README.md
+LICENSE
+AGENTS.md
+
+# Test files
+**/test/
+**/*Test.java
+**/*Tests.java
+
+# Build scripts (not needed in container)
+scripts/
+
+# Log files
+*.log
+logs/
+
+# Data directory
+data/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+
+# Node modules (for docs)
+node_modules/
+
+# Environment files
+.env
+.env.*
+!.env.example

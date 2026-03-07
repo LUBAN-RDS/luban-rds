@@ -559,14 +559,81 @@ mvn clean deploy -DskipTests
 
 ### 10.3 构建 Docker 镜像
 
-使用 Docker 构建镜像：
+Luban-RDS 提供了完整的 Docker 支持，使用多阶段构建优化镜像体积。
+
+#### 构建 Docker 镜像
 
 ```bash
-# 构建 Docker 镜像
+# 在项目根目录执行
 docker build -t luban-rds:1.0.0 .
 
-# 运行 Docker 容器
-docker run -p 9736:9736 luban-rds:1.0.0
+# 带构建参数
+docker build \
+  --build-arg JAVA_VERSION=17 \
+  -t luban-rds:1.0.0 .
+```
+
+#### 运行 Docker 容器
+
+```bash
+# 基本运行
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.0
+
+# 带持久化存储
+docker run -d --name luban-rds \
+  -p 9736:9736 \
+  -v luban-rds-data:/data \
+  luban-rds:1.0.0
+
+# 带环境变量配置
+docker run -d --name luban-rds \
+  -p 9736:9736 \
+  -v luban-rds-data:/data \
+  -e LUBAN_RDS_MAXMEMORY=1073741824 \
+  -e JAVA_OPTS="-Xms512m -Xmx1g" \
+  luban-rds:1.0.0
+```
+
+#### 使用 Docker Compose
+
+```bash
+# 启动服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+
+# 停止服务
+docker-compose down
+
+# 重新构建并启动
+docker-compose up -d --build
+```
+
+#### Dockerfile 特性
+
+Luban-RDS 的 Dockerfile 遵循行业最佳实践：
+
+| 特性 | 描述 |
+|------|------|
+| 多阶段构建 | 构建阶段与运行时分离，减小镜像体积 |
+| 非 root 用户 | 使用 `luban` 用户（UID 1000）运行 |
+| 健康检查 | 内置健康检查脚本 |
+| 最小化镜像 | 基于 Alpine Linux |
+| 层缓存优化 | 优化 Dockerfile 指令顺序 |
+| 安全加固 | 支持只读文件系统、禁用特权 |
+
+#### 推送到镜像仓库
+
+```bash
+# 登录镜像仓库
+docker login registry.example.com
+
+# 标记镜像
+docker tag luban-rds:1.0.0 registry.example.com/luban-rds:1.0.0
+
+# 推送镜像
+docker push registry.example.com/luban-rds:1.0.0
 ```
 
 ## 11. 常见构建命令

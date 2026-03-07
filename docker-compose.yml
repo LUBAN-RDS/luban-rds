@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  luban-rds:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: luban-rds:1.0.0
+    container_name: luban-rds
+    restart: unless-stopped
+    ports:
+      - "${LUBAN_RDS_PORT:-9736}:9736"
+    environment:
+      - LUBAN_RDS_PORT=9736
+      - LUBAN_RDS_BIND=0.0.0.0
+      - LUBAN_RDS_DATA_DIR=/data
+      - LUBAN_RDS_PERSIST_MODE=${LUBAN_RDS_PERSIST_MODE:-rdb}
+      - LUBAN_RDS_MAXMEMORY=${LUBAN_RDS_MAXMEMORY:-0}
+      - LUBAN_RDS_DATABASES=${LUBAN_RDS_DATABASES:-16}
+      - LUBAN_RDS_REQUIREPASS=${LUBAN_RDS_REQUIREPASS:-}
+      - JAVA_OPTS=-Xms256m -Xmx512m -XX:+UseG1GC -XX:MaxGCPauseMillis=50
+    volumes:
+      - luban-rds-data:/data
+      - luban-rds-logs:/logs
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "tcp://localhost:9736"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - luban-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  luban-rds-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: luban-rds:1.0.0-dev
+    container_name: luban-rds-dev
+    profiles:
+      - dev
+    ports:
+      - "9737:9736"
+    environment:
+      - LUBAN_RDS_PORT=9736
+      - LUBAN_RDS_BIND=0.0.0.0
+      - LUBAN_RDS_DATA_DIR=/data
+      - LUBAN_RDS_PERSIST_MODE=none
+      - JAVA_OPTS=-Xms128m -Xmx256m -XX:+UseG1GC -enableassertions
+    volumes:
+      - ./luban-rds-bin/src/main/resources:/app/config:ro
+    networks:
+      - luban-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+networks:
+  luban-network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  luban-rds-data:
+    driver: local
+  luban-rds-logs:
+    driver: local

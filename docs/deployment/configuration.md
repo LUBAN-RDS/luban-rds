@@ -672,7 +672,86 @@ redis-cli -h localhost -p 9736 INFO persistence | grep -E "rdb_|aof_"
 - 检查网络连接是否正常
 - 调整线程配置和网络配置
 
-## 15. 下一步
+## 15. Docker 环境变量配置
+
+在 Docker 环境中，可以通过环境变量配置 Luban-RDS：
+
+### 15.1 核心环境变量
+
+| 变量名 | 配置项 | 默认值 | 描述 |
+|--------|--------|--------|------|
+| `LUBAN_RDS_PORT` | port | 9736 | 服务监听端口 |
+| `LUBAN_RDS_BIND` | bind | 0.0.0.0 | 绑定地址 |
+| `LUBAN_RDS_DATA_DIR` | dir | /data | 数据存储目录 |
+| `LUBAN_RDS_DATABASES` | databases | 16 | 数据库数量 |
+| `LUBAN_RDS_REQUIREPASS` | requirepass | 空 | 访问密码 |
+
+### 15.2 持久化环境变量
+
+| 变量名 | 配置项 | 默认值 | 描述 |
+|--------|--------|--------|------|
+| `LUBAN_RDS_PERSIST_MODE` | persist-mode | rdb | 持久化模式 |
+| `LUBAN_RDS_MAXMEMORY` | maxmemory | 0 | 最大内存限制 |
+| `LUBAN_RDS_MAXMEMORY_POLICY` | maxmemory-policy | noeviction | 内存淘汰策略 |
+
+### 15.3 网络环境变量
+
+| 变量名 | 配置项 | 默认值 | 描述 |
+|--------|--------|--------|------|
+| `LUBAN_RDS_TIMEOUT` | timeout | 0 | 客户端超时 |
+| `LUBAN_RDS_TCP_KEEPALIVE` | tcp-keepalive | 300 | TCP 保活时间 |
+
+### 15.4 慢查询日志环境变量
+
+| 变量名 | 配置项 | 默认值 | 描述 |
+|--------|--------|--------|------|
+| `LUBAN_RDS_SLOWLOG_SLOWER_THAN` | slowlog-log-slower-than | 10000 | 慢查询阈值（微秒） |
+| `LUBAN_RDS_SLOWLOG_MAX_LEN` | slowlog-max-len | 128 | 慢查询日志最大长度 |
+
+### 15.5 JVM 配置
+
+| 变量名 | 默认值 | 描述 |
+|--------|--------|------|
+| `JAVA_OPTS` | -Xms256m -Xmx512m -XX:+UseG1GC | JVM 参数 |
+
+### 15.6 Docker Compose 配置示例
+
+```yaml
+version: '3.8'
+
+services:
+  luban-rds:
+    image: luban-rds:1.0.0
+    environment:
+      - LUBAN_RDS_PORT=9736
+      - LUBAN_RDS_PERSIST_MODE=rdb
+      - LUBAN_RDS_MAXMEMORY=1073741824
+      - LUBAN_RDS_MAXMEMORY_POLICY=allkeys-lru
+      - LUBAN_RDS_REQUIREPASS=your-secure-password
+      - JAVA_OPTS=-Xms512m -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=50
+    volumes:
+      - luban-rds-data:/data
+```
+
+### 15.7 Kubernetes ConfigMap 配置示例
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: luban-rds-config
+data:
+  luban-rds.conf: |
+    bind 0.0.0.0
+    port 9736
+    databases 16
+    maxmemory 2147483648
+    maxmemory-policy allkeys-lru
+    persist-mode rdb
+    dir /data
+```
+
+## 16. 下一步
 
 - **[监控维护](./monitoring.md)**：学习如何监控和维护 Luban-RDS 服务
 - **[故障排查](./troubleshooting.md)**：掌握常见问题的排查和解决方法

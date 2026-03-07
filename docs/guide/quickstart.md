@@ -10,8 +10,38 @@ title: 快速开始
 
 - **Java 17+**：Luban-RDS 基于 Java 开发
 - **Maven 3.6+**：用于构建项目
+- **Docker**（可选）：用于容器化部署
 
-## 步骤 1：克隆项目
+## 方式一：Docker 快速启动（推荐）
+
+如果您已安装 Docker，这是最快的方式：
+
+```bash
+# 克隆项目
+git clone https://github.com/LUBAN-RDS/luban-rds.git
+cd luban-rds
+
+# 使用 Docker Compose 启动
+docker-compose up -d
+
+# 验证服务
+redis-cli -h localhost -p 9736 PING
+```
+
+或者直接使用 Docker 命令：
+
+```bash
+# 构建镜像
+docker build -t luban-rds:1.0.0 .
+
+# 运行容器
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.0
+
+# 验证服务
+redis-cli -h localhost -p 9736 PING
+```
+
+## 方式二：从源码构建
 
 ```bash
 # 从 GitHub 克隆
@@ -23,7 +53,7 @@ git clone https://gitee.com/luban-rds/luban-rds.git
 cd luban-rds
 ```
 
-## 步骤 2：构建项目
+### 步骤 1：构建项目
 
 ```bash
 # 构建所有模块
@@ -35,7 +65,7 @@ mvn clean package -DskipTests
 
 构建完成后，可执行文件会生成在 `luban-rds-bin/target/` 目录中。
 
-## 步骤 3：启动服务器
+### 步骤 2：启动服务器
 
 ### 使用启动脚本
 
@@ -57,7 +87,7 @@ java -jar luban-rds-bin/target/luban-rds-bin-1.0.0.jar
 
 服务器默认监听 **9736** 端口。
 
-## 步骤 4：连接服务器
+### 步骤 3：连接服务器
 
 ### 使用 Redis 客户端
 
@@ -91,7 +121,7 @@ System.out.println(result); // 输出: PONG
 client.close();
 ```
 
-## 步骤 5：基本操作
+### 步骤 4：基本操作
 
 ### String 类型
 
@@ -183,7 +213,7 @@ OK
 6) "92"
 ```
 
-## 步骤 6：停止服务器
+### 步骤 5：停止服务器
 
 ### 使用 Ctrl+C
 

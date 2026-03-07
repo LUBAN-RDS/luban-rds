@@ -200,6 +200,11 @@ luban-rds/
 │   └── src/main/java/          # 服务器启动入口
 ├── luban-rds-benchmark/        # 性能测试模块
 │   └── src/main/java/          # 性能测试代码
+├── docker/                     # Docker 部署配置
+│   ├── entrypoint.sh           # 容器入口脚本
+│   ├── healthcheck.sh          # 健康检查脚本
+│   ├── kubernetes.yaml         # Kubernetes 部署清单
+│   └── luban-rds.conf          # Docker 默认配置
 ├── docs/                       # 文档目录（VitePress）
 │   ├── architecture/           # 架构文档
 │   ├── guide/                  # 使用指南
@@ -329,11 +334,84 @@ Luban-RDS 支持两种持久化方式：
 
 ### 独立部署
 1. 构建项目：`mvn clean install`
-2. 运行服务器：`java -cp "luban-rds-server-1.0.0.jar:lib/*" com.janeluo.luban.rds.server.NettyRedisServer`
+2. 运行服务器：`java -jar luban-rds-bin/target/luban-rds-jar-with-dependencies.jar`
 3. 配置防火墙，允许端口 9736 访问
 
 ### Docker 部署
-（计划后续支持）
+
+#### 使用 Docker Compose（推荐）
+
+```bash
+# 克隆项目
+git clone https://github.com/LUBAN-RDS/luban-rds.git
+cd luban-rds
+
+# 复制环境变量配置
+cp .env.example .env
+
+# 启动服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+
+# 停止服务
+docker-compose down
+```
+
+#### 使用 Docker 命令
+
+```bash
+# 构建镜像
+docker build -t luban-rds:1.0.0 .
+
+# 运行容器
+docker run -d \
+  --name luban-rds \
+  -p 9736:9736 \
+  -v luban-rds-data:/data \
+  -e LUBAN_RDS_PORT=9736 \
+  -e LUBAN_RDS_PERSIST_MODE=rdb \
+  -e JAVA_OPTS="-Xms256m -Xmx512m" \
+  luban-rds:1.0.0
+
+# 带密码运行
+docker run -d \
+  --name luban-rds \
+  -p 9736:9736 \
+  -v luban-rds-data:/data \
+  -e LUBAN_RDS_REQUIREPASS=your-secure-password \
+  luban-rds:1.0.0
+```
+
+#### Docker 环境变量
+
+| 变量名 | 描述 | 默认值 |
+|--------|------|--------|
+| `LUBAN_RDS_PORT` | 服务端口 | 9736 |
+| `LUBAN_RDS_BIND` | 绑定地址 | 0.0.0.0 |
+| `LUBAN_RDS_DATA_DIR` | 数据目录 | /data |
+| `LUBAN_RDS_PERSIST_MODE` | 持久化模式 | rdb |
+| `LUBAN_RDS_MAXMEMORY` | 最大内存 | 0（无限制） |
+| `LUBAN_RDS_DATABASES` | 数据库数量 | 16 |
+| `LUBAN_RDS_REQUIREPASS` | 访问密码 | 空 |
+| `JAVA_OPTS` | JVM 参数 | -Xms256m -Xmx512m |
+
+### Kubernetes 部署
+
+```bash
+# 应用 Kubernetes 配置
+kubectl apply -f docker/kubernetes.yaml
+
+# 查看部署状态
+kubectl get pods -n luban-rds
+
+# 查看服务
+kubectl get svc -n luban-rds
+
+# 端口转发测试
+kubectl port-forward svc/luban-rds 9736:9736 -n luban-rds
+```
 
 ## 🛠️ 开发和贡献
 
@@ -418,7 +496,8 @@ mvn test
 - [ ] 支持集群模式
 - [ ] 支持哨兵模式（Sentinel）
 - [ ] 支持高级数据类型（Geo、Bitmap、HyperLogLog、Stream）
-- [ ] Docker 部署支持
+- [x] Docker 部署支持
+- [x] Kubernetes 部署支持
 - [ ] Kubernetes Operator
 - [ ] Prometheus Exporter
 
