@@ -200,12 +200,12 @@ luban-rds/
 │   └── src/main/java/          # 服务器启动入口
 ├── luban-rds-benchmark/        # 性能测试模块
 │   └── src/main/java/          # 性能测试代码
-├── docs/                       # 文档目录
-│   ├── 系统架构.md              # 系统架构文档
-│   ├── 功能架构.md              # 功能架构文档
-│   ├── 使用手册.md              # 使用手册
-│   ├── API文档.md               # API 文档
-│   └── 部署指南.md              # 部署指南
+├── docs/                       # 文档目录（VitePress）
+│   ├── architecture/           # 架构文档
+│   ├── guide/                  # 使用指南
+│   ├── api/                    # API 文档
+│   ├── deployment/             # 部署文档
+│   └── development/            # 开发文档
 └── pom.xml                     # 父项目 POM 文件
 ```
 
@@ -390,30 +390,46 @@ mvn test
 
 ## 📍 未来规划
 
+### 已完成功能 (v1.0.0-SNAPSHOT)
+
 - [x] 支持持久化（RDB、AOF）
 - [x] 支持内存淘汰策略（LRU、Random、TTL）
 - [x] 支持密码认证
 - [x] 支持多数据库
-- [x] 支持 Lua 脚本
-- [x] 支持事务
-- [x] 支持发布/订阅
+- [x] 支持 Lua 脚本（含沙箱模式）
+- [x] 支持事务（MULTI/EXEC/DISCARD/WATCH）
+- [x] 支持发布/订阅（含模式订阅、流订阅）
 - [x] 支持实时监控（MONITOR）
 - [x] 支持慢查询日志（SLOWLOG）
 - [x] 支持内存分析（MEMORY）
+- [x] 支持客户端管理（CLIENT 命令族）
+- [x] 支持 INFO 命令重构（可扩展框架）
+- [x] 支持 Pipeline（管道化请求）
+
+### 正在开发
+
 - [ ] 支持主从复制
+- [ ] 多线程 I/O 优化
+- [ ] 访问控制列表（ACL）
+- [ ] 传输加密（TLS/SSL）
+
+### 计划中
+
 - [ ] 支持集群模式
-- [ ] 支持更多 Redis 命令
-- [ ] 增强监控和管理功能
+- [ ] 支持哨兵模式（Sentinel）
+- [ ] 支持高级数据类型（Geo、Bitmap、HyperLogLog、Stream）
 - [ ] Docker 部署支持
+- [ ] Kubernetes Operator
+- [ ] Prometheus Exporter
 
 ## 📚 文档
 
 - [在线文档](https://luban-rds.github.io/luban-rds/)：完整的项目文档
-- [系统架构](docs/系统架构.md)：详细描述系统的架构设计
-- [功能架构](docs/功能架构.md)：详细描述系统的功能组件
-- [使用手册](docs/使用手册.md)：详细说明如何使用系统
-- [API 文档](docs/API文档.md)：详细描述系统的 API 接口
-- [部署指南](docs/部署指南.md)：详细说明如何部署和运行系统
+- [系统架构](docs/architecture/system.md)：详细描述系统的架构设计
+- [功能架构](docs/architecture/features.md)：详细描述系统的功能组件
+- [快速开始](docs/guide/quickstart.md)：快速上手指南
+- [命令列表](docs/api/commands.md)：详细描述支持的命令
+- [部署指南](docs/deployment/installation.md)：详细说明如何部署和运行系统
 
 ## 📄 许可证
 

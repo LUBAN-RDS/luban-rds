@@ -75,7 +75,7 @@ PONG
 ```java
 // 添加依赖
 // <dependency>
-//     <groupId>com.janeluoluo</groupId>
+//     <groupId>com.janeluo</groupId>
 //     <artifactId>luban-rds-client</artifactId>
 //     <version>1.0.0</version>
 // </dependency>

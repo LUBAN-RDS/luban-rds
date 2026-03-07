@@ -1,6 +1,6 @@
 ---
 title: 更新日志
-last_updated: 2026-03-07
+last_updated: 2026-03-08
 version: 1.0.0-SNAPSHOT
 ---
 # Changelog

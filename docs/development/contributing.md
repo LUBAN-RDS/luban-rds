@@ -21,7 +21,7 @@ title: 贡献指南
 ### 2.1 系统要求
 
 - **操作系统**：Windows 7+, Linux, macOS
-- **Java 版本**：Java 8+（推荐 Java 11+）
+- **Java 版本**：Java 17+（必需）
 - **Maven**：Maven 3.8+（构建工具）
 - **Git**：Git 2.20+（版本控制）
 - **IDE**：推荐 IntelliJ IDEA 或 Eclipse
@@ -74,10 +74,10 @@ mvn test -Dtest=LuaCommandHandlerTest
 
 ```bash
 # 启动嵌入式服务器
-java -cp luban-rds-server/target/luban-rds-server-1.0.0.jar com.janeluoluo.luban.rds.server.EmbeddedRedisServer
+java -cp luban-rds-server/target/luban-rds-server-1.0.0.jar com.janeluo.luban.rds.server.EmbeddedRedisServer
 
 # 启动独立服务器
-java -cp luban-rds-bin/target/luban-rds-bin-1.0.0.jar com.janeluoluo.luban.rds.bin.RedisServerMain
+java -cp luban-rds-bin/target/luban-rds-bin-1.0.0.jar com.janeluo.luban.rds.bin.RedisServerMain
 ```
 
 ## 3. 开发流程
@@ -139,7 +139,7 @@ Closes #123
 
 ### 4.1 编码规范
 
-- **Java 版本**：使用 Java 8+ 语法
+- **Java 版本**：使用 Java 17+ 语法
 - **代码风格**：遵循 Google Java 风格指南
 - **命名规范**：
   - 类名：大驼峰命名法（PascalCase）

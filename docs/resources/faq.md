@@ -44,7 +44,7 @@ Luban-RDS 基于 Netty 的 NIO 服务器，支持高并发，性能接近原生 
 ### 2.2 Luban-RDS 的系统要求是什么？
 
 - **操作系统**：Windows 7+, Linux, macOS
-- **Java 版本**：Java 8+（推荐 Java 11+）
+- **Java 版本**：Java 17+（必需）
 - **内存**：至少 512MB，推荐 2GB+ 
 - **CPU**：至少 1 核，推荐 2 核+ 
 

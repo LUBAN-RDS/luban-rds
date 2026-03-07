@@ -251,7 +251,7 @@ volumes:
 ```xml
 
 <dependency>
-    <groupId>com.janeluocom.janeluo</groupId>
+    <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
     <version>1.0.0</version>
 </dependency>
@@ -324,7 +324,7 @@ Luban-RDS 支持嵌入到应用中使用，无需单独部署服务：
 ```xml
 
 <dependency>
-    <groupId>com.janeluocom.janeluo</groupId>
+    <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-server</artifactId>
     <version>1.0.0</version>
 </dependency>
