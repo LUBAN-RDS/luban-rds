@@ -73,7 +73,9 @@
 - [ ] **哨兵模式 (Sentinel)**: 监控主从拓扑，实现自动故障转移。
 
 ### 云原生与运维
-- [ ] **Docker 容器化**: 提供官方 Docker 镜像。
+- [x] **Docker 容器化**: 提供官方 Dockerfile，支持多阶段构建、非 root 用户、健康检查。
+- [x] **Docker Compose**: 提供完整的 Docker Compose 配置，支持一键部署。
+- [x] **Kubernetes 部署**: 提供完整的 Kubernetes 部署清单，包括 Deployment、Service、ConfigMap 等。
 - [ ] **Kubernetes Operator**: 简化在 K8s 环境下的部署与运维。
 - [ ] **Prometheus Exporter**: 导出监控指标供 Prometheus 采集。
 
@@ -92,7 +94,7 @@
 ### 2.0.x 系列
 - **目标**: 分布式与云原生。
 - **2.0.0**: 完整的 Redis Cluster 支持。
-- **2.1.0**: 云原生套件 (Docker/K8s)。
+- **2.1.0**: Kubernetes Operator 与 Prometheus Exporter。
 
 ## 技术栈与依赖
 
@@ -117,5 +119,6 @@
 
 | 日期 | 版本 | 修改人     | Commit 范围 | 说明 |
 | :--- | :--- |:--------| :--- | :--- |
+| 2026-03-08 | 1.3 | yangyn  | HEAD | 更新云原生运维功能状态（Docker、Docker Compose、Kubernetes 部署已完成） |
 | 2026-03-06 | 1.2 | yangyn  | HEAD | 同步代码库状态，更新技术栈版本、已完成功能列表（MONITOR、SLOWLOG、MEMORY、客户端命令等） |
 | 2026-03-04 | 1.1 | yangyn | HEAD | 同步代码库状态，更新已完成功能（事务、监控、Lua），调整版本规划 |
