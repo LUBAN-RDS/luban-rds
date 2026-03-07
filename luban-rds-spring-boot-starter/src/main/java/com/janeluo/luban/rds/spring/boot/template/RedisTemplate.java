@@ -4,6 +4,9 @@ import com.janeluo.luban.rds.core.store.MemoryStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -73,7 +76,7 @@ public class RedisTemplate {
     public void hset(String key, String field, String value) {
         Map<String, String> hash = (Map<String, String>) memoryStore.get(DEFAULT_DATABASE, key);
         if (hash == null) {
-            hash = new java.util.HashMap<>();
+            hash = new HashMap<>();
         }
         hash.put(field, value);
         memoryStore.set(DEFAULT_DATABASE, key, hash);
@@ -86,14 +89,14 @@ public class RedisTemplate {
     
     public Map<String, String> hgetAll(String key) {
         Map<String, String> hash = (Map<String, String>) memoryStore.get(DEFAULT_DATABASE, key);
-        return hash != null ? hash : new java.util.HashMap<>();
+        return hash != null ? hash : new HashMap<>();
     }
     
     // 列表操作
     public Long lpush(String key, String... values) {
         List<String> list = (List<String>) memoryStore.get(DEFAULT_DATABASE, key);
         if (list == null) {
-            list = new java.util.ArrayList<>();
+            list = new ArrayList<>();
         }
         for (String value : values) {
             list.add(0, value);
@@ -121,7 +124,7 @@ public class RedisTemplate {
     public Long sadd(String key, String... members) {
         Set<String> set = (Set<String>) memoryStore.get(DEFAULT_DATABASE, key);
         if (set == null) {
-            set = new java.util.HashSet<>();
+            set = new HashSet<>();
         }
         int added = 0;
         for (String member : members) {
@@ -135,7 +138,7 @@ public class RedisTemplate {
     
     public Set<String> smembers(String key) {
         Set<String> set = (Set<String>) memoryStore.get(DEFAULT_DATABASE, key);
-        return set != null ? set : new java.util.HashSet<>();
+        return set != null ? set : new HashSet<>();
     }
     
     public Boolean sismember(String key, String member) {

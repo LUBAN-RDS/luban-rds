@@ -9,13 +9,17 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
  * AOF持久化服务
- * 
+ *
  * <p>实现Redis AOF（Append Only File）持久化机制：
  * <ul>
  *   <li>记录所有写命令到AOF文件</li>
@@ -23,14 +27,14 @@ import java.util.concurrent.TimeUnit;
  *   <li>支持AOF重写压缩文件大小</li>
  *   <li>启动时重放AOF命令恢复数据</li>
  * </ul>
- * 
+ *
  * @author janeluo
  * @since 1.0.0
  */
 public class AofPersistService implements PersistService {
-    
+
     private static final Logger logger = LoggerFactory.getLogger(AofPersistService.class);
-    
+
     /**
      * AOF文件名
      */
@@ -42,18 +46,18 @@ public class AofPersistService implements PersistService {
     private final ExecutorService executorService;
     private volatile boolean isRunning = true;
     private final int fsyncInterval; // fsync间隔（秒）
-    
+
     public AofPersistService(String dataDir, int fsyncInterval) {
         this.aofFilePath = dataDir + File.separator + AOF_FILE_NAME;
         this.aofTempFilePath = dataDir + File.separator + "appendonly.aof.tmp";
         this.fsyncInterval = fsyncInterval;
-        
+
         // 确保数据目录存在
         File dataDirectory = new File(dataDir);
         if (!dataDirectory.exists()) {
             dataDirectory.mkdirs();
         }
-        
+
         // 初始化AOF文件写入器
         try {
             this.aofOutputStream = new FileOutputStream(aofFilePath, true); // 追加模式
@@ -61,17 +65,17 @@ public class AofPersistService implements PersistService {
         } catch (IOException e) {
             logger.error("Error initializing AOF writer", e);
         }
-        
+
         // 创建线程池用于异步fsync
         this.executorService = Executors.newSingleThreadExecutor();
-        
+
         // 启动定期fsync任务
         startFsyncTask();
     }
-    
+
     @Override
-    public java.util.Map<String, Object> getInfo() {
-        java.util.Map<String, Object> info = new java.util.HashMap<>();
+    public Map<String, Object> getInfo() {
+        Map<String, Object> info = new HashMap<>();
         info.put("aof_enabled", 1);
         info.put("aof_rewrite_in_progress", 0);
         info.put("aof_rewrite_scheduled", 0);
@@ -80,10 +84,10 @@ public class AofPersistService implements PersistService {
         info.put("aof_last_bgrewrite_status", "ok");
         info.put("aof_last_write_status", "ok");
         info.put("aof_last_cow_size", 0);
-        
+
         long currentSize = 0;
         try {
-            java.io.File file = new java.io.File(aofFilePath);
+            File file = new File(aofFilePath);
             if (file.exists()) {
                 currentSize = file.length();
             }
@@ -106,37 +110,37 @@ public class AofPersistService implements PersistService {
         // 这里不需要特殊处理，因为写命令已经在执行时被记录了
         logger.debug("AOF persistence triggered");
     }
-    
+
     @Override
     public void load(MemoryStore memoryStore) {
         logger.info("Loading AOF data...");
         long startTime = System.currentTimeMillis();
-        
+
         File aofFile = new File(aofFilePath);
         if (!aofFile.exists()) {
             logger.info("No AOF file found, skipping load");
             return;
         }
-        
+
         try (BufferedReader br = new BufferedReader(new FileReader(aofFile))) {
             String line;
             while ((line = br.readLine()) != null) {
                 // 解析AOF文件中的命令
                 parseAndExecuteCommand(line, memoryStore);
             }
-            
+
             long endTime = System.currentTimeMillis();
             logger.info("AOF load completed in {} ms", endTime - startTime);
-            
+
         } catch (Exception e) {
             logger.error("Error loading AOF data", e);
         }
     }
-    
+
     @Override
     public void close() {
         isRunning = false;
-        
+
         // 关闭AOF文件写入器
         if (aofWriter != null) {
             try {
@@ -146,7 +150,7 @@ public class AofPersistService implements PersistService {
                 logger.error("Error closing AOF writer", e);
             }
         }
-        
+
         // 关闭文件输出流
         if (aofOutputStream != null) {
             try {
@@ -155,7 +159,7 @@ public class AofPersistService implements PersistService {
                 logger.error("Error closing AOF output stream", e);
             }
         }
-        
+
         // 关闭线程池
         executorService.shutdown();
         try {
@@ -165,57 +169,59 @@ public class AofPersistService implements PersistService {
         } catch (InterruptedException e) {
             executorService.shutdownNow();
         }
-        
+
         logger.info("AOF persistence service closed");
     }
-    
+
     /**
      * 记录写命令到AOF文件
+     *
      * @param command 命令
-     * @param args 命令参数
+     * @param args    命令参数
      */
     public void recordCommand(String command, String[] args) {
         if (!isRunning || aofWriter == null) {
             return;
         }
-        
+
         try {
             // 构建AOF格式的命令 - 使用ISO-8859-1编码确保二进制安全
             StringBuilder sb = new StringBuilder();
             sb.append("*")
-              .append(args.length)
-              .append("\r\n");
-            
+                    .append(args.length)
+                    .append("\r\n");
+
             for (String arg : args) {
                 byte[] argBytes = arg.getBytes(StandardCharsets.ISO_8859_1);
                 sb.append("$")
-                  .append(argBytes.length)
-                  .append("\r\n")
-                  .append(arg)
-                  .append("\r\n");
+                        .append(argBytes.length)
+                        .append("\r\n")
+                        .append(arg)
+                        .append("\r\n");
             }
-            
+
             // 写入AOF文件 - 使用ISO-8859-1编码
             aofWriter.write(sb.toString(), 0, sb.length());
-            
+
             // 如果fsync间隔为0，立即fsync
             if (fsyncInterval == 0) {
                 flush();
             }
-            
+
         } catch (IOException e) {
             logger.error("Error recording command to AOF", e);
         }
     }
-    
+
     /**
      * 执行AOF重写
+     *
      * @param memoryStore 内存存储实例
      */
     public void rewrite(MemoryStore memoryStore) {
         logger.info("Starting AOF rewrite...");
         long startTime = System.currentTimeMillis();
-        
+
         try (FileWriter tempWriter = new FileWriter(aofTempFilePath)) {
             // 遍历所有数据库
             for (int db = 0; db < 16; db++) { // Redis默认支持16个数据库
@@ -223,20 +229,20 @@ public class AofPersistService implements PersistService {
                 if (dbSize == 0) {
                     continue;
                 }
-                
+
                 // 写入SELECT命令
                 writeSelectCommand(tempWriter, db);
-                
+
                 // 遍历数据库中的所有键
                 long cursor = 0;
                 do {
-                    java.util.List<Object> scanResult = memoryStore.scan(db, cursor, "*", 100);
+                    List<Object> scanResult = memoryStore.scan(db, cursor, "*", 100);
                     if (scanResult.size() <= 1) { // 只有游标，没有键
                         break;
                     }
-                    
+
                     cursor = (Long) scanResult.get(0);
-                    
+
                     // 处理每个键
                     for (int i = 1; i < scanResult.size(); i++) {
                         String key = (String) scanResult.get(i);
@@ -248,10 +254,10 @@ public class AofPersistService implements PersistService {
                     }
                 } while (cursor != 0);
             }
-            
+
             // 重命名临时文件为AOF文件
             Files.move(new File(aofTempFilePath).toPath(), new File(aofFilePath).toPath(), StandardCopyOption.REPLACE_EXISTING);
-            
+
             // 重新初始化AOF写入器
             if (aofWriter != null) {
                 aofWriter.close();
@@ -261,10 +267,10 @@ public class AofPersistService implements PersistService {
             }
             this.aofOutputStream = new FileOutputStream(aofFilePath, true); // 追加模式
             this.aofWriter = new OutputStreamWriter(aofOutputStream);
-            
+
             long endTime = System.currentTimeMillis();
             logger.info("AOF rewrite completed in {} ms", endTime - startTime);
-            
+
         } catch (Exception e) {
             logger.error("Error during AOF rewrite", e);
         } finally {
@@ -275,7 +281,7 @@ public class AofPersistService implements PersistService {
             }
         }
     }
-    
+
     private void startFsyncTask() {
         executorService.submit(() -> {
             while (isRunning) {
@@ -289,7 +295,7 @@ public class AofPersistService implements PersistService {
             }
         });
     }
-    
+
     private void flush() {
         if (aofWriter != null && aofOutputStream != null) {
             try {
@@ -301,29 +307,29 @@ public class AofPersistService implements PersistService {
             }
         }
     }
-    
+
     private int currentDb = 0;
-    
+
     private void parseAndExecuteCommand(String line, MemoryStore memoryStore) {
         if (!line.startsWith("*")) {
             return;
         }
-        
+
         try {
-            java.util.List<String> args = parseRespArray(line);
+            List<String> args = parseRespArray(line);
             if (args.isEmpty()) {
                 return;
             }
-            
+
             String command = args.get(0).toUpperCase();
-            
+
             switch (command) {
                 case "SELECT":
                     if (args.size() >= 2) {
                         currentDb = Integer.parseInt(args.get(1));
                     }
                     break;
-                    
+
                 case "SET":
                     if (args.size() >= 3) {
                         String key = args.get(1);
@@ -339,7 +345,7 @@ public class AofPersistService implements PersistService {
                         }
                     }
                     break;
-                    
+
                 case "DEL":
                     if (args.size() >= 2) {
                         for (int i = 1; i < args.size(); i++) {
@@ -347,7 +353,7 @@ public class AofPersistService implements PersistService {
                         }
                     }
                     break;
-                    
+
                 case "EXPIRE":
                     if (args.size() >= 3) {
                         String key = args.get(1);
@@ -355,7 +361,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.expire(currentDb, key, seconds);
                     }
                     break;
-                    
+
                 case "PEXPIRE":
                     if (args.size() >= 3) {
                         String key = args.get(1);
@@ -363,7 +369,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.pexpire(currentDb, key, milliseconds);
                     }
                     break;
-                    
+
                 case "INCR":
                 case "INCRBY":
                     if (args.size() >= 2) {
@@ -372,7 +378,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.incrby(currentDb, key, increment);
                     }
                     break;
-                    
+
                 case "DECR":
                 case "DECRBY":
                     if (args.size() >= 2) {
@@ -381,14 +387,14 @@ public class AofPersistService implements PersistService {
                         memoryStore.incrby(currentDb, key, -decrement);
                     }
                     break;
-                    
+
                 case "MSET":
                     if (args.size() >= 3) {
                         String[] keysAndValues = args.subList(1, args.size()).toArray(new String[0]);
                         memoryStore.mset(currentDb, keysAndValues);
                     }
                     break;
-                    
+
                 case "HSET":
                 case "HMSET":
                     if (args.size() >= 4) {
@@ -397,7 +403,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.hmset(currentDb, key, fieldsAndValues);
                     }
                     break;
-                    
+
                 case "HDEL":
                     if (args.size() >= 3) {
                         String key = args.get(1);
@@ -405,7 +411,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.hdel(currentDb, key, fields);
                     }
                     break;
-                    
+
                 case "HINCRBY":
                     if (args.size() >= 4) {
                         String key = args.get(1);
@@ -414,7 +420,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.hincrby(currentDb, key, field, increment);
                     }
                     break;
-                    
+
                 case "LPUSH":
                     if (args.size() >= 3) {
                         String key = args.get(1);
@@ -422,7 +428,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.lpush(currentDb, key, values);
                     }
                     break;
-                    
+
                 case "RPUSH":
                     if (args.size() >= 3) {
                         String key = args.get(1);
@@ -430,19 +436,19 @@ public class AofPersistService implements PersistService {
                         memoryStore.rpush(currentDb, key, values);
                     }
                     break;
-                    
+
                 case "LPOP":
                     if (args.size() >= 2) {
                         memoryStore.lpop(currentDb, args.get(1));
                     }
                     break;
-                    
+
                 case "RPOP":
                     if (args.size() >= 2) {
                         memoryStore.rpop(currentDb, args.get(1));
                     }
                     break;
-                    
+
                 case "LREM":
                     if (args.size() >= 4) {
                         String key = args.get(1);
@@ -451,7 +457,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.lrem(currentDb, key, count, value);
                     }
                     break;
-                    
+
                 case "LSET":
                     if (args.size() >= 4) {
                         String key = args.get(1);
@@ -460,7 +466,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.lset(currentDb, key, index, value);
                     }
                     break;
-                    
+
                 case "SADD":
                     if (args.size() >= 3) {
                         String key = args.get(1);
@@ -468,7 +474,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.sadd(currentDb, key, members);
                     }
                     break;
-                    
+
                 case "SREM":
                     if (args.size() >= 3) {
                         String key = args.get(1);
@@ -476,7 +482,7 @@ public class AofPersistService implements PersistService {
                         memoryStore.srem(currentDb, key, members);
                     }
                     break;
-                    
+
                 case "ZADD":
                     if (args.size() >= 4) {
                         String key = args.get(1);
@@ -489,7 +495,7 @@ public class AofPersistService implements PersistService {
                         }
                     }
                     break;
-                    
+
                 case "ZREM":
                     if (args.size() >= 3) {
                         String key = args.get(1);
@@ -497,15 +503,15 @@ public class AofPersistService implements PersistService {
                         memoryStore.zrem(currentDb, key, members);
                     }
                     break;
-                    
+
                 case "FLUSHDB":
                     memoryStore.flushdb(currentDb);
                     break;
-                    
+
                 case "FLUSHALL":
                     memoryStore.flushAll();
                     break;
-                    
+
                 default:
                     logger.debug("Unsupported AOF command: {}", command);
             }
@@ -513,18 +519,18 @@ public class AofPersistService implements PersistService {
             logger.error("Error parsing AOF command: {}", line, e);
         }
     }
-    
-    private java.util.List<String> parseRespArray(String line) {
-        java.util.List<String> args = new java.util.ArrayList<>();
+
+    private List<String> parseRespArray(String line) {
+        List<String> args = new ArrayList<>();
         String[] parts = line.split("\\r\\n");
-        
+
         if (parts.length < 1 || !parts[0].startsWith("*")) {
             return args;
         }
-        
+
         int argCount = Integer.parseInt(parts[0].substring(1));
         int partIndex = 1;
-        
+
         for (int i = 0; i < argCount && partIndex < parts.length; i++) {
             if (parts[partIndex].startsWith("$")) {
                 int length = Integer.parseInt(parts[partIndex].substring(1));
@@ -535,45 +541,45 @@ public class AofPersistService implements PersistService {
             }
             partIndex++;
         }
-        
+
         return args;
     }
-    
+
     private void writeSelectCommand(FileWriter writer, int db) throws IOException {
         String[] args = new String[]{"SELECT", String.valueOf(db)};
         StringBuilder sb = new StringBuilder();
         sb.append("*")
-          .append(args.length)
-          .append("\r\n");
-        
+                .append(args.length)
+                .append("\r\n");
+
         for (String arg : args) {
             byte[] argBytes = arg.getBytes(StandardCharsets.ISO_8859_1);
             sb.append("$")
-              .append(argBytes.length)
-              .append("\r\n")
-              .append(arg)
-              .append("\r\n");
+                    .append(argBytes.length)
+                    .append("\r\n")
+                    .append(arg)
+                    .append("\r\n");
         }
-        
+
         writer.write(sb.toString());
     }
-    
+
     private void writeKeyValueCommand(FileWriter writer, int db, String key, Object value, MemoryStore memoryStore) throws IOException {
         String[] args = new String[]{"SET", key, value.toString()};
         StringBuilder sb = new StringBuilder();
         sb.append("*")
-          .append(args.length)
-          .append("\r\n");
-        
+                .append(args.length)
+                .append("\r\n");
+
         for (String arg : args) {
             byte[] argBytes = arg.getBytes(StandardCharsets.ISO_8859_1);
             sb.append("$")
-              .append(argBytes.length)
-              .append("\r\n")
-              .append(arg)
-              .append("\r\n");
+                    .append(argBytes.length)
+                    .append("\r\n")
+                    .append(arg)
+                    .append("\r\n");
         }
-        
+
         writer.write(sb.toString());
     }
 }

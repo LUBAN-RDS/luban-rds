@@ -14,10 +14,15 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 基于 LuaJ 的 Lua 脚本命令处理器。
@@ -187,7 +192,7 @@ public class LuaCommandHandler implements CommandHandler {
             if (sbytes > max) {
                 return "-ERR Script exceeds max size\r\n";
             }
-        } catch (java.io.UnsupportedEncodingException ignored) {}
+        } catch (UnsupportedEncodingException ignored) {}
         String sha1 = getSha1(script);
         if (!scriptCache.containsKey(sha1)) {
             scriptCache.put(sha1, script);
@@ -195,7 +200,7 @@ public class LuaCommandHandler implements CommandHandler {
             try {
                 int bytes = script.getBytes("UTF-8").length;
                 RuntimeConfig.addCachedScriptsBytes(bytes);
-            } catch (java.io.UnsupportedEncodingException ignored) {}
+            } catch (UnsupportedEncodingException ignored) {}
         } else {
             scriptCache.put(sha1, script);
         }
@@ -264,8 +269,8 @@ public class LuaCommandHandler implements CommandHandler {
      * <p>构造 Lua 环境，注入 KEYS / ARGV 以及 redis 库，然后执行脚本并返回 RESP 编码结果。</p>
      */
     private Object executeScript(int database, String script, String[] keys, String[] argv, MemoryStore store) {
-        this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
-        final java.util.concurrent.atomic.AtomicReference<Object> resp = new java.util.concurrent.atomic.AtomicReference<>();
+this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
+        final AtomicReference<Object> resp = new AtomicReference<>();
         Runnable task = () -> {
             try {
                 // 检查线程中断状态
@@ -345,14 +350,14 @@ public class LuaCommandHandler implements CommandHandler {
                 // LuaValue.valueOf(String) would UTF-8 encode characters 0x80-0x9F, corrupting binary data
                 LuaTable keysTable = new LuaTable();
                 for (int i = 0; i < keys.length; i++) {
-                    byte[] keyBytes = keys[i].getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                    byte[] keyBytes = keys[i].getBytes(StandardCharsets.ISO_8859_1);
                     LuaValue luaKey = org.luaj.vm2.LuaString.valueOf(keyBytes);
                     keysTable.set(i + 1, luaKey);
                 }
                 globals.set("KEYS", keysTable);
                 LuaTable argvTable = new LuaTable();
                 for (int i = 0; i < argv.length; i++) {
-                    byte[] argvBytes = argv[i].getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                    byte[] argvBytes = argv[i].getBytes(StandardCharsets.ISO_8859_1);
                     LuaValue luaArg = org.luaj.vm2.LuaString.valueOf(argvBytes);
                     argvTable.set(i + 1, luaArg);
                 }
@@ -377,7 +382,7 @@ public class LuaCommandHandler implements CommandHandler {
                         resp.set("-ERR Script exceeds max size\r\n");
                         return;
                     }
-                } catch (java.io.UnsupportedEncodingException ignored) {}
+                } catch (UnsupportedEncodingException ignored) {}
                 
                 // 检查线程中断状态
                 if (Thread.currentThread().isInterrupted()) {
@@ -430,7 +435,7 @@ public class LuaCommandHandler implements CommandHandler {
                     if (bytes > max) {
                         return "-ERR Script returned value too large\r\n";
                     }
-                } catch (java.io.UnsupportedEncodingException ignored) {}
+                } catch (UnsupportedEncodingException ignored) {}
             }
             return r;
         } finally {
@@ -462,12 +467,12 @@ public class LuaCommandHandler implements CommandHandler {
                 org.luaj.vm2.LuaString luaString = (org.luaj.vm2.LuaString) value;
                 byte[] bytes = new byte[luaString.length()];
                 luaString.copyInto(0, bytes, 0, bytes.length);
-                return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
+                return "$" + bytes.length + "\r\n" + new String(bytes, StandardCharsets.ISO_8859_1) + "\r\n";
             } else {
                 // 其他字符串类型
                 String str = value.tojstring();
-                byte[] bytes = str.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-                return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
+                byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
+                return "$" + bytes.length + "\r\n" + new String(bytes, StandardCharsets.ISO_8859_1) + "\r\n";
             }
         } else if (value.istable()) {
             LuaTable table = (LuaTable) value;
@@ -533,7 +538,7 @@ public class LuaCommandHandler implements CommandHandler {
             }
             LuaValue cmdValue = args.arg(1);
             String command = cmdValue.tojstring().toUpperCase();
-            java.util.List<String> argList = new java.util.ArrayList<>();
+            List<String> argList = new ArrayList<>();
             argList.add(command);
             
             int n = args.narg();
@@ -546,7 +551,7 @@ public class LuaCommandHandler implements CommandHandler {
                         LuaString ls = v.checkstring();
                         byte[] bytes = new byte[ls.length()];
                         ls.copyInto(0, bytes, 0, bytes.length);
-                        argList.add(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1));
+                        argList.add(new String(bytes, StandardCharsets.ISO_8859_1));
                     } else {
                         argList.add(v.tojstring());
                     }
@@ -559,7 +564,7 @@ public class LuaCommandHandler implements CommandHandler {
                             LuaString ls = v.checkstring();
                             byte[] bytes = new byte[ls.length()];
                             ls.copyInto(0, bytes, 0, bytes.length);
-                            argList.add(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1));
+                            argList.add(new String(bytes, StandardCharsets.ISO_8859_1));
                         } else {
                             argList.add(v.tojstring());
                         }
@@ -654,14 +659,14 @@ public class LuaCommandHandler implements CommandHandler {
                 if (start + length > str.length()) {
                     if (str.length() >= 2) {
                         // 处理二进制数据，确保安全转换
-                        byte[] bytes = str.substring(start, str.length() - 2).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                        byte[] bytes = str.substring(start, str.length() - 2).getBytes(StandardCharsets.ISO_8859_1);
                         return org.luaj.vm2.LuaString.valueOf(bytes);
                     } else {
                         return LuaValue.FALSE;
                     }
                 } else {
                     // 处理二进制数据，确保安全转换
-                    byte[] bytes = str.substring(start, start + length).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                    byte[] bytes = str.substring(start, start + length).getBytes(StandardCharsets.ISO_8859_1);
                     return org.luaj.vm2.LuaString.valueOf(bytes);
                 }
             } catch (NumberFormatException e) {
@@ -730,7 +735,7 @@ public class LuaCommandHandler implements CommandHandler {
                         if (start + l > str.length()) {
                             if (str.length() >= 2) {
                                 // 处理二进制数据，确保安全转换
-                                byte[] bytes = str.substring(start, str.length() - 2).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                                byte[] bytes = str.substring(start, str.length() - 2).getBytes(StandardCharsets.ISO_8859_1);
                                 table.set(elementIndex++, org.luaj.vm2.LuaString.valueOf(bytes));
                             } else {
                                 table.set(elementIndex++, LuaValue.FALSE);
@@ -738,7 +743,7 @@ public class LuaCommandHandler implements CommandHandler {
                             index = str.length();
                         } else {
                             // 处理二进制数据，确保安全转换
-                            byte[] bytes = str.substring(start, start + l).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                            byte[] bytes = str.substring(start, start + l).getBytes(StandardCharsets.ISO_8859_1);
                             table.set(elementIndex++, org.luaj.vm2.LuaString.valueOf(bytes));
                             index = start + l + 2;
                         }
@@ -1026,13 +1031,13 @@ public class LuaCommandHandler implements CommandHandler {
                 }
                 if (start + length > str.length()) {
                     if (str.length() >= 2) {
-                        byte[] bytes = str.substring(start, str.length() - 2).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                        byte[] bytes = str.substring(start, str.length() - 2).getBytes(StandardCharsets.ISO_8859_1);
                         return org.luaj.vm2.LuaString.valueOf(bytes);
                     } else {
                         return LuaValue.FALSE;
                     }
                 } else {
-                    byte[] bytes = str.substring(start, start + length).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                    byte[] bytes = str.substring(start, start + length).getBytes(StandardCharsets.ISO_8859_1);
                     return org.luaj.vm2.LuaString.valueOf(bytes);
                 }
             } catch (NumberFormatException e) {
@@ -1217,14 +1222,14 @@ public class LuaCommandHandler implements CommandHandler {
                         break;
                     }
                 }
-                if (isArray && length > 0) {
-                    java.util.List<Object> list = new java.util.ArrayList<>();
+if (isArray && length > 0) {
+                    List<Object> list = new ArrayList<>();
                     for (int i = 1; i <= length; i++) {
                         list.add(convertLuaValueToJava(table.get(i)));
                     }
                     return list;
                 } else {
-                    java.util.Map<String, Object> map = new java.util.HashMap<>();
+                    Map<String, Object> map = new HashMap<>();
                     key = LuaValue.NIL;
                     while (true) {
                         Varargs next = table.next(key);

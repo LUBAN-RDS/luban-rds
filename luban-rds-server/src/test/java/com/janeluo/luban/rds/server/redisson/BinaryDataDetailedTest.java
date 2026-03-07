@@ -22,6 +22,8 @@ import java.io.Serializable;
 import java.net.ServerSocket;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -84,14 +86,14 @@ public class BinaryDataDetailedTest {
         System.out.println("ISO-8859-1 字符串长度: " + isoString.length());
         byte[] isoBytes = isoString.getBytes(StandardCharsets.ISO_8859_1);
         System.out.println("ISO-8859-1 往返字节 (hex): " + bytesToHex(isoBytes));
-        System.out.println("ISO-8859-1 往返匹配: " + java.util.Arrays.equals(originalBytes, isoBytes));
+        System.out.println("ISO-8859-1 往返匹配: " + Arrays.equals(originalBytes, isoBytes));
         
         System.out.println("\n=== UTF-8 编码 ===");
         String utf8String = new String(originalBytes, StandardCharsets.UTF_8);
         System.out.println("UTF-8 字符串长度: " + utf8String.length());
         byte[] utf8Bytes = utf8String.getBytes(StandardCharsets.UTF_8);
         System.out.println("UTF-8 往返字节 (hex): " + bytesToHex(utf8Bytes));
-        System.out.println("UTF-8 往返匹配: " + java.util.Arrays.equals(originalBytes, utf8Bytes));
+        System.out.println("UTF-8 往返匹配: " + Arrays.equals(originalBytes, utf8Bytes));
         
         System.out.println("\n=== 错误编码场景 ===");
         String wrongString = new String(originalBytes, StandardCharsets.ISO_8859_1);
@@ -120,12 +122,12 @@ public class BinaryDataDetailedTest {
             String storedStr = (String) storedValue;
             byte[] storedBytes = storedStr.getBytes(StandardCharsets.ISO_8859_1);
             System.out.println("服务器存储字节 (hex): " + bytesToHex(storedBytes));
-            System.out.println("服务器存储匹配: " + java.util.Arrays.equals(originalBytes, storedBytes));
+            System.out.println("服务器存储匹配: " + Arrays.equals(originalBytes, storedBytes));
         }
         
         byte[] retrievedBytes = bucket.get();
         System.out.println("检索字节 (hex): " + bytesToHex(retrievedBytes));
-        System.out.println("检索匹配: " + java.util.Arrays.equals(originalBytes, retrievedBytes));
+        System.out.println("检索匹配: " + Arrays.equals(originalBytes, retrievedBytes));
         
         assertArrayEquals(originalBytes, retrievedBytes, "Binary data should match after round trip");
     }
@@ -133,15 +135,15 @@ public class BinaryDataDetailedTest {
     @Test
     @DisplayName("Test large binary data")
     void testLargeBinaryData() throws Exception {
-        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
-        java.io.ObjectOutputStream oos = new java.io.ObjectOutputStream(baos);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ObjectOutputStream oos = new ObjectOutputStream(baos);
         oos.writeObject(new TestObject("test", 123));
         oos.close();
         byte[] serializedBytes = baos.toByteArray();
         
         System.out.println("=== 大型二进制数据测试 ===");
         System.out.println("序列化字节长度: " + serializedBytes.length);
-        System.out.println("前20字节 (hex): " + bytesToHex(java.util.Arrays.copyOf(serializedBytes, Math.min(20, serializedBytes.length))));
+        System.out.println("前20字节 (hex): " + bytesToHex(Arrays.copyOf(serializedBytes, Math.min(20, serializedBytes.length))));
         
         String key = "testLargeBinary";
         RBucket<byte[]> bucket = redissonByteArray.getBucket(key);
@@ -151,14 +153,14 @@ public class BinaryDataDetailedTest {
         if (storedValue instanceof String) {
             String storedStr = (String) storedValue;
             byte[] storedBytes = storedStr.getBytes(StandardCharsets.ISO_8859_1);
-            System.out.println("服务器存储前20字节 (hex): " + bytesToHex(java.util.Arrays.copyOf(storedBytes, Math.min(20, storedBytes.length))));
+            System.out.println("服务器存储前20字节 (hex): " + bytesToHex(Arrays.copyOf(storedBytes, Math.min(20, storedBytes.length))));
             System.out.println("服务器存储长度: " + storedBytes.length);
             assertEquals(serializedBytes.length, storedBytes.length, "Length should match");
             assertArrayEquals(serializedBytes, storedBytes, "Server storage should match");
         }
         
         byte[] retrievedBytes = bucket.get();
-        System.out.println("检索前20字节 (hex): " + bytesToHex(java.util.Arrays.copyOf(retrievedBytes, Math.min(20, retrievedBytes.length))));
+        System.out.println("检索前20字节 (hex): " + bytesToHex(Arrays.copyOf(retrievedBytes, Math.min(20, retrievedBytes.length))));
         assertArrayEquals(serializedBytes, retrievedBytes, "Retrieved data should match");
     }
 
@@ -208,12 +210,12 @@ public class BinaryDataDetailedTest {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             TestObject that = (TestObject) o;
-            return value == that.value && java.util.Objects.equals(name, that.name);
+            return value == that.value && Objects.equals(name, that.name);
         }
 
         @Override
         public int hashCode() {
-            return java.util.Objects.hash(name, value);
+            return Objects.hash(name, value);
         }
     }
 
