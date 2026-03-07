@@ -318,7 +318,7 @@ public class RedissonIntegrationTest extends RedissonTestBase {
     @Test
     @DisplayName("Test RTransaction")
     @Order(13)
-    @Disabled("Redisson事务需要额外的命令支持，暂时跳过")
+//    @Disabled("Redisson事务需要额外的命令支持，暂时跳过")
     void testTransaction() {
         RTransaction transaction = redisson.createTransaction(TransactionOptions.defaults());
         RMap<String, String> map = transaction.getMap("txMap");

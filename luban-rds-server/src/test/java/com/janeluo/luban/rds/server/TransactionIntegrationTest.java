@@ -1,6 +1,5 @@
 package com.janeluo.luban.rds.server;
 
-import com.janeluo.luban.rds.common.config.RdsConfig;
 import com.janeluo.luban.rds.server.NettyRedisServer;
 import org.junit.Test;
 import redis.clients.jedis.Jedis;
@@ -8,18 +7,17 @@ import redis.clients.jedis.Transaction;
 import redis.clients.jedis.JedisPool;
 import redis.clients.jedis.JedisPoolConfig;
 import static org.junit.Assert.*;
+
 public class TransactionIntegrationTest {
     @Test
     public void testMultiExecAndGet() throws Exception {
-        RdsConfig config = new RdsConfig();
-        config.setPort(6381);
-        NettyRedisServer server = new NettyRedisServer(config);
+        NettyRedisServer server = new NettyRedisServer(6381);
         server.start();
         
         Thread.sleep(1000);
         
         JedisPoolConfig poolConfig = new JedisPoolConfig();
-        JedisPool jedisPool = new JedisPool(poolConfig, "localhost", config.getPort(), 10000);
+        JedisPool jedisPool = new JedisPool(poolConfig, "localhost", 6381, 10000);
         
         try (Jedis j1 = jedisPool.getResource()) {
             Thread.sleep(500);
@@ -55,16 +53,14 @@ public class TransactionIntegrationTest {
     
     @Test
     public void testWatchAbortOnExternalChange() throws Exception {
-        RdsConfig config = new RdsConfig();
-        config.setPort(6382);
-        NettyRedisServer server = new NettyRedisServer(config);
+        NettyRedisServer server = new NettyRedisServer(6382);
         server.start();
         
         Thread.sleep(1000);
         
         JedisPoolConfig poolConfig = new JedisPoolConfig();
-        JedisPool jedisPool1 = new JedisPool(poolConfig, "localhost", config.getPort(), 10000);
-        JedisPool jedisPool2 = new JedisPool(poolConfig, "localhost", config.getPort(), 10000);
+        JedisPool jedisPool1 = new JedisPool(poolConfig, "localhost", 6382, 10000);
+        JedisPool jedisPool2 = new JedisPool(poolConfig, "localhost", 6382, 10000);
         
         try (Jedis j1 = jedisPool1.getResource();
              Jedis j2 = jedisPool2.getResource()) {

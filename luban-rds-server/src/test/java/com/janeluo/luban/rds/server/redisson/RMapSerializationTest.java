@@ -178,7 +178,7 @@ public class RMapSerializationTest {
 
     @Test
     @DisplayName("Test RMap with ByteArrayCodec")
-    @Disabled("Redisson的RMap使用ByteArrayCodec时存在类型转换问题，暂时跳过")
+//    @Disabled("Redisson的RMap使用ByteArrayCodec时存在类型转换问题，暂时跳过")
     void testRMapByteArrayCodec() throws Exception {
         Config config = new Config();
         config.useSingleServer()

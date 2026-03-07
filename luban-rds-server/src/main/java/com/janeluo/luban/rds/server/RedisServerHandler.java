@@ -327,7 +327,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         return negative ? -result : result;
     }
     
-    private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Command command) {
+private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Command command) {
         try {
             String rawCommandName = command.getName();
             String commandName = rawCommandName != null ? rawCommandName.trim().toUpperCase() : "";
@@ -473,7 +473,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 } catch (NumberFormatException e) {
                 }
             }
-            ByteBuf responseBuffer = protocolParser.serialize(response);
+ByteBuf responseBuffer = protocolParser.serialize(response);
             if (responseBuffer != null && responseBuffer.isReadable()) {
                 ctx.writeAndFlush(responseBuffer);
             } else if (responseBuffer != null) {
@@ -1257,7 +1257,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                     i, r != null ? r.getClass().getName() : "null", r);
             }
             
-            // 直接构建RESP响应字符串
+// 直接构建RESP响应字符串
             StringBuilder respBuilder = new StringBuilder();
             respBuilder.append("*").append(results.size()).append("\r\n");
             
@@ -1269,8 +1269,12 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                     respBuilder.append(":").append(result).append("\r\n");
                 } else if (result instanceof String) {
                     String str = (String) result;
-                    // 简单字符串响应（如OK）
-                    if ("OK".equals(str)) {
+                    // 检查是否已经是 RESP 格式的响应（以 +, -, :, $, * 开头）
+                    if (isRespFormatted(str)) {
+                        // 已经是 RESP 格式，直接追加
+                        respBuilder.append(str);
+                    } else if ("OK".equals(str)) {
+                        // 简单字符串响应
                         respBuilder.append("+").append(str).append("\r\n");
                     } else {
                         // 批量字符串响应
@@ -1308,6 +1312,18 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
             else if (b != null) b.release();
             clientInfo.resetTransaction();
         }
+    }
+    
+/**
+     * 检查字符串是否已经是 RESP 格式的响应
+     * RESP 格式以 +, -, :, $, * 开头
+     */
+    private boolean isRespFormatted(String str) {
+        if (str == null || str.isEmpty()) {
+            return false;
+        }
+        char firstChar = str.charAt(0);
+        return firstChar == '+' || firstChar == '-' || firstChar == ':' || firstChar == '$' || firstChar == '*';
     }
     
     // 处理 DISCARD 命令
