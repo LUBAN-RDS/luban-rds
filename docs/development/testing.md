@@ -428,7 +428,9 @@ java -jar luban-rds-benchmark/target/luban-rds-benchmark-1.0.0-SNAPSHOT-jar-with
 | `-d` | `--duration` | 0 | 测试持续时间（秒）。设置为 >0 时启用**压力测试模式**，忽略 `-n` 参数 |
 | `-s` | `--size` | 100 | 数据包载荷大小（字节） |
 | `-c` | `--cases` | all | 指定运行的测试用例，逗号分隔。支持：`set`, `get`, `incr`, `lpush`, `lrange`, `hset`, `hget`, `sadd` |
-| `-m` | `--monitor` | false | 开启服务器内存实时监控（每 5 秒打印一次 INFO memory） |
+| `-m` | `--memory` | false | 开启服务器内存实时监控（每 5 秒打印一次 INFO memory） |
+| `-pipeline` | N/A | 1 | Pipeline 批量大小。设置为 >1 时启用 Pipeline 模式，显著提升吞吐量 |
+| `-pool` | N/A | 0 | 连接池大小。设置为 0 时每线程使用独立连接 |
 
 #### 6.2.3 测试场景示例
 
@@ -438,11 +440,45 @@ java -jar luban-rds-benchmark/target/luban-rds-benchmark-1.0.0-SNAPSHOT-jar-with
 java -jar luban-rds-benchmark.jar -t 20 -n 100000 -c set,get
 ```
 
-**2. 稳定性压力测试**
+**2. Pipeline 模式测试（推荐）**
+使用 Pipeline 批量发送命令，批量大小 100，可显著提升吞吐量：
+```bash
+java -jar luban-rds-benchmark.jar -t 50 -n 500000 -pipeline 100
+```
+
+**3. 连接池模式测试**
+使用连接池复用连接，连接池大小 50：
+```bash
+java -jar luban-rds-benchmark.jar -t 100 -n 1000000 -pool 50
+```
+
+**4. 稳定性压力测试**
 持续运行 5 分钟（300秒），开启内存监控，验证是否存在内存泄漏或性能衰减：
 ```bash
 java -jar luban-rds-benchmark.jar -t 50 -d 300 -m
 ```
+
+**5. 高性能测试（Pipeline + 高并发）**
+```bash
+java -jar luban-rds-benchmark.jar -t 100 -n 1000000 -pipeline 100 -pool 50
+```
+
+#### 6.2.4 性能优化建议
+
+**Pipeline 模式**：
+- Pipeline 批量大小建议设置为 50-200
+- 批量越大，吞吐量越高，但延迟也会增加
+- 适合批量写入场景
+
+**连接池模式**：
+- 连接池大小建议设置为线程数的 50%-100%
+- 减少连接创建/销毁开销
+- 适合高并发短连接场景
+
+**线程数配置**：
+- 建议从 10 线程开始测试
+- 逐步增加到 50、100、200 线程
+- 观察吞吐量是否随线程数增加而提升
 
 ### 6.3 微基准测试 (JMH)
 

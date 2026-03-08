@@ -7,14 +7,21 @@ public class BenchmarkResult {
     private double opsPerSec;
     private double avgLatencyMs;
     private long errorCount;
+    private int threads;
 
     public BenchmarkResult(String name, long operations, double durationSeconds, long errorCount) {
+        this(name, operations, durationSeconds, errorCount, 0, 0);
+    }
+
+    public BenchmarkResult(String name, long operations, double durationSeconds, long errorCount, 
+            double avgLatencyMs, int threads) {
         this.name = name;
         this.operations = operations;
         this.durationSeconds = durationSeconds;
         this.errorCount = errorCount;
+        this.avgLatencyMs = avgLatencyMs;
+        this.threads = threads;
         this.opsPerSec = durationSeconds > 0 ? operations / durationSeconds : 0;
-        this.avgLatencyMs = operations > 0 ? (durationSeconds * 1000) / operations : 0;
     }
 
     public String getName() {
@@ -39,6 +46,10 @@ public class BenchmarkResult {
 
     public long getErrorCount() {
         return errorCount;
+    }
+
+    public int getThreads() {
+        return threads;
     }
 
     @Override

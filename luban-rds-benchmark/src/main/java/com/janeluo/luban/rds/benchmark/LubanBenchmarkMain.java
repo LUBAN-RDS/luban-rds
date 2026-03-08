@@ -21,10 +21,12 @@ public class LubanBenchmarkMain {
         options.addOption("p", "port", true, "Server port (default: 9736)");
         options.addOption("t", "threads", true, "Number of threads (default: 10)");
         options.addOption("n", "requests", true, "Total requests (default: 100000)");
-        options.addOption("d", "duration", true, "Duration in seconds (default: 0, means use requests)");
-        options.addOption("s", "size", true, "Data size in bytes (default: 100)");
-        options.addOption("c", "cases", true, "Benchmark cases (default: all)");
-        options.addOption("m", "monitor", false, "Monitor server memory");
+        options.addOption("d", "duration", true, "Duration in seconds (default: 0, use total requests)");
+        options.addOption("s", "size", true, "Value size in bytes (default: 100)");
+        options.addOption("c", "cases", true, "Benchmark cases: all,set,get,incr,lpush,lrange,hset,hget,sadd (default: all)");
+        options.addOption("m", "memory", false, "Monitor memory usage");
+        options.addOption("pipeline", true, "Pipeline batch size (default: 1, no pipeline)");
+        options.addOption("pool", true, "Connection pool size (default: 0, one connection per thread)");
         options.addOption("help", false, "Print help");
 
         CommandLineParser parser = new DefaultParser();
@@ -43,14 +45,14 @@ public class LubanBenchmarkMain {
             config.setDurationSeconds(Integer.parseInt(cmd.getOptionValue("d", "0")));
             config.setValueSize(Integer.parseInt(cmd.getOptionValue("s", "100")));
             config.setMonitorMemory(cmd.hasOption("m"));
+            config.setPipelineBatchSize(Integer.parseInt(cmd.getOptionValue("pipeline", "1")));
+            config.setConnectionPoolSize(Integer.parseInt(cmd.getOptionValue("pool", "0")));
 
-            BenchmarkRunner runner = new BenchmarkRunner(config);
-
-            // Register cases
             String casesStr = cmd.getOptionValue("c", "all");
-            Set<String> selectedCases = new HashSet<>(Arrays.asList(casesStr.split(",")));
+            Set<String> selectedCases = new HashSet<>(Arrays.asList(casesStr.toLowerCase().split(",")));
             boolean all = casesStr.equalsIgnoreCase("all");
 
+            BenchmarkRunner runner = new BenchmarkRunner(config);
             if (all || selectedCases.contains("set")) runner.addBenchmark(new SetBenchmark());
             if (all || selectedCases.contains("get")) runner.addBenchmark(new GetBenchmark());
             if (all || selectedCases.contains("incr")) runner.addBenchmark(new IncrBenchmark());
@@ -59,6 +61,14 @@ public class LubanBenchmarkMain {
             if (all || selectedCases.contains("hset")) runner.addBenchmark(new HashSetBenchmark());
             if (all || selectedCases.contains("hget")) runner.addBenchmark(new HashGetBenchmark());
             if (all || selectedCases.contains("sadd")) runner.addBenchmark(new SetAddBenchmark());
+
+            // Print configuration info
+            System.out.println("Starting Benchmark Suite...");
+            System.out.println(config);
+            if (config.isPipelineEnabled()) {
+                System.out.println("Pipeline mode enabled with batch size: " + config.getPipelineBatchSize());
+            }
+            System.out.println("===================================================================================");
 
             // Memory Monitoring
             ScheduledExecutorService monitorService = null;
@@ -93,12 +103,21 @@ public class LubanBenchmarkMain {
     private static void printHelp(Options options) {
         HelpFormatter formatter = new HelpFormatter();
         formatter.printHelp("LubanBenchmark", options);
+        System.out.println("\nExamples:");
+        System.out.println("  # Basic benchmark with 50 threads");
+        System.out.println("  java -jar benchmark.jar -t 50 -n 500000");
+        System.out.println("");
+        System.out.println("  # Pipeline mode with batch size 100");
+        System.out.println("  java -jar benchmark.jar -t 50 -n 500000 --pipeline 100");
+        System.out.println("");
+        System.out.println("  # Connection pool mode");
+        System.out.println("  java -jar benchmark.jar -t 100 --pool 50");
+        System.out.println("");
+        System.out.println("  # Specific benchmarks only");
+        System.out.println("  java -jar benchmark.jar -c set,get -t 50");
     }
 
     private static String parseMemoryInfo(String info) {
-        // Simple parser to extract used_memory_human or similar
-        // This depends on what LubanRDS returns for INFO MEMORY
-        // Assuming standard Redis format
         String[] lines = info.split("\r\n");
         for (String line : lines) {
             if (line.startsWith("used_memory_human:")) {

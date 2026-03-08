@@ -9,6 +9,8 @@ public class BenchmarkConfig {
     private int durationSeconds = 0; // 0 means use totalOperations
     private String keyPrefix = "bench";
     private boolean monitorMemory = false;
+    private int pipelineBatchSize = 1; // 1 means no pipeline, > 1 enables pipeline mode
+    private int connectionPoolSize = 0; // 0 means one connection per thread
 
     public String getHost() {
         return host;
@@ -74,6 +76,26 @@ public class BenchmarkConfig {
         this.monitorMemory = monitorMemory;
     }
 
+    public int getPipelineBatchSize() {
+        return pipelineBatchSize;
+    }
+
+    public void setPipelineBatchSize(int pipelineBatchSize) {
+        this.pipelineBatchSize = pipelineBatchSize;
+    }
+
+    public int getConnectionPoolSize() {
+        return connectionPoolSize;
+    }
+
+    public void setConnectionPoolSize(int connectionPoolSize) {
+        this.connectionPoolSize = connectionPoolSize;
+    }
+
+    public boolean isPipelineEnabled() {
+        return pipelineBatchSize > 1;
+    }
+
     @Override
     public String toString() {
         return "BenchmarkConfig{" +
@@ -85,6 +107,8 @@ public class BenchmarkConfig {
                 ", durationSeconds=" + durationSeconds +
                 ", keyPrefix='" + keyPrefix + '\'' +
                 ", monitorMemory=" + monitorMemory +
+                ", pipelineBatchSize=" + pipelineBatchSize +
+                ", connectionPoolSize=" + connectionPoolSize +
                 '}';
     }
 }
