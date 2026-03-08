@@ -24,6 +24,9 @@ Luban-RDS 是一个完全兼容 Redis 协议的轻量级内存数据库，使用
 - **安全认证**：支持 AUTH 命令进行密码验证
 - **多数据库**：支持 SELECT 命令切换数据库（默认 16 个）
 - **高性能网络**：基于 Netty 的 NIO 服务器，支持高并发连接
+- **多线程 I/O**：三层线程模型（Boss → Worker → Business），可配置线程数，提升吞吐量
+- **内存池优化**：集成 Netty PooledByteBufAllocator，减少 GC 压力
+- **内存碎片整理**：自动/手动碎片整理，优化长期运行内存稳定性
 - **Spring Boot 集成**：提供自动配置和 RedisTemplate
 - **线程安全**：基于 ConcurrentHashMap 和 Caffeine 实现的内存存储，分段锁保证并发安全
 - **性能优化**：协议解析优化、响应缓存、数据结构直接操作、原子性批量操作
@@ -309,6 +312,11 @@ luban-rds/
 | `luban.rds.server.maxmemory-policy` | 内存淘汰策略 | noeviction |
 | `luban.rds.server.requirepass` | 密码认证（空字符串表示不需要） | "" |
 | `luban.rds.server.databases` | 数据库数量 | 16 |
+| `io-threads` | I/O 线程数（Boss Group） | CPU 核心数 |
+| `worker-threads` | Worker 线程数 | CPU 核心数 * 2 |
+| `business-threads` | 业务线程数 | CPU 核心数 |
+| `use-pool` | 是否使用内存池 | yes |
+| `memory-frag-threshold` | 内存碎片率阈值（%） | 30 |
 
 ## 💾 持久化
 
@@ -487,9 +495,15 @@ mvn test
 ### 正在开发
 
 - [ ] 支持主从复制
-- [ ] 多线程 I/O 优化
 - [ ] 访问控制列表（ACL）
 - [ ] 传输加密（TLS/SSL）
+
+### 已完成（v1.0.x 新增）
+
+- [x] 多线程 I/O 优化（三层线程模型）
+- [x] 内存池集成（Netty PooledByteBufAllocator）
+- [x] 内存碎片整理（自动/手动）
+- [x] StoreValue 内存优化（每条记录节省 36-52 字节）
 
 ### 计划中
 

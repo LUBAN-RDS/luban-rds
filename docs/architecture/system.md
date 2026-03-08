@@ -106,9 +106,39 @@ title: 系统架构
 
 ### 3.3 线程模型
 
-- **Boss 线程**：负责接受新连接
-- **Worker 线程**：负责处理 IO 操作
-- **Business 线程**：负责执行命令（可配置线程池大小）
+Luban-RDS 采用三层线程模型，基于 Netty 实现高性能的并发处理：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Boss Group (io-threads)                  │
+│              接受新连接，分发给 Worker Group                   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  Worker Group (worker-threads)               │
+│              处理 I/O 读写操作                                │
+│           可通过 worker-threads 配置线程数                    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 Business Group (business-threads)            │
+│              处理业务逻辑命令                                  │
+│          可通过 business-threads 配置线程数                   │
+│         避免耗时命令阻塞 I/O 线程                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**线程职责划分**：
+- **Boss Group**：负责接受新连接，通常 1 个线程即可
+- **Worker Group**：处理网络 I/O 读写，建议设置为 CPU 核心数的 2 倍
+- **Business Group**：执行业务命令逻辑，避免阻塞 I/O 线程
+
+**线程安全保证**：
+- **ClientInfo**：使用 `Channel.attr(AttributeKey)` 存储，每个连接独立
+- **Pub/Sub**：通过 `ConcurrentHashMap` 保证线程安全
+- **事务**：事务状态存储在 ClientInfo 中，连接间隔离
 
 ## 4. 协议层
 
@@ -203,6 +233,52 @@ title: 系统架构
 - **直接修改**：集合操作直接修改底层集合，避免数据复制
 - **内存管理**：支持最大内存限制和淘汰策略
 - **LRU 优化**：优化采样算法，避免遍历所有键
+
+### 6.6 内存优化
+
+Luban-RDS 实现了多项内存优化措施，减少内存占用和碎片：
+
+**StoreValue 优化**：
+- `String type` → `byte typeIndex`：使用字节索引替代字符串，节省约 24-32 字节/条
+- `Long expireTime` → `long expireTime`：使用原始类型替代包装类，节省约 8-16 字节/条
+- `long estimatedSize` → `int estimatedSize`：使用 int 替代 long，节省 4 字节/条
+
+**内存估算优化**：
+- 精确计算 Java 对象头开销（12 字节，启用压缩指针）
+- 考虑 String 对象开销（24 字节 + 字符数组）
+- 考虑 HashMap/ArrayList/HashSet 容器开销
+- 考虑 ZSet 双映射结构开销
+
+**内存池集成**：
+- 集成 Netty `PooledByteBufAllocator`
+- 复用网络缓冲区，减少 GC 压力
+- 支持内存泄漏检测（disabled/simple/advanced/paranoid）
+
+### 6.7 内存碎片整理
+
+Luban-RDS 提供内存碎片监控和整理机制：
+
+**碎片率计算**：
+```
+碎片率 = (已使用内存 - 有效内存) / 已使用内存 * 100
+```
+
+**自动整理**：
+- 当碎片率超过 `memory-frag-threshold`（默认 30%）时自动触发
+- 清理过期键
+- 压缩 Caffeine Cache
+- 建议 JVM 进行垃圾回收
+
+**手动整理**：
+- `MEMORY PURGE` 命令：立即执行碎片整理
+- `INFO memory` 命令：查看碎片率统计信息
+
+**内存统计信息**：
+- `used_memory`：当前使用内存
+- `used_memory_peak`：峰值内存
+- `mem_fragmentation_ratio`：碎片率
+- `total_keys`：总键数
+- `expired_keys`：过期键数
 
 ## 7. 持久化层
 
