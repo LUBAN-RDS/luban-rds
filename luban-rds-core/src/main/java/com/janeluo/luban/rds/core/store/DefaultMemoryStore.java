@@ -3,6 +3,13 @@ package com.janeluo.luban.rds.core.store;
 import com.janeluo.luban.rds.common.constant.RdsDataTypeConstant;
 import com.janeluo.luban.rds.common.util.RdsUtil;
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
+import com.janeluo.luban.rds.core.stream.Consumer;
+import com.janeluo.luban.rds.core.stream.ConsumerGroup;
+import com.janeluo.luban.rds.core.stream.PendingMessage;
+import com.janeluo.luban.rds.core.stream.Stream;
+import com.janeluo.luban.rds.core.stream.StreamConsumerGroupManager;
+import com.janeluo.luban.rds.core.stream.StreamEntry;
+import com.janeluo.luban.rds.core.stream.StreamId;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
@@ -11,6 +18,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -63,6 +73,7 @@ public class DefaultMemoryStore implements MemoryStore {
         private static final byte TYPE_LIST = 2;
         private static final byte TYPE_SET = 3;
         private static final byte TYPE_ZSET = 4;
+        private static final byte TYPE_STREAM = 5;
         
         // Special value for no expiration
         private static final long NO_EXPIRE = 0L;
@@ -120,6 +131,8 @@ public class DefaultMemoryStore implements MemoryStore {
                     return TYPE_SET;
                 case RdsDataTypeConstant.ZSET:
                     return TYPE_ZSET;
+                case RdsDataTypeConstant.STREAM:
+                    return TYPE_STREAM;
                 default:
                     return TYPE_STRING;
             }
@@ -137,6 +150,8 @@ public class DefaultMemoryStore implements MemoryStore {
                     return RdsDataTypeConstant.SET;
                 case TYPE_ZSET:
                     return RdsDataTypeConstant.ZSET;
+                case TYPE_STREAM:
+                    return RdsDataTypeConstant.STREAM;
                 default:
                     return RdsDataTypeConstant.STRING;
             }
@@ -229,6 +244,9 @@ public class DefaultMemoryStore implements MemoryStore {
                 for (String member : zset.memberScores.keySet()) {
                     size += STRING_OVERHEAD + member.length() * 2L;
                 }
+            } else if (value instanceof Stream) {
+                Stream stream = (Stream) value;
+                size += stream.estimateMemorySize();
             } else {
                 // Other types, estimate a fixed value
                 size += 64;
@@ -1239,6 +1257,12 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         if (value instanceof java.util.SortedSet) {
             return RdsDataTypeConstant.ZSET;
+        }
+        if (value instanceof ZSetStore) {
+            return RdsDataTypeConstant.ZSET;
+        }
+        if (value instanceof Stream) {
+            return RdsDataTypeConstant.STREAM;
         }
         return RdsDataTypeConstant.STRING;
     }
@@ -2715,5 +2739,865 @@ public class DefaultMemoryStore implements MemoryStore {
             totalKeys,
             expiredKeys
         );
+    }
+    
+    // ==================== Stream 操作实现 ====================
+    
+    /**
+     * 添加消息到流
+     */
+    @Override
+    public StreamId xadd(int database, String key, StreamId id, Map<String, String> fields,
+                         boolean nomkstream, Long maxLen, StreamId minId, Integer limit, boolean approximate) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        
+        synchronized (getLockForKey(database, key)) {
+            StoreValue storeValue = store.storage.getIfPresent(key);
+            
+            Stream stream;
+            boolean isNew = false;
+            
+            if (storeValue == null || storeValue.isExpired()) {
+                if (nomkstream) {
+                    return null;
+                }
+                stream = new Stream();
+                isNew = true;
+            } else {
+                Object val = storeValue.value;
+                if (val instanceof Stream) {
+                    stream = (Stream) val;
+                } else {
+                    return null;
+                }
+            }
+            
+            try {
+                StreamId generatedId = stream.addEntry(id, fields);
+                
+                // 处理裁剪
+                if (maxLen != null && maxLen > 0) {
+                    stream.trim(maxLen.intValue());
+                }
+                if (minId != null) {
+                    stream.trim(minId);
+                }
+                
+                if (isNew) {
+                    set(database, key, stream);
+                } else {
+                    bumpKeyVersion(database, key);
+                }
+                
+                return generatedId;
+            } catch (IllegalArgumentException e) {
+                logger.warn("XADD failed: {}", e.getMessage());
+                return null;
+            }
+        }
+    }
+    
+    /**
+     * 获取流中消息数量
+     */
+    @Override
+    public long xlen(int database, String key) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return 0;
+        }
+        
+        Object val = storeValue.value;
+        if (val instanceof Stream) {
+            return ((Stream) val).getLength();
+        }
+        
+        return 0;
+    }
+    
+    /**
+     * 范围查询消息
+     */
+    @Override
+    public List<StreamEntry> xrange(int database, String key, StreamId start, StreamId end,
+                                    boolean exclusiveStart, boolean exclusiveEnd, int count, boolean reverse) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return Collections.emptyList();
+        }
+        
+        Object val = storeValue.value;
+        if (val instanceof Stream) {
+            Stream stream = (Stream) val;
+            
+            if (reverse) {
+                return stream.getRangeFromReverse(end, exclusiveEnd, count);
+            } else {
+                return stream.getRange(start, end, exclusiveStart, exclusiveEnd, count);
+            }
+        }
+        
+        return Collections.emptyList();
+    }
+    
+    /**
+     * 删除消息
+     */
+    @Override
+    public long xdel(int database, String key, StreamId... ids) {
+        if (ids == null || ids.length == 0) {
+            return 0;
+        }
+        
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return 0;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return 0;
+        }
+        
+        Stream stream = (Stream) val;
+        long deleted = 0;
+        
+        for (StreamId id : ids) {
+            if (stream.deleteEntry(id)) {
+                deleted++;
+            }
+        }
+        
+        if (deleted > 0) {
+            bumpKeyVersion(database, key);
+        }
+        
+        return deleted;
+    }
+    
+    /**
+     * 裁剪流
+     */
+    @Override
+    public long xtrim(int database, String key, Long maxLen, StreamId minId, Integer limit, boolean approximate) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return 0;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return 0;
+        }
+        
+        Stream stream = (Stream) val;
+        long trimmed = 0;
+        
+        if (maxLen != null && maxLen > 0) {
+            trimmed += stream.trim(maxLen.intValue());
+        }
+        if (minId != null) {
+            trimmed += stream.trim(minId);
+        }
+        
+        if (trimmed > 0) {
+            bumpKeyVersion(database, key);
+        }
+        
+        return trimmed;
+    }
+    
+    /**
+     * 获取流对象
+     */
+    @Override
+    public Stream getStream(int database, String key) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return null;
+        }
+        
+        Object val = storeValue.value;
+        if (val instanceof Stream) {
+            return (Stream) val;
+        }
+        
+        return null;
+    }
+    
+    /**
+     * 创建消费者组
+     */
+    @Override
+    public boolean xgroupCreate(int database, String key, String group, StreamId id, boolean mkstream) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        
+        synchronized (getLockForKey(database, key)) {
+            StoreValue storeValue = store.storage.getIfPresent(key);
+            
+            Stream stream;
+            boolean isNew = false;
+            
+            if (storeValue == null || storeValue.isExpired()) {
+                if (!mkstream) {
+                    return false;
+                }
+                stream = new Stream();
+                isNew = true;
+            } else {
+                Object val = storeValue.value;
+                if (val instanceof Stream) {
+                    stream = (Stream) val;
+                } else {
+                    return false;
+                }
+            }
+            
+            StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+            if (groupManager == null) {
+                groupManager = new StreamConsumerGroupManager(key);
+                stream.setConsumerGroupManager(groupManager);
+            }
+            
+            try {
+                StreamId startId = (id != null) ? id : stream.getLastGeneratedId();
+                if (startId == null) {
+                    startId = StreamId.MIN_ID;
+                }
+                
+                groupManager.createGroup(group, startId);
+                
+                if (isNew) {
+                    set(database, key, stream);
+                } else {
+                    bumpKeyVersion(database, key);
+                }
+                
+                return true;
+            } catch (IllegalStateException e) {
+                logger.warn("XGROUP CREATE failed: {}", e.getMessage());
+                return false;
+            }
+        }
+    }
+    
+    /**
+     * 销毁消费者组
+     */
+    @Override
+    public boolean xgroupDestroy(int database, String key, String group) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return false;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return false;
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return false;
+        }
+        
+        boolean destroyed = groupManager.destroyGroup(group);
+        if (destroyed) {
+            bumpKeyVersion(database, key);
+        }
+        
+        return destroyed;
+    }
+    
+    /**
+     * 删除消费者
+     */
+    @Override
+    public long xgroupDelConsumer(int database, String key, String group, String consumer) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return 0;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return 0;
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return 0;
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            return 0;
+        }
+        
+        Consumer deletedConsumer = consumerGroup.deleteConsumer(consumer);
+        if (deletedConsumer != null) {
+            bumpKeyVersion(database, key);
+            return deletedConsumer.getPendingCount();
+        }
+        
+        return 0;
+    }
+    
+    /**
+     * 设置消费者组最后传递 ID
+     */
+    @Override
+    public boolean xgroupSetId(int database, String key, String group, StreamId id) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return false;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return false;
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return false;
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            return false;
+        }
+        
+        consumerGroup.setLastDeliveredId(id);
+        bumpKeyVersion(database, key);
+        
+        return true;
+    }
+    
+    /**
+     * 消费者组读取消息
+     */
+    @Override
+    public Map<String, List<StreamEntry>> xreadGroup(int database, String key, String group, String consumer,
+                                                       StreamId id, int count, boolean noack) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return Collections.emptyMap();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return Collections.emptyMap();
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return Collections.emptyMap();
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            return Collections.emptyMap();
+        }
+        
+        List<StreamEntry> entries;
+        if (noack) {
+            entries = stream.getRangeFrom(id, false, count);
+        } else {
+            entries = stream.getRangeFrom(id, false, count);
+            for (StreamEntry entry : entries) {
+                consumerGroup.addPendingMessage(entry.getId(), consumer);
+            }
+        }
+        
+        consumerGroup.setLastDeliveredId(entries.isEmpty() ? id : entries.get(entries.size() - 1).getId());
+        bumpKeyVersion(database, key);
+        
+        Map<String, List<StreamEntry>> result = new HashMap<>();
+        result.put(group, entries);
+        return result;
+    }
+    
+    /**
+     * 确认消息
+     */
+    @Override
+    public long xack(int database, String key, String group, StreamId... ids) {
+        if (ids == null || ids.length == 0) {
+            return 0;
+        }
+        
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return 0;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return 0;
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return 0;
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            return 0;
+        }
+        
+        long acked = 0;
+        for (StreamId id : ids) {
+            if (consumerGroup.ackMessage(id) != null) {
+                acked++;
+            }
+        }
+        
+        if (acked > 0) {
+            bumpKeyVersion(database, key);
+        }
+        
+        return acked;
+    }
+    
+    /**
+     * 获取待处理消息摘要
+     */
+    @Override
+    public Map<String, Object> xpendingSummary(int database, String key, String group) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return Collections.emptyMap();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return Collections.emptyMap();
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return Collections.emptyMap();
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            return Collections.emptyMap();
+        }
+        
+        Map<String, Object> summary = new HashMap<>();
+        summary.put("count", consumerGroup.getPendingCount());
+        summary.put("lastDeliveredId", consumerGroup.getLastDeliveredId());
+        
+        StreamId[] idRange = consumerGroup.getPendingIdRange();
+        if (idRange != null) {
+            summary.put("startId", idRange[0]);
+            summary.put("endId", idRange[1]);
+        }
+        
+        return summary;
+    }
+    
+    /**
+     * 获取待处理消息详细列表
+     */
+    @Override
+    public List<Map<String, Object>> xpendingList(int database, String key, String group,
+                                                   StreamId start, StreamId end, int count, 
+                                                   String consumer, long minIdleTime) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return Collections.emptyList();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return Collections.emptyList();
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return Collections.emptyList();
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            return Collections.emptyList();
+        }
+        
+        List<PendingMessage> pendingMessages = 
+            consumerGroup.getPendingMessages(start, end, count, consumer, minIdleTime);
+        
+        List<Map<String, Object>> result = new ArrayList<>(pendingMessages.size());
+        for (PendingMessage pm : pendingMessages) {
+            Map<String, Object> info = new HashMap<>();
+            info.put("id", pm.getId());
+            info.put("consumer", pm.getConsumerName());
+            info.put("deliveryTime", pm.getDeliveryTime());
+            info.put("deliveryCount", pm.getDeliveryCount());
+            result.add(info);
+        }
+        
+        return result;
+    }
+    
+    /**
+     * 转移消息所有权
+     */
+    @Override
+    public List<StreamEntry> xclaim(int database, String key, String group, String consumer,
+                                     long minIdleTime, StreamId[] ids, boolean justId, boolean force) {
+        if (ids == null || ids.length == 0) {
+            return Collections.emptyList();
+        }
+        
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return Collections.emptyList();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return Collections.emptyList();
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return Collections.emptyList();
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            return Collections.emptyList();
+        }
+        
+        List<StreamEntry> claimedEntries = new ArrayList<>();
+        
+        for (StreamId id : ids) {
+            PendingMessage pendingMessage = consumerGroup.getPendingMessage(id);
+            
+            if (pendingMessage == null) {
+                if (!force) {
+                    continue;
+                }
+                StreamEntry entry = stream.getEntry(id);
+                if (entry == null) {
+                    continue;
+                }
+                consumerGroup.addPendingMessage(id, consumer);
+                claimedEntries.add(entry);
+                continue;
+            }
+            
+            long idleTime = System.currentTimeMillis() - pendingMessage.getDeliveryTime();
+            if (idleTime < minIdleTime) {
+                continue;
+            }
+            
+            consumerGroup.claimMessage(id, consumer);
+            
+            if (!justId) {
+                StreamEntry entry = stream.getEntry(id);
+                if (entry != null) {
+                    claimedEntries.add(entry);
+                }
+            }
+        }
+        
+        if (!claimedEntries.isEmpty()) {
+            bumpKeyVersion(database, key);
+        }
+        
+        return claimedEntries;
+    }
+    
+    /**
+     * 自动转移超时消息
+     */
+    @Override
+    public Map<String, Object> xautoclaim(int database, String key, String group, String consumer,
+                                          long minIdleTime, StreamId start, int count) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("nextId", StreamId.MIN_ID);
+            result.put("entries", Collections.emptyList());
+            return result;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("nextId", StreamId.MIN_ID);
+            result.put("entries", Collections.emptyList());
+            return result;
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("nextId", StreamId.MIN_ID);
+            result.put("entries", Collections.emptyList());
+            return result;
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("nextId", StreamId.MIN_ID);
+            result.put("entries", Collections.emptyList());
+            return result;
+        }
+        
+        List<StreamEntry> claimedEntries = new ArrayList<>();
+        StreamId nextId = start;
+        
+        List<PendingMessage> pendingMessages = 
+            consumerGroup.getPendingMessages(start, StreamId.MAX_ID, count * 2, null, minIdleTime);
+        
+        for (PendingMessage pm : pendingMessages) {
+            if (claimedEntries.size() >= count) {
+                nextId = pm.getId();
+                break;
+            }
+            
+            consumerGroup.claimMessage(pm.getId(), consumer);
+            
+            StreamEntry entry = stream.getEntry(pm.getId());
+            if (entry != null) {
+                claimedEntries.add(entry);
+            }
+            
+            nextId = pm.getId();
+        }
+        
+        if (!claimedEntries.isEmpty()) {
+            bumpKeyVersion(database, key);
+        }
+        
+        Map<String, Object> result = new HashMap<>();
+        result.put("nextId", nextId);
+        result.put("entries", claimedEntries);
+        return result;
+    }
+    
+    /**
+     * 获取消费者组管理器
+     */
+    @Override
+    public StreamConsumerGroupManager getStreamConsumerGroupManager(int database, String key) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return null;
+        }
+        
+        Object val = storeValue.value;
+        if (val instanceof Stream) {
+            Stream stream = (Stream) val;
+            return stream.getConsumerGroupManager();
+        }
+        
+        return null;
+    }
+    
+    /**
+     * 获取流信息
+     */
+    @Override
+    public Map<String, Object> xinfoStream(int database, String key) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return Collections.emptyMap();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return Collections.emptyMap();
+        }
+        
+        Stream stream = (Stream) val;
+        Map<String, Object> info = new HashMap<>();
+        
+        info.put("length", stream.getLength());
+        info.put("radix-tree-keys", stream.getLength());
+        info.put("radix-tree-nodes", stream.getLength());
+        info.put("last-generated-id", stream.getLastGeneratedId());
+        
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        if (groupManager != null) {
+            info.put("groups", groupManager.getGroupCount());
+        } else {
+            info.put("groups", 0);
+        }
+        
+        StreamEntry firstEntry = stream.getFirstEntry();
+        if (firstEntry != null) {
+            info.put("first-entry", firstEntry);
+        }
+        
+        StreamEntry lastEntry = stream.getLastEntry();
+        if (lastEntry != null) {
+            info.put("last-entry", lastEntry);
+        }
+        
+        return info;
+    }
+    
+    /**
+     * 获取消费者组列表
+     */
+    @Override
+    public List<Map<String, Object>> xinfoGroups(int database, String key) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return Collections.emptyList();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return Collections.emptyList();
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return Collections.emptyList();
+        }
+        
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (ConsumerGroup group : groupManager.getGroups()) {
+            Map<String, Object> groupInfo = new HashMap<>();
+            groupInfo.put("name", group.getName());
+            groupInfo.put("consumers", group.getConsumerCount());
+            groupInfo.put("pending", group.getPendingCount());
+            groupInfo.put("last-delivered-id", group.getLastDeliveredId());
+            result.add(groupInfo);
+        }
+        
+        return result;
+    }
+    
+    /**
+     * 获取消费者列表
+     */
+    @Override
+    public List<Map<String, Object>> xinfoConsumers(int database, String key, String group) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return Collections.emptyList();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return Collections.emptyList();
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return Collections.emptyList();
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            return Collections.emptyList();
+        }
+        
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Consumer consumer : consumerGroup.getConsumers()) {
+            Map<String, Object> consumerInfo = new HashMap<>();
+            consumerInfo.put("name", consumer.getName());
+            consumerInfo.put("pending", consumer.getPendingCount());
+            consumerInfo.put("idle", consumer.getIdleTime());
+            result.add(consumerInfo);
+        }
+        
+        return result;
+    }
+
+    @Override
+    public StreamId getGroupLastDeliveredId(int database, String key, String group) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return null;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof Stream)) {
+            return null;
+        }
+        
+        Stream stream = (Stream) val;
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        
+        if (groupManager == null) {
+            return null;
+        }
+        
+        ConsumerGroup consumerGroup = groupManager.getGroup(group);
+        if (consumerGroup == null) {
+            return null;
+        }
+        
+        return consumerGroup.getLastDeliveredId();
     }
 }

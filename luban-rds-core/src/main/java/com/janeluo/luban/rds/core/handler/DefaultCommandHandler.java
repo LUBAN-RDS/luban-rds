@@ -63,6 +63,9 @@ public class DefaultCommandHandler {
         registerHandler(new LuaCommandHandler());
         registerHandler(new SlowLogCommandHandler());
         registerHandler(new RdsMemoryCommandHandler());
+        // 注册 Stream 命令处理器
+        registerHandler(new StreamCommandHandler());
+        registerHandler(new StreamGroupCommandHandler());
         // 注册AUTH命令处理器
         registerHandler(new AuthCommandHandler(requirepass));
     }

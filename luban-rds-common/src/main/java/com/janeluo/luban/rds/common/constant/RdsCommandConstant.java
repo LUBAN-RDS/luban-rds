@@ -139,4 +139,24 @@ public final class RdsCommandConstant {
 
     public static final String DEBUG_OBJECT = "DEBUG OBJECT";
     public static final String DEBUG_SEGFAULT = "DEBUG SEGFAULT";
+
+    // ==================== Stream 命令 ====================
+
+    public static final String XADD = "XADD";
+    public static final String XLEN = "XLEN";
+    public static final String XRANGE = "XRANGE";
+    public static final String XREVRANGE = "XREVRANGE";
+    public static final String XDEL = "XDEL";
+    public static final String XTRIM = "XTRIM";
+    public static final String XREAD = "XREAD";
+    public static final String XINFO = "XINFO";
+    
+    // ==================== Stream 消费者组命令 ====================
+    
+    public static final String XGROUP = "XGROUP";
+    public static final String XREADGROUP = "XREADGROUP";
+    public static final String XACK = "XACK";
+    public static final String XPENDING = "XPENDING";
+    public static final String XCLAIM = "XCLAIM";
+    public static final String XAUTOCLAIM = "XAUTOCLAIM";
 }

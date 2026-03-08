@@ -1,6 +1,12 @@
 package com.janeluo.luban.rds.core.store;
 
+import com.janeluo.luban.rds.core.stream.Stream;
+import com.janeluo.luban.rds.core.stream.StreamConsumerGroupManager;
+import com.janeluo.luban.rds.core.stream.StreamEntry;
+import com.janeluo.luban.rds.core.stream.StreamId;
+
 import java.util.List;
+import java.util.Map;
 
 public interface MemoryStore {
     Object get(int database, String key);
@@ -487,6 +493,236 @@ public interface MemoryStore {
      * @return MemoryStats object containing memory usage information
      */
     MemoryStats getMemoryStats();
+    
+    // ==================== Stream 操作接口 ====================
+    
+    /**
+     * 添加消息到流
+     * @param database 数据库索引
+     * @param key 流键
+     * @param id 消息 ID（null 表示自动生成）
+     * @param fields 字段值对
+     * @param nomkstream 流不存在时不创建
+     * @param maxLen 最大长度（null 表示不限制）
+     * @param minId 最小 ID（null 表示不限制）
+     * @param limit 裁剪限制
+     * @param approximate 是否近似裁剪
+     * @return 生成的消息 ID，失败返回 null
+     */
+    StreamId xadd(int database, String key, StreamId id, Map<String, String> fields,
+                  boolean nomkstream, Long maxLen, StreamId minId, Integer limit, boolean approximate);
+    
+    /**
+     * 获取流中消息数量
+     * @param database 数据库索引
+     * @param key 流键
+     * @return 消息数量
+     */
+    long xlen(int database, String key);
+    
+    /**
+     * 范围查询消息
+     * @param database 数据库索引
+     * @param key 流键
+     * @param start 起始 ID
+     * @param end 结束 ID
+     * @param exclusiveStart 是否开区间起始
+     * @param exclusiveEnd 是否开区间结束
+     * @param count 返回数量限制
+     * @param reverse 是否降序
+     * @return 消息列表
+     */
+    List<StreamEntry> xrange(int database, String key, StreamId start, StreamId end,
+                            boolean exclusiveStart, boolean exclusiveEnd, int count, boolean reverse);
+    
+    /**
+     * 删除消息
+     * @param database 数据库索引
+     * @param key 流键
+     * @param ids 消息 ID 数组
+     * @return 删除的消息数量
+     */
+    long xdel(int database, String key, StreamId... ids);
+    
+    /**
+     * 裁剪流
+     * @param database 数据库索引
+     * @param key 流键
+     * @param maxLen 最大长度（null 表示不限制）
+     * @param minId 最小 ID（null 表示不限制）
+     * @param limit 裁剪限制
+     * @param approximate 是否近似裁剪
+     * @return 删除的消息数量
+     */
+    long xtrim(int database, String key, Long maxLen, StreamId minId, Integer limit, boolean approximate);
+    
+    /**
+     * 获取流对象
+     * @param database 数据库索引
+     * @param key 流键
+     * @return Stream 对象，不存在返回 null
+     */
+    Stream getStream(int database, String key);
+    
+    /**
+     * 创建消费者组
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @param id 起始 ID
+     * @param mkstream 流不存在时是否创建
+     * @return 是否成功
+     */
+    boolean xgroupCreate(int database, String key, String group, StreamId id, boolean mkstream);
+    
+    /**
+     * 销毁消费者组
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @return 是否成功
+     */
+    boolean xgroupDestroy(int database, String key, String group);
+    
+    /**
+     * 删除消费者
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @param consumer 消费者名称
+     * @return 删除的待处理消息数量
+     */
+    long xgroupDelConsumer(int database, String key, String group, String consumer);
+    
+    /**
+     * 设置消费者组最后传递 ID
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @param id 消息 ID
+     * @return 是否成功
+     */
+    boolean xgroupSetId(int database, String key, String group, StreamId id);
+    
+    /**
+     * 消费者组读取消息
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @param consumer 消费者名称
+     * @param id 起始 ID
+     * @param count 返回数量限制
+     * @param noack 是否不需要确认
+     * @return 消费者组名称到消息列表的映射
+     */
+    Map<String, List<StreamEntry>> xreadGroup(int database, String key, String group, String consumer,
+                                              StreamId id, int count, boolean noack);
+    
+    /**
+     * 确认消息
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @param ids 消息 ID 数组
+     * @return 确认的消息数量
+     */
+    long xack(int database, String key, String group, StreamId... ids);
+    
+    /**
+     * 获取待处理消息摘要
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @return 摘要信息映射
+     */
+    Map<String, Object> xpendingSummary(int database, String key, String group);
+    
+    /**
+     * 获取待处理消息详细列表
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @param start 起始 ID
+     * @param end 结束 ID
+     * @param count 返回数量限制
+     * @param consumer 消费者名称过滤（null 表示不过滤）
+     * @param minIdleTime 最小空闲时间（毫秒）
+     * @return 待处理消息详细列表
+     */
+    List<Map<String, Object>> xpendingList(int database, String key, String group,
+                                          StreamId start, StreamId end, int count, 
+                                          String consumer, long minIdleTime);
+    
+    /**
+     * 转移消息所有权
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @param consumer 消费者名称
+     * @param minIdleTime 最小空闲时间（毫秒）
+     * @param ids 消息 ID 数组
+     * @param justId 是否只返回 ID
+     * @param force 是否强制转移
+     * @return 消息列表
+     */
+    List<StreamEntry> xclaim(int database, String key, String group, String consumer,
+                             long minIdleTime, StreamId[] ids, boolean justId, boolean force);
+    
+    /**
+     * 自动转移超时消息
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @param consumer 消费者名称
+     * @param minIdleTime 最小空闲时间（毫秒）
+     * @param start 起始 ID
+     * @param count 返回数量限制
+     * @return 结果映射
+     */
+    Map<String, Object> xautoclaim(int database, String key, String group, String consumer,
+                                   long minIdleTime, StreamId start, int count);
+    
+    /**
+     * 获取消费者组管理器
+     * @param database 数据库索引
+     * @param key 流键
+     * @return 消费者组管理器，不存在返回 null
+     */
+    StreamConsumerGroupManager getStreamConsumerGroupManager(int database, String key);
+    
+    /**
+     * 获取流信息
+     * @param database 数据库索引
+     * @param key 流键
+     * @return 流信息映射
+     */
+    Map<String, Object> xinfoStream(int database, String key);
+    
+    /**
+     * 获取消费者组列表
+     * @param database 数据库索引
+     * @param key 流键
+     * @return 消费者组信息列表
+     */
+    List<Map<String, Object>> xinfoGroups(int database, String key);
+    
+    /**
+     * 获取消费者列表
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @return 消费者信息列表
+     */
+    List<Map<String, Object>> xinfoConsumers(int database, String key, String group);
+    
+    /**
+     * 获取消费者组的最后投递 ID
+     * @param database 数据库索引
+     * @param key 流键
+     * @param group 消费者组名称
+     * @return 最后投递 ID，不存在返回 null
+     */
+    StreamId getGroupLastDeliveredId(int database, String key, String group);
     
     /**
      * Memory statistics information class

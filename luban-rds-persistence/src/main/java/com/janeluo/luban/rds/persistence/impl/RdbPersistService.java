@@ -1,5 +1,12 @@
 package com.janeluo.luban.rds.persistence.impl;
 
+import com.janeluo.luban.rds.core.stream.Consumer;
+import com.janeluo.luban.rds.core.stream.ConsumerGroup;
+import com.janeluo.luban.rds.core.stream.PendingMessage;
+import com.janeluo.luban.rds.core.stream.Stream;
+import com.janeluo.luban.rds.core.stream.StreamConsumerGroupManager;
+import com.janeluo.luban.rds.core.stream.StreamEntry;
+import com.janeluo.luban.rds.core.stream.StreamId;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.persistence.PersistService;
 import org.slf4j.Logger;
@@ -7,6 +14,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -54,6 +62,14 @@ public class RdbPersistService implements PersistService {
     
     // 写缓冲区大小（64KB）
     private static final int WRITE_BUFFER_SIZE = 64 * 1024;
+    
+    // RDB 类型码常量
+    private static final byte RDB_TYPE_STRING = 0x00;
+    private static final byte RDB_TYPE_LIST = 0x01;
+    private static final byte RDB_TYPE_SET = 0x02;
+    private static final byte RDB_TYPE_ZSET = 0x03;
+    private static final byte RDB_TYPE_HASH = 0x04;
+    private static final byte RDB_TYPE_STREAM = 0x05;
     
     public RdbPersistService(String dataDir) {
         this.dataDir = dataDir;
@@ -288,6 +304,7 @@ public class RdbPersistService implements PersistService {
                         case (byte) 0x02: // 集合类型
                         case (byte) 0x03: // 有序集合类型
                         case (byte) 0x04: // 哈希类型
+                        case (byte) 0x05: // Stream 类型
                             readKeyValue(dis, opcode, currentDb, memoryStore);
                             keyCount++;
                             break;
@@ -380,30 +397,35 @@ public class RdbPersistService implements PersistService {
         String type = memoryStore.type(db, key);
         switch (type) {
             case "string":
-                dos.writeByte(0x00);
+                dos.writeByte(RDB_TYPE_STRING);
                 writeString(dos, key);
                 writeString(dos, value.toString());
                 break;
             case "list":
-                dos.writeByte(0x01);
+                dos.writeByte(RDB_TYPE_LIST);
                 writeString(dos, key);
                 writeList(dos, (List<?>) value);
                 break;
             case "set":
-                dos.writeByte(0x02);
+                dos.writeByte(RDB_TYPE_SET);
                 writeString(dos, key);
                 writeSet(dos, (java.util.Set<?>) value);
                 break;
             case "zset":
-                dos.writeByte(0x03);
+                dos.writeByte(RDB_TYPE_ZSET);
                 writeString(dos, key);
                 java.util.Map<String, Double> zsetWithScores = memoryStore.zgetAllWithScores(db, key);
                 writeZSetWithScores(dos, zsetWithScores);
                 break;
             case "hash":
-                dos.writeByte(0x04);
+                dos.writeByte(RDB_TYPE_HASH);
                 writeString(dos, key);
                 writeHash(dos, (java.util.Map<?, ?>) value);
+                break;
+            case "stream":
+                dos.writeByte(RDB_TYPE_STREAM);
+                writeString(dos, key);
+                writeStream(dos, (Stream) value, memoryStore, db, key);
                 break;
             default:
                 logger.warn("Unknown type: {}", type);
@@ -417,21 +439,24 @@ public class RdbPersistService implements PersistService {
             
             Object value = null;
             switch (opcode) {
-                case 0x00:
+                case RDB_TYPE_STRING:
                     value = readString(dis);
                     break;
-                case 0x01:
+                case RDB_TYPE_LIST:
                     value = readList(dis);
                     break;
-                case 0x02:
+                case RDB_TYPE_SET:
                     value = readSet(dis);
                     break;
-                case 0x03:
+                case RDB_TYPE_ZSET:
                     readZSetWithScores(dis, memoryStore, db, key);
                     return;
-                case 0x04:
+                case RDB_TYPE_HASH:
                     value = readHash(dis);
                     break;
+                case RDB_TYPE_STREAM:
+                    readStream(dis, memoryStore, db, key);
+                    return;
                 default:
                     logger.warn("Unknown opcode: 0x{}", Integer.toHexString(opcode));
                     break;
@@ -588,6 +613,249 @@ public class RdbPersistService implements PersistService {
     
     private double readDouble(DataInputStream dis) throws IOException {
         return dis.readDouble();
+    }
+    
+    // ==================== Stream 序列化方法 ====================
+    
+    /**
+     * 写入 Stream 数据结构
+     * 
+     * <p>数据格式：
+     * <pre>
+     * [Stream Header]
+     * - lastGeneratedId: StreamId (ms + seq)
+     * - maxLen: long
+     * 
+     * [Entries]
+     * - entriesCount: int
+     * - for each entry:
+     *   - id: StreamId (ms + seq)
+     *   - fieldsCount: int
+     *   - for each field:
+     *     - field: string
+     *     - value: string
+     * 
+     * [Consumer Groups]
+     * - groupsCount: int
+     * - for each group:
+     *   - groupName: string
+     *   - lastDeliveredId: StreamId
+     *   - createdAt: long
+     *   - consumersCount: int
+     *   - for each consumer:
+     *     - consumerName: string
+     *     - seenTime: long
+     *     - pendingCount: int
+     *   - pelCount: int
+     *   - for each pending message:
+     *     - id: StreamId
+     *     - consumerName: string
+     *     - deliveryTime: long
+     *     - deliveryCount: int
+     * </pre>
+     *
+     * @param dos 数据输出流
+     * @param stream Stream 对象
+     * @param memoryStore 内存存储
+     * @param db 数据库索引
+     * @param key 键名
+     * @throws IOException 如果写入失败
+     */
+    private void writeStream(DataOutputStream dos, Stream stream, MemoryStore memoryStore, int db, String key) throws IOException {
+        // 写入最后生成的 ID
+        StreamId lastGeneratedId = stream.getLastGeneratedId();
+        if (lastGeneratedId != null) {
+            writeStreamId(dos, lastGeneratedId);
+        } else {
+            // 如果没有消息，写入 0-0
+            writeStreamId(dos, StreamId.MIN_ID);
+        }
+        
+        // 写入 maxLen
+        dos.writeLong(stream.getMaxLen());
+        
+        // 写入消息条目
+        long entriesCount = stream.getLength();
+        writeLength(dos, entriesCount);
+        
+        if (entriesCount > 0) {
+            // 遍历所有消息条目
+            List<StreamEntry> entries = stream.getRange(StreamId.MIN_ID, StreamId.MAX_ID, false, false, Integer.MAX_VALUE);
+            for (StreamEntry entry : entries) {
+                // 写入消息 ID
+                writeStreamId(dos, entry.getId());
+                
+                // 写入字段值对
+                Map<String, String> fields = entry.getFieldsInternal();
+                writeLength(dos, fields.size());
+                for (Map.Entry<String, String> field : fields.entrySet()) {
+                    writeString(dos, field.getKey());
+                    writeString(dos, field.getValue() != null ? field.getValue() : "");
+                }
+            }
+        }
+        
+        // 写入消费者组信息
+        StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
+        if (groupManager != null && !groupManager.isEmpty()) {
+            List<ConsumerGroup> groups = groupManager.getGroups();
+            writeLength(dos, groups.size());
+            
+            for (ConsumerGroup group : groups) {
+                // 写入消费者组基本信息
+                writeString(dos, group.getName());
+                writeStreamId(dos, group.getLastDeliveredId());
+                dos.writeLong(group.getCreatedAt());
+                
+                // 写入消费者信息
+                List<Consumer> consumers = group.getConsumers();
+                writeLength(dos, consumers.size());
+                for (Consumer consumer : consumers) {
+                    writeString(dos, consumer.getName());
+                    dos.writeLong(consumer.getSeenTime());
+                    writeLength(dos, consumer.getPendingCount());
+                }
+                
+                // 写入 PEL 信息
+                List<PendingMessage> pendingMessages = group.getAllPendingMessages();
+                writeLength(dos, pendingMessages.size());
+                for (PendingMessage pm : pendingMessages) {
+                    writeStreamId(dos, pm.getId());
+                    writeString(dos, pm.getConsumerName());
+                    dos.writeLong(pm.getDeliveryTime());
+                    dos.writeInt(pm.getDeliveryCount());
+                }
+            }
+        } else {
+            // 没有消费者组
+            writeLength(dos, 0);
+        }
+        
+        logger.debug("Written stream: key={}, entries={}, groups={}", 
+                key, entriesCount, groupManager != null ? groupManager.getGroupCount() : 0);
+    }
+    
+    /**
+     * 写入 StreamId
+     *
+     * @param dos 数据输出流
+     * @param streamId Stream ID
+     * @throws IOException 如果写入失败
+     */
+    private void writeStreamId(DataOutputStream dos, StreamId streamId) throws IOException {
+        dos.writeLong(streamId.getMillisecondsTime());
+        dos.writeLong(streamId.getSequenceNumber());
+    }
+    
+    /**
+     * 读取 Stream 数据结构
+     *
+     * @param dis 数据输入流
+     * @param memoryStore 内存存储
+     * @param db 数据库索引
+     * @param key 键名
+     * @throws IOException 如果读取失败
+     */
+    private void readStream(DataInputStream dis, MemoryStore memoryStore, int db, String key) throws IOException {
+        // 读取最后生成的 ID
+        StreamId lastGeneratedId = readStreamId(dis);
+        
+        // 读取 maxLen
+        long maxLen = dis.readLong();
+        
+        // 创建 Stream 对象
+        Stream stream = new Stream(maxLen);
+        
+        // 读取消息条目
+        int entriesCount = readLength(dis);
+        for (int i = 0; i < entriesCount; i++) {
+            // 读取消息 ID
+            StreamId entryId = readStreamId(dis);
+            
+            // 读取字段值对
+            int fieldsCount = readLength(dis);
+            java.util.Map<String, String> fields = new java.util.LinkedHashMap<>(fieldsCount);
+            for (int j = 0; j < fieldsCount; j++) {
+                String fieldName = readString(dis);
+                String fieldValue = readString(dis);
+                fields.put(fieldName, fieldValue);
+            }
+            
+            // 添加消息到 Stream
+            stream.addEntry(entryId, fields);
+        }
+        
+        // 读取消费者组信息
+        int groupsCount = readLength(dis);
+        if (groupsCount > 0) {
+            StreamConsumerGroupManager groupManager = new StreamConsumerGroupManager(key);
+            
+            for (int i = 0; i < groupsCount; i++) {
+                // 读取消费者组基本信息
+                String groupName = readString(dis);
+                StreamId lastDeliveredId = readStreamId(dis);
+                long createdAt = dis.readLong();
+                
+                // 创建消费者组
+                ConsumerGroup group = groupManager.createGroup(groupName, lastDeliveredId);
+                
+                // 读取消费者信息
+                int consumersCount = readLength(dis);
+                for (int j = 0; j < consumersCount; j++) {
+                    String consumerName = readString(dis);
+                    long seenTime = dis.readLong();
+                    int pendingCount = readLength(dis);
+                    
+                    // 创建消费者
+                    Consumer consumer = group.createConsumer(consumerName);
+                    // 恢复 seenTime（通过反射或 setter，这里简化处理）
+                    // 注意：Consumer 类没有提供设置 seenTime 的方法，这里跳过
+                }
+                
+                // 读取 PEL 信息
+                int pelCount = readLength(dis);
+                for (int j = 0; j < pelCount; j++) {
+                    StreamId messageId = readStreamId(dis);
+                    String consumerName = readString(dis);
+                    long deliveryTime = dis.readLong();
+                    int deliveryCount = dis.readInt();
+                    
+                    // 创建待处理消息
+                    PendingMessage pm = new PendingMessage(messageId, consumerName, deliveryTime);
+                    pm.setDeliveryCount(deliveryCount);
+                    
+                    // 添加到消费者组的 PEL
+                    group.addPendingMessage(messageId, consumerName);
+                    // 更新传递次数
+                    PendingMessage existingPm = group.getPendingMessage(messageId);
+                    if (existingPm != null) {
+                        existingPm.setDeliveryCount(deliveryCount);
+                        existingPm.setDeliveryTime(deliveryTime);
+                    }
+                }
+            }
+            
+            stream.setConsumerGroupManager(groupManager);
+        }
+        
+        // 将 Stream 存储到内存
+        memoryStore.set(db, key, stream);
+        
+        logger.info("Loaded stream from RDB: DB={}, Key={}, Entries={}, Groups={}", 
+                db, key, entriesCount, groupsCount);
+    }
+    
+    /**
+     * 读取 StreamId
+     *
+     * @param dis 数据输入流
+     * @return Stream ID
+     * @throws IOException 如果读取失败
+     */
+    private StreamId readStreamId(DataInputStream dis) throws IOException {
+        long ms = dis.readLong();
+        long seq = dis.readLong();
+        return new StreamId(ms, seq);
     }
     
     private void writeRdbFooter(DataOutputStream dos) throws IOException {

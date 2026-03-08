@@ -24,6 +24,9 @@ public final class RdsDataTypeConstant {
     /** 有序集合类型 */
     public static final String ZSET = "zset";
 
+    /** 流类型 */
+    public static final String STREAM = "stream";
+
     /** 无类型（键不存在） */
     public static final String NONE = "none";
 }

@@ -1,6 +1,11 @@
 package com.janeluo.luban.rds.server;
 
 import com.janeluo.luban.rds.core.handler.DefaultCommandHandler;
+import com.janeluo.luban.rds.core.stream.BlockingResult;
+import com.janeluo.luban.rds.core.stream.Stream;
+import com.janeluo.luban.rds.core.stream.StreamEntry;
+import com.janeluo.luban.rds.core.stream.StreamId;
+import com.janeluo.luban.rds.core.stream.Stream.StreamWaiter;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.protocol.RedisProtocolParser;
 import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
@@ -19,7 +24,9 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -64,7 +71,10 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 "EVAL","EVALSHA","SCRIPT","SCRIPT LOAD","SCRIPT EXISTS","SCRIPT FLUSH","SCRIPT KILL",
                 "MULTI","EXEC","DISCARD","WATCH","UNWATCH","QUIT",
                 "MEMORY", "MONITOR",
-                "SLOWLOG"
+                "SLOWLOG",
+                // Stream 命令
+                "XADD","XLEN","XRANGE","XREVRANGE","XDEL","XTRIM","XREAD","XINFO",
+                "XGROUP","XREADGROUP","XACK","XPENDING","XCLAIM","XAUTOCLAIM"
         };
         for (String n : names) KNOWN_COMMANDS.add(n);
     }
@@ -96,7 +106,10 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 "MULTI","EXEC","DISCARD","WATCH","UNWATCH","QUIT",
                 "INFO", "MONITOR",
                 "MEMORY", "MEMORY USAGE", "MEMORY STATS", "MEMORY PURGE", "MEMORY DOCTOR", "MEMORY MALLOC-STATS", "MEMORY HELP",
-                "HSCAN"
+                "HSCAN",
+                // Stream 命令
+                "XADD","XLEN","XRANGE","XREVRANGE","XDEL","XTRIM","XREAD","XINFO",
+                "XGROUP","XREADGROUP","XACK","XPENDING","XCLAIM","XAUTOCLAIM"
         };
         for (String n : names) KNOWN_COMMANDS.add(n);
         
@@ -477,7 +490,14 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 } catch (NumberFormatException e) {
                 }
             }
-ByteBuf responseBuffer = protocolParser.serialize(response);
+            
+            // 处理阻塞命令结果
+            if (response instanceof BlockingResult) {
+                handleBlockingResult(ctx, clientInfo, (BlockingResult) response);
+                return;
+            }
+            
+            ByteBuf responseBuffer = protocolParser.serialize(response);
             if (responseBuffer != null && responseBuffer.isReadable()) {
                 ctx.writeAndFlush(responseBuffer);
             } else if (responseBuffer != null) {
@@ -1002,6 +1022,21 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
         if ("ECHO".equals(n)) return argc >= 2;
         if ("SCAN".equals(n)) return argc >= 2;
         if ("MEMORY".equals(n)) return argc >= 2;
+        // Stream 命令参数验证
+        if ("XADD".equals(n)) return argc >= 4;      // XADD key ID field value [field value ...]
+        if ("XLEN".equals(n)) return argc >= 2;      // XLEN key
+        if ("XRANGE".equals(n)) return argc >= 4;    // XRANGE key start end [COUNT count]
+        if ("XREVRANGE".equals(n)) return argc >= 4; // XREVRANGE key end start [COUNT count]
+        if ("XDEL".equals(n)) return argc >= 3;      // XDEL key ID [ID ...]
+        if ("XTRIM".equals(n)) return argc >= 4;     // XTRIM key MAXLEN|MINID threshold
+        if ("XREAD".equals(n)) return argc >= 4;     // XREAD STREAMS key ID
+        if ("XINFO".equals(n)) return argc >= 3;     // XINFO STREAM key | XINFO GROUPS key | XINFO CONSUMERS key group
+        if ("XGROUP".equals(n)) return argc >= 4;    // XGROUP CREATE key group ID | XGROUP DESTROY key group
+        if ("XREADGROUP".equals(n)) return argc >= 6; // XREADGROUP GROUP group consumer STREAMS key ID
+        if ("XACK".equals(n)) return argc >= 4;      // XACK key group ID [ID ...]
+        if ("XPENDING".equals(n)) return argc >= 3;  // XPENDING key group
+        if ("XCLAIM".equals(n)) return argc >= 6;    // XCLAIM key group consumer min-idle-time ID [ID ...]
+        if ("XAUTOCLAIM".equals(n)) return argc >= 6; // XAUTOCLAIM key group consumer min-idle-time start
         return true;
     }
     
@@ -1410,6 +1445,276 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
         } else if (b != null) {
             b.release();
             ctx.close();
+        }
+    }
+    
+    // ==================== 阻塞命令处理 ====================
+    
+    /**
+     * 处理阻塞命令结果
+     * 
+     * <p>当 XREAD/XREADGROUP 返回 BlockingResult 时调用此方法。
+     * 该方法会阻塞当前线程，直到有新消息到达或超时。
+     */
+    private void handleBlockingResult(ChannelHandlerContext ctx, ClientInfo clientInfo, BlockingResult blockingResult) {
+        logger.debug("Handling blocking result: {}", blockingResult);
+        
+        // 获取所有要监听的流
+        List<String> keys = blockingResult.getKeys();
+        List<StreamId> startIds = blockingResult.getStartIds();
+        long timeout = blockingResult.getTimeout();
+        int count = blockingResult.getCount();
+        
+        // 创建等待者列表
+        List<StreamWaiterHolder> waiterHolders = new ArrayList<>();
+        
+        try {
+            // 为每个流创建等待者
+            for (int i = 0; i < keys.size(); i++) {
+                String key = keys.get(i);
+                StreamId startId = startIds.get(i);
+                
+                Stream stream = memoryStore.getStream(blockingResult.getDatabase(), key);
+                if (stream == null) {
+                    continue;
+                }
+                
+                // 创建 Condition 和等待者
+                stream.lockForWait();
+                try {
+                    StreamWaiter waiter = new StreamWaiter(startId, stream.newCondition());
+                    stream.addWaiter(waiter);
+                    waiterHolders.add(new StreamWaiterHolder(stream, waiter));
+                } finally {
+                    stream.unlockAfterWait();
+                }
+            }
+            
+            // 如果没有有效的流，直接返回空结果
+            if (waiterHolders.isEmpty()) {
+                sendBlockingTimeoutResponse(ctx, blockingResult);
+                return;
+            }
+            
+            // 计算超时时间
+            long deadline = timeout > 0 ? System.currentTimeMillis() + timeout : Long.MAX_VALUE;
+            
+            // 等待新消息
+            while (true) {
+                // 检查是否有新消息
+                Object result = checkForNewMessages(ctx, blockingResult);
+                if (result != null) {
+                    // 有新消息，返回结果
+                    ByteBuf responseBuffer = protocolParser.serialize(result);
+                    if (responseBuffer != null && responseBuffer.isReadable()) {
+                        ctx.writeAndFlush(responseBuffer);
+                    } else if (responseBuffer != null) {
+                        responseBuffer.release();
+                    }
+                    return;
+                }
+                
+                // 检查超时
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    // 超时，返回空结果
+                    sendBlockingTimeoutResponse(ctx, blockingResult);
+                    return;
+                }
+                
+                // 等待通知
+                boolean gotNotification = false;
+                for (StreamWaiterHolder holder : waiterHolders) {
+                    holder.stream.lockForWait();
+                    try {
+                        if (holder.waiter.isNotified()) {
+                            gotNotification = true;
+                            break;
+                        }
+                        // 等待一小段时间
+                        try {
+                            gotNotification = holder.waiter.getCondition().await(
+                                Math.min(remaining, 100), TimeUnit.MILLISECONDS);
+                            if (gotNotification) {
+                                break;
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            sendBlockingTimeoutResponse(ctx, blockingResult);
+                            return;
+                        }
+                    } finally {
+                        holder.stream.unlockAfterWait();
+                    }
+                    
+                    // 重新计算剩余时间
+                    remaining = deadline - System.currentTimeMillis();
+                    if (remaining <= 0) {
+                        sendBlockingTimeoutResponse(ctx, blockingResult);
+                        return;
+                    }
+                }
+                
+                // 如果收到通知，检查是否有新消息
+                if (gotNotification) {
+                    result = checkForNewMessages(ctx, blockingResult);
+                    if (result != null) {
+                        ByteBuf responseBuffer = protocolParser.serialize(result);
+                        if (responseBuffer != null && responseBuffer.isReadable()) {
+                            ctx.writeAndFlush(responseBuffer);
+                        } else if (responseBuffer != null) {
+                            responseBuffer.release();
+                        }
+                        return;
+                    }
+                }
+            }
+        } finally {
+            // 清理等待者
+            for (StreamWaiterHolder holder : waiterHolders) {
+                holder.stream.lockForWait();
+                try {
+                    holder.stream.removeWaiter(holder.waiter);
+                } finally {
+                    holder.stream.unlockAfterWait();
+                }
+            }
+        }
+    }
+    
+    /**
+     * 检查是否有新消息
+     *
+     * @return 如果有新消息返回响应字符串，否则返回 null
+     */
+    private Object checkForNewMessages(ChannelHandlerContext ctx, BlockingResult blockingResult) {
+        List<String> keys = blockingResult.getKeys();
+        List<StreamId> startIds = blockingResult.getStartIds();
+        int count = blockingResult.getCount();
+        
+        List<String> resultKeys = new ArrayList<>();
+        List<List<StreamEntry>> resultEntries = new ArrayList<>();
+        
+        for (int i = 0; i < keys.size(); i++) {
+            String key = keys.get(i);
+            StreamId startId = startIds.get(i);
+            
+            Stream stream = memoryStore.getStream(blockingResult.getDatabase(), key);
+            if (stream == null) {
+                continue;
+            }
+            
+            // 从指定 ID 之后读取消息
+            List<StreamEntry> entries;
+            if (count > 0) {
+                entries = stream.getRangeFrom(startId, true, count);
+            } else {
+                entries = stream.getRangeFrom(startId, true, Integer.MAX_VALUE);
+            }
+            
+            if (!entries.isEmpty()) {
+                resultKeys.add(key);
+                resultEntries.add(entries);
+            }
+        }
+        
+        if (!resultEntries.isEmpty()) {
+            return buildBlockingResponse(blockingResult, resultKeys, resultEntries);
+        }
+        
+        return null;
+    }
+    
+    /**
+     * 构建阻塞命令的响应
+     */
+    private String buildBlockingResponse(BlockingResult blockingResult, 
+                                         List<String> keys, 
+                                         List<List<StreamEntry>> entriesList) {
+        StringBuilder result = new StringBuilder();
+        result.append("*").append(keys.size()).append("\r\n");
+        
+        for (int i = 0; i < keys.size(); i++) {
+            String key = keys.get(i);
+            List<StreamEntry> entries = entriesList.get(i);
+            
+            // 每个流是一个包含 2 个元素的数组：[key, entries]
+            result.append("*2\r\n");
+            
+            // key
+            byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            result.append("$").append(keyBytes.length).append("\r\n").append(key).append("\r\n");
+            
+            // entries
+            result.append("*").append(entries.size()).append("\r\n");
+            for (StreamEntry entry : entries) {
+                result.append(encodeStreamEntry(entry));
+            }
+        }
+        
+        return result.toString();
+    }
+    
+    /**
+     * 编码 StreamEntry 为 RESP 格式
+     */
+    private String encodeStreamEntry(StreamEntry entry) {
+        StringBuilder sb = new StringBuilder();
+        
+        // 消息条目是一个包含 2 个元素的数组：[id, field-value pairs]
+        sb.append("*2\r\n");
+        
+        // 第一个元素：ID
+        String idStr = entry.getId().toString();
+        sb.append("$").append(idStr.length()).append("\r\n").append(idStr).append("\r\n");
+        
+        // 第二个元素：字段值对数组
+        java.util.LinkedHashMap<String, String> fields = entry.getFieldsInternal();
+        int fieldCount = fields.size() * 2;
+        sb.append("*").append(fieldCount).append("\r\n");
+        
+        for (Map.Entry<String, String> fieldEntry : fields.entrySet()) {
+            // 字段名
+            String fieldName = fieldEntry.getKey();
+            sb.append("$").append(fieldName.length()).append("\r\n")
+              .append(fieldName).append("\r\n");
+            
+            // 字段值
+            String fieldValue = fieldEntry.getValue();
+            if (fieldValue == null) {
+                sb.append("$-1\r\n");
+            } else {
+                sb.append("$").append(fieldValue.length()).append("\r\n")
+                  .append(fieldValue).append("\r\n");
+            }
+        }
+        
+        return sb.toString();
+    }
+    
+    /**
+     * 发送阻塞超时响应
+     */
+    private void sendBlockingTimeoutResponse(ChannelHandlerContext ctx, BlockingResult blockingResult) {
+        // 超时返回 Null Array（与 Redis 行为一致）
+        ByteBuf responseBuffer = protocolParser.serialize("*-1\r\n");
+        if (responseBuffer != null && responseBuffer.isReadable()) {
+            ctx.writeAndFlush(responseBuffer);
+        } else if (responseBuffer != null) {
+            responseBuffer.release();
+        }
+    }
+    
+    /**
+     * 等待者持有者（用于管理流和等待者的关联）
+     */
+    private static class StreamWaiterHolder {
+        final Stream stream;
+        final StreamWaiter waiter;
+        
+        StreamWaiterHolder(Stream stream, StreamWaiter waiter) {
+            this.stream = stream;
+            this.waiter = waiter;
         }
     }
     
