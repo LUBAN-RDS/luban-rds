@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -34,39 +35,123 @@ public class DefaultMemoryStore implements MemoryStore {
     // 估算每个键值对的基础内存开销（字节）
     private static final long BASE_ENTRY_OVERHEAD = 128;
     
+    // Java object overhead constants (approximate values for 64-bit JVM with compressed oops)
+    private static final int OBJECT_HEADER_SIZE = 12; // Object header
+    private static final int REFERENCE_SIZE = 4; // Reference (compressed oop)
+    private static final int ARRAY_HEADER_SIZE = 16; // Array header
+    private static final int STRING_OVERHEAD = 24; // String object overhead (header + hash + coder + value ref)
+    private static final int HASHMAP_ENTRY_OVERHEAD = 32; // HashMap Node overhead
+    private static final int HASHMAP_OVERHEAD = 48; // HashMap object overhead
+    private static final int ARRAYLIST_OVERHEAD = 24; // ArrayList object overhead
+    private static final int HASHSET_OVERHEAD = 48; // HashSet object overhead
+    private static final int CONCURRENTHASHMAP_OVERHEAD = 64; // ConcurrentHashMap overhead
+    
+    /**
+     * Optimized StoreValue with reduced memory footprint.
+     * Uses primitive types and byte index instead of String for type.
+     */
     private static class StoreValue {
         private final Object value;
-        private final String type;
-        private Long expireTime; // Milliseconds
-        private long lastAccessTime; // 最后访问时间，用于LRU
-        private long estimatedSize; // 估算的内存大小
+        private final byte typeIndex; // 0=string, 1=hash, 2=list, 3=set, 4=zset
+        private long expireTime; // 0 means no expiration, otherwise absolute timestamp in milliseconds
+        private long lastAccessTime; // Last access time for LRU
+        private int estimatedSize; // Estimated memory size (int is sufficient, single key unlikely > 2GB)
+        
+        // Type index constants
+        private static final byte TYPE_STRING = 0;
+        private static final byte TYPE_HASH = 1;
+        private static final byte TYPE_LIST = 2;
+        private static final byte TYPE_SET = 3;
+        private static final byte TYPE_ZSET = 4;
+        
+        // Special value for no expiration
+        private static final long NO_EXPIRE = 0L;
         
         public StoreValue(Object value, String type) {
             this.value = value;
-            this.type = type;
+            this.typeIndex = typeToIndex(type);
+            this.expireTime = NO_EXPIRE;
             this.lastAccessTime = System.currentTimeMillis();
-            this.estimatedSize = estimateSize(value);
+            this.estimatedSize = (int) estimateSize(value);
         }
         
         /**
-         * @param value 值
-         * @param type 类型
-         * @param expireTime 过期时间（毫秒），绝对时间戳
+         * Creates a StoreValue with expiration time.
+         *
+         * @param value the value to store
+         * @param type the type string
+         * @param expireTime absolute expiration timestamp in milliseconds
          */
         public StoreValue(Object value, String type, Long expireTime) {
             this.value = value;
-            this.type = type;
+            this.typeIndex = typeToIndex(type);
+            this.expireTime = expireTime != null ? expireTime : NO_EXPIRE;
+            this.lastAccessTime = System.currentTimeMillis();
+            this.estimatedSize = (int) estimateSize(value);
+        }
+        
+        /**
+         * Creates a StoreValue with byte type index and expiration time.
+         *
+         * @param value the value to store
+         * @param typeIndex the type index
+         * @param expireTime absolute expiration timestamp in milliseconds
+         */
+        public StoreValue(Object value, byte typeIndex, long expireTime) {
+            this.value = value;
+            this.typeIndex = typeIndex;
             this.expireTime = expireTime;
             this.lastAccessTime = System.currentTimeMillis();
-            this.estimatedSize = estimateSize(value);
+            this.estimatedSize = (int) estimateSize(value);
+        }
+        
+        private static byte typeToIndex(String type) {
+            if (type == null) {
+                return TYPE_STRING;
+            }
+            switch (type) {
+                case RdsDataTypeConstant.STRING:
+                    return TYPE_STRING;
+                case RdsDataTypeConstant.HASH:
+                    return TYPE_HASH;
+                case RdsDataTypeConstant.LIST:
+                    return TYPE_LIST;
+                case RdsDataTypeConstant.SET:
+                    return TYPE_SET;
+                case RdsDataTypeConstant.ZSET:
+                    return TYPE_ZSET;
+                default:
+                    return TYPE_STRING;
+            }
+        }
+        
+        private static String indexToType(byte index) {
+            switch (index) {
+                case TYPE_STRING:
+                    return RdsDataTypeConstant.STRING;
+                case TYPE_HASH:
+                    return RdsDataTypeConstant.HASH;
+                case TYPE_LIST:
+                    return RdsDataTypeConstant.LIST;
+                case TYPE_SET:
+                    return RdsDataTypeConstant.SET;
+                case TYPE_ZSET:
+                    return RdsDataTypeConstant.ZSET;
+                default:
+                    return RdsDataTypeConstant.STRING;
+            }
+        }
+        
+        public String getType() {
+            return indexToType(typeIndex);
         }
         
         public void updateEstimatedSize(long delta) {
-            this.estimatedSize += delta;
+            this.estimatedSize = (int) Math.max(0, this.estimatedSize + delta);
         }
         
         public boolean isExpired() {
-            return expireTime != null && System.currentTimeMillis() >= expireTime;
+            return expireTime != NO_EXPIRE && System.currentTimeMillis() >= expireTime;
         }
         
         public void updateAccessTime() {
@@ -78,11 +163,11 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         public boolean hasExpireTime() {
-            return expireTime != null;
+            return expireTime != NO_EXPIRE;
         }
         
         public Long getExpireTime() {
-            return expireTime;
+            return expireTime == NO_EXPIRE ? null : expireTime;
         }
         
         public long getEstimatedSize() {
@@ -90,7 +175,11 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         /**
-         * 估算值的内存大小
+         * Estimates the memory size of a value with Java object overhead.
+         * This provides a more accurate estimation of actual memory usage.
+         *
+         * @param value the value to estimate
+         * @return estimated memory size in bytes
          */
         private static long estimateSize(Object value) {
             if (value == null) {
@@ -100,40 +189,69 @@ public class DefaultMemoryStore implements MemoryStore {
             long size = BASE_ENTRY_OVERHEAD;
             
             if (value instanceof String) {
-                // 字符串：每个字符2字节（Java char）
-                size += ((String) value).length() * 2L;
+                String str = (String) value;
+                // String object: header (12) + hash (4) + coder (1) + value reference (4) + padding
+                // char array: header (16) + length * 2
+                size += STRING_OVERHEAD + (long) str.length() * 2L;
             } else if (value instanceof Map) {
-                // Map：估算每个条目的大小
                 Map<?, ?> map = (Map<?, ?>) value;
-                size += map.size() * 64L; // 每个条目估算64字节
+                // Map overhead + entries
+                size += HASHMAP_OVERHEAD + (long) map.size() * HASHMAP_ENTRY_OVERHEAD;
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
-                    if (entry.getKey() instanceof String) {
-                        size += ((String) entry.getKey()).length() * 2L;
-                    }
-                    if (entry.getValue() instanceof String) {
-                        size += ((String) entry.getValue()).length() * 2L;
+                    size += estimateEntrySize(entry.getKey(), entry.getValue());
+                }
+            } else if (value instanceof List) {
+                List<?> list = (List<?>) value;
+                // ArrayList overhead + element references
+                size += ARRAYLIST_OVERHEAD + (long) list.size() * REFERENCE_SIZE;
+                for (Object item : list) {
+                    if (item instanceof String) {
+                        size += STRING_OVERHEAD + ((String) item).length() * 2L;
                     }
                 }
-            } else if (value instanceof java.util.Collection) {
-                // 集合类型
-                java.util.Collection<?> collection = (java.util.Collection<?>) value;
-                size += collection.size() * 32L; // 每个元素估算32字节
-                for (Object item : collection) {
+            } else if (value instanceof java.util.Set) {
+                java.util.Set<?> set = (java.util.Set<?>) value;
+                // HashSet overhead + entries
+                size += HASHSET_OVERHEAD + (long) set.size() * HASHMAP_ENTRY_OVERHEAD;
+                for (Object item : set) {
                     if (item instanceof String) {
-                        size += ((String) item).length() * 2L;
+                        size += STRING_OVERHEAD + ((String) item).length() * 2L;
                     }
                 }
             } else if (value instanceof ZSetStore) {
                 ZSetStore zset = (ZSetStore) value;
-                size += zset.size() * 128L; // 每个元素估算128字节 (HashMap entry + SkipList entry)
+                // ZSetStore has two maps: memberScores and scoreMembers
+                // memberScores: ConcurrentHashMap<String, Double>
+                // scoreMembers: ConcurrentSkipListMap<Double, KeySetView>
+                size += CONCURRENTHASHMAP_OVERHEAD + (long) zset.size() * 64L;
+                // ScoreMembers overhead (ConcurrentSkipListMap + nested KeySetViews)
+                size += 96 + (long) zset.size() * 64L;
                 for (String member : zset.memberScores.keySet()) {
-                    size += member.length() * 2L;
+                    size += STRING_OVERHEAD + member.length() * 2L;
                 }
             } else {
-                // 其他类型，估算一个固定值
+                // Other types, estimate a fixed value
                 size += 64;
             }
             
+            return size;
+        }
+        
+        /**
+         * Estimates the memory size of a map entry.
+         *
+         * @param key the entry key
+         * @param value the entry value
+         * @return estimated memory size in bytes
+         */
+        private static long estimateEntrySize(Object key, Object value) {
+            long size = HASHMAP_ENTRY_OVERHEAD;
+            if (key instanceof String) {
+                size += STRING_OVERHEAD + ((String) key).length() * 2L;
+            }
+            if (value instanceof String) {
+                size += STRING_OVERHEAD + ((String) value).length() * 2L;
+            }
             return size;
         }
     }
@@ -145,9 +263,10 @@ public class DefaultMemoryStore implements MemoryStore {
         final ConcurrentHashMap<String, AtomicLong> keyVersions; // 键版本，用于WATCH
         
         public DatabaseStore() {
-            this.keySet = new ConcurrentHashMap<>();
-            this.keyVersions = new ConcurrentHashMap<>();
+            this.keySet = new ConcurrentHashMap<>(64); // 初始容量
+            this.keyVersions = new ConcurrentHashMap<>(64);
             this.storage = Caffeine.newBuilder()
+                    .initialCapacity(256) // 设置初始容量，减少扩容
                     .removalListener(new RemovalListener<String, StoreValue>() {
                         @Override
                         public void onRemoval(String key, StoreValue value, RemovalCause cause) {
@@ -411,6 +530,30 @@ public class DefaultMemoryStore implements MemoryStore {
                 
             default:
                 return false;
+        }
+    }
+    
+    /**
+     * Preallocates memory for batch operations.
+     * Call this before executing large batch operations to reduce frequent resizing.
+     *
+     * @param estimatedKeyCount estimated number of keys to be inserted
+     * @param estimatedValueSize estimated average value size per key
+     */
+    public void preallocateMemory(int estimatedKeyCount, long estimatedValueSize) {
+        long totalEstimated = estimatedKeyCount * (BASE_ENTRY_OVERHEAD + estimatedValueSize);
+        
+        // Check if eviction is needed
+        if (maxMemory > 0 && usedMemory.get() + totalEstimated > maxMemory * 0.9) {
+            // Trigger memory eviction
+            tryEvictMemory(totalEstimated);
+        }
+        
+        // Pre-expand ConcurrentHashMaps for each database
+        // Note: ConcurrentHashMap doesn't support direct pre-expansion, but we can 
+        // ensure the database stores are initialized
+        for (int i = 0; i < Math.min(maxDatabases, estimatedKeyCount / 100 + 1); i++) {
+            getOrCreateDatabaseStore(i);
         }
     }
     
@@ -992,7 +1135,7 @@ public class DefaultMemoryStore implements MemoryStore {
         // 更新过期时间
         long expireTime = System.currentTimeMillis() + milliseconds;
         logger.info("pexpire: key={} ms={} expireTime={}", key, milliseconds, expireTime);
-        StoreValue newStoreValue = new StoreValue(storeValue.value, storeValue.type, expireTime);
+        StoreValue newStoreValue = new StoreValue(storeValue.value, storeValue.getType(), expireTime);
         store.storage.put(key, newStoreValue);
         bumpKeyVersion(database, key);
         return true;
@@ -1041,13 +1184,14 @@ public class DefaultMemoryStore implements MemoryStore {
             return -2;
         }
         
-        if (storeValue.expireTime == null) {
+        if (!storeValue.hasExpireTime()) {
             RuntimeConfig.incKeyspaceHits();
             return -1;
         }
         
         RuntimeConfig.incKeyspaceHits();
-        long remaining = storeValue.expireTime - System.currentTimeMillis();
+        Long expireTime = storeValue.getExpireTime();
+        long remaining = expireTime - System.currentTimeMillis();
         return remaining > 0 ? remaining : -2;
     }
     
@@ -1077,7 +1221,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         RuntimeConfig.incKeyspaceHits();
-        return storeValue.type;
+        return storeValue.getType();
     }
     
     private String getType(Object value) {
@@ -2448,5 +2592,128 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         return storeValue.getEstimatedSize();
+    }
+    
+    // ==================== Memory Fragmentation & Defragmentation ====================
+    
+    /**
+     * Calculate memory fragmentation ratio
+     * Fragmentation ratio = (usedMemory - effectiveMemory) / usedMemory * 100
+     * 
+     * @return Memory fragmentation ratio (percentage)
+     */
+    @Override
+    public double getMemoryFragmentationRatio() {
+        long used = usedMemory.get();
+        if (used == 0) {
+            return 0.0;
+        }
+        
+        // Estimate effective memory: sum of all keys' actual sizes
+        long effectiveMemory = 0;
+        for (DatabaseStore store : databaseStores.values()) {
+            for (String key : store.keySet.keySet()) {
+                StoreValue value = store.storage.getIfPresent(key);
+                if (value != null && !value.isExpired()) {
+                    effectiveMemory += value.getEstimatedSize();
+                }
+            }
+        }
+        
+        // Fragmentation ratio = (estimated used memory - effective memory) / estimated used memory * 100
+        double fragmentation = ((double)(used - effectiveMemory) / used) * 100;
+        return Math.max(0, fragmentation);
+    }
+    
+    /**
+     * Execute memory defragmentation
+     * Cleans expired keys and compresses internal data structures
+     * 
+     * @return Amount of memory freed in bytes
+     */
+    @Override
+    public long defragment() {
+        long freedMemory = 0;
+        
+        // 1. Clean all expired keys
+        freedMemory += cleanExpiredKeys();
+        
+        // 2. Compress Caffeine Cache (via cleanUp)
+        for (DatabaseStore store : databaseStores.values()) {
+            store.storage.cleanUp();
+        }
+        
+        // 3. Suggest JVM to perform garbage collection
+        System.gc();
+        
+        logger.info("Memory defragmentation completed, freed {} bytes", freedMemory);
+        return freedMemory;
+    }
+    
+    /**
+     * Clean all expired keys from all databases
+     * 
+     * @return Amount of memory freed in bytes
+     */
+    private long cleanExpiredKeys() {
+        long freed = 0;
+        for (Map.Entry<Integer, DatabaseStore> entry : databaseStores.entrySet()) {
+            DatabaseStore store = entry.getValue();
+            List<String> keysToRemove = new ArrayList<>();
+            
+            for (String key : store.keySet.keySet()) {
+                StoreValue value = store.storage.getIfPresent(key);
+                if (value != null && value.isExpired()) {
+                    keysToRemove.add(key);
+                }
+            }
+            
+            for (String key : keysToRemove) {
+                StoreValue value = store.storage.getIfPresent(key);
+                if (value != null) {
+                    freed += value.getEstimatedSize();
+                    store.storage.invalidate(key);
+                    store.keySet.remove(key);
+                }
+            }
+        }
+        
+        if (freed > 0) {
+            updateMemory(-freed);
+        }
+        return freed;
+    }
+    
+    /**
+     * Get memory statistics
+     * 
+     * @return MemoryStats object containing memory usage information
+     */
+    @Override
+    public MemoryStats getMemoryStats() {
+        int totalKeys = 0;
+        int expiredKeys = 0;
+        
+        for (DatabaseStore store : databaseStores.values()) {
+            for (String key : store.keySet.keySet()) {
+                StoreValue value = store.storage.getIfPresent(key);
+                if (value != null) {
+                    if (value.isExpired()) {
+                        expiredKeys++;
+                    } else {
+                        totalKeys++;
+                    }
+                }
+            }
+        }
+        
+        return new MemoryStats(
+            usedMemory.get(),
+            peakUsedMemory.get(),
+            maxMemory,
+            getMemoryFragmentationRatio(),
+            totalKeys,
+            expiredKeys
+        );
     }
 }

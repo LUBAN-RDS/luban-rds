@@ -464,4 +464,73 @@ public interface MemoryStore {
      * 获取历史峰值内存使用量（字节）
      */
     long getPeakUsedMemory();
+    
+    /**
+     * 计算内存碎片率
+     * Fragmentation ratio = (usedMemory - effectiveMemory) / usedMemory * 100
+     * 
+     * @return Memory fragmentation ratio (percentage)
+     */
+    double getMemoryFragmentationRatio();
+    
+    /**
+     * Execute memory defragmentation
+     * Cleans expired keys and compresses internal data structures
+     * 
+     * @return Amount of memory freed in bytes
+     */
+    long defragment();
+    
+    /**
+     * Get memory statistics
+     * 
+     * @return MemoryStats object containing memory usage information
+     */
+    MemoryStats getMemoryStats();
+    
+    /**
+     * Memory statistics information class
+     */
+    class MemoryStats {
+        private final long usedMemory;
+        private final long peakMemory;
+        private final long maxMemory;
+        private final double fragmentationRatio;
+        private final int totalKeys;
+        private final int expiredKeys;
+        
+        public MemoryStats(long usedMemory, long peakMemory, long maxMemory, 
+                          double fragmentationRatio, int totalKeys, int expiredKeys) {
+            this.usedMemory = usedMemory;
+            this.peakMemory = peakMemory;
+            this.maxMemory = maxMemory;
+            this.fragmentationRatio = fragmentationRatio;
+            this.totalKeys = totalKeys;
+            this.expiredKeys = expiredKeys;
+        }
+        
+        public long getUsedMemory() {
+            return usedMemory;
+        }
+        
+        public long getPeakMemory() {
+            return peakMemory;
+        }
+        
+        public long getMaxMemory() {
+            return maxMemory;
+        }
+        
+        public double getFragmentationRatio() {
+            return fragmentationRatio;
+        }
+        
+        public int getTotalKeys() {
+            return totalKeys;
+        }
+        
+        public int getExpiredKeys() {
+            return expiredKeys;
+        }
+    }
 }

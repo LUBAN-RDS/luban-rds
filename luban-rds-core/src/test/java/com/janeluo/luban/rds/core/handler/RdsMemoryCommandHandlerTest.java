@@ -60,7 +60,7 @@ public class RdsMemoryCommandHandlerTest {
     @Test
     public void testMemoryPurge() {
         Object result = handler.handle(db, new String[]{"MEMORY", "PURGE"}, store);
-        assertEquals("OK", result);
+        assertEquals(":1\r\n", result);
     }
     
     @Test

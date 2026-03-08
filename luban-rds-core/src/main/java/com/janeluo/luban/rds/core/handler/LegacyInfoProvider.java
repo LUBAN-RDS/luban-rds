@@ -98,18 +98,23 @@ public class LegacyInfoProvider implements InfoProvider {
         Map<String, Object> info = new HashMap<>();
         long used = 0;
         long maxMem = 0;
+        long peak = 0;
+        double fragmentationRatio = 0.0;
         if (store instanceof DefaultMemoryStore) {
             DefaultMemoryStore ds = (DefaultMemoryStore) store;
             used = ds.getUsedMemory();
             maxMem = ds.getMaxMemory();
+            peak = ds.getPeakUsedMemory();
+            fragmentationRatio = ds.getMemoryFragmentationRatio();
         }
         info.put("used_memory", used);
         info.put("used_memory_human", toHumanReadable(used));
         info.put("used_memory_rss", 0);
         info.put("used_memory_rss_human", "0B");
-        info.put("used_memory_peak", 0);
-        info.put("used_memory_peak_human", "0B");
-        info.put("used_memory_peak_perc", "0.00%");
+        info.put("used_memory_peak", peak);
+        info.put("used_memory_peak_human", toHumanReadable(peak));
+        double peakPerc = peak > 0 ? (used * 100.0 / peak) : 0.0;
+        info.put("used_memory_peak_perc", String.format("%.2f%%", peakPerc));
         info.put("used_memory_overhead", 0);
         info.put("used_memory_startup", 0);
         info.put("used_memory_dataset", 0);
@@ -146,7 +151,7 @@ public class LegacyInfoProvider implements InfoProvider {
         info.put("allocator_rss_bytes", 0);
         info.put("rss_overhead_ratio", 0.00);
         info.put("rss_overhead_bytes", 0);
-        info.put("mem_fragmentation_ratio", 0.00);
+        info.put("mem_fragmentation_ratio", String.format("%.2f", fragmentationRatio));
         info.put("mem_fragmentation_bytes", 0);
         info.put("mem_not_counted_for_evict", 0);
         info.put("mem_replication_backlog", 0);

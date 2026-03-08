@@ -124,11 +124,47 @@ public class RdsConfig {
     private long slowlogMaxLen = 128;
     
     // ==================== Monitor 配置 ====================
-    
+
     /**
      * 监控最大客户端连接数，默认 100
      */
     private int monitorMaxClients = 100;
+
+    // ==================== 内存池配置 ====================
+
+    /**
+     * 是否使用池化 ByteBuf，默认 true
+     * 池化内存可以减少内存分配和 GC 压力
+     */
+    private boolean usePool = true;
+
+    /**
+     * 内存泄漏检测级别：disabled, simple, advanced, paranoid
+     * 默认 simple，生产环境建议 disabled 或 simple
+     */
+    private String leakDetection = "simple";
+
+    /**
+     * 内存碎片率阈值（百分比），超过此值自动触发碎片整理
+     */
+    private int memoryFragThreshold = 30;
+
+    // ==================== 线程池配置 ====================
+
+    /**
+     * I/O 线程数，0 表示自动检测（CPU 核心数 * 2）
+     */
+    private int ioThreads = 0;
+
+    /**
+     * Worker 线程数，0 表示自动检测（CPU 核心数 * 2）
+     */
+    private int workerThreads = 0;
+
+    /**
+     * 业务线程数，0 表示自动检测（CPU 核心数）
+     */
+    private int businessThreads = 0;
 
     // ==================== Getter 和 Setter ====================
 
@@ -306,6 +342,54 @@ public class RdsConfig {
 
     public void setMonitorMaxClients(int monitorMaxClients) {
         this.monitorMaxClients = monitorMaxClients;
+    }
+
+    public int getIoThreads() {
+        return ioThreads;
+    }
+
+    public void setIoThreads(int ioThreads) {
+        this.ioThreads = ioThreads;
+    }
+
+    public int getWorkerThreads() {
+        return workerThreads;
+    }
+
+    public void setWorkerThreads(int workerThreads) {
+        this.workerThreads = workerThreads;
+    }
+
+    public int getBusinessThreads() {
+        return businessThreads;
+    }
+
+    public void setBusinessThreads(int businessThreads) {
+        this.businessThreads = businessThreads;
+    }
+
+    public boolean isUsePool() {
+        return usePool;
+    }
+
+    public void setUsePool(boolean usePool) {
+        this.usePool = usePool;
+    }
+
+    public String getLeakDetection() {
+        return leakDetection;
+    }
+
+    public void setLeakDetection(String leakDetection) {
+        this.leakDetection = leakDetection;
+    }
+
+    public int getMemoryFragThreshold() {
+        return memoryFragThreshold;
+    }
+
+    public void setMemoryFragThreshold(int memoryFragThreshold) {
+        this.memoryFragThreshold = memoryFragThreshold;
     }
 
     @Override

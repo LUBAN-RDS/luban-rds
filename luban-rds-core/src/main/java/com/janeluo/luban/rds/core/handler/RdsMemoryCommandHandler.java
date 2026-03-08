@@ -54,7 +54,7 @@ public class RdsMemoryCommandHandler implements CommandHandler {
                 case "STATS":
                     return handleStats(database, store);
                 case "PURGE":
-                    return handlePurge();
+                    return handlePurge(store);
                 case "MALLOC-STATS":
                     return handleMallocStats();
                 case "DOCTOR":
@@ -104,8 +104,9 @@ public class RdsMemoryCommandHandler implements CommandHandler {
         
         long peakAllocated = store.getPeakUsedMemory();
         long usedMemory = store.getUsedMemory();
+        double fragmentationRatio = store.getMemoryFragmentationRatio();
         
-        // JVM 内存信息
+        // JVM memory info
         MemoryMXBean memoryMXBean = ManagementFactory.getMemoryMXBean();
         MemoryUsage heapUsage = memoryMXBean.getHeapMemoryUsage();
         MemoryUsage nonHeapUsage = memoryMXBean.getNonHeapMemoryUsage();
@@ -120,9 +121,9 @@ public class RdsMemoryCommandHandler implements CommandHandler {
         stats.add("total.allocated");
         stats.add(totalAllocated);
         
-        // 3. startup.allocated (估算)
+        // 3. startup.allocated (estimated)
         stats.add("startup.allocated");
-        stats.add(1024 * 1024L); // 假设 1MB
+        stats.add(1024 * 1024L); // Assume 1MB
         
         // 4. replication.backlog
         stats.add("replication.backlog");
@@ -159,7 +160,7 @@ public class RdsMemoryCommandHandler implements CommandHandler {
         stats.add("lua.caches");
         stats.add(0L);
         
-        // 9. overhead.total (使用 usedMemory - dataset 估算，这里简化为 10% usedMemory)
+        // 9. overhead.total (use usedMemory - dataset estimate, simplified as 10% usedMemory)
         long overhead = (long) (usedMemory * 0.1);
         stats.add("overhead.total");
         stats.add(overhead);
@@ -191,12 +192,17 @@ public class RdsMemoryCommandHandler implements CommandHandler {
         stats.add("rss-overhead-ratio");
         stats.add("1.0");
         
+        // 14. fragmentation.ratio (from MemoryStore)
+        stats.add("fragmentation.ratio");
+        stats.add(String.format("%.2f", fragmentationRatio));
+        
         return stats;
     }
 
-    private Object handlePurge() {
-        System.gc();
-        return "OK";
+    private Object handlePurge(MemoryStore store) {
+        // Execute memory defragmentation
+        long freed = store.defragment();
+        return ":1\r\n"; // Return success
     }
 
     private Object handleMallocStats() {

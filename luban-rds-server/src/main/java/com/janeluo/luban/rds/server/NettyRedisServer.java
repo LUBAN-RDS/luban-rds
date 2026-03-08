@@ -10,11 +10,17 @@ import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.persistence.PersistServiceFactory;
 import com.janeluo.luban.rds.protocol.RedisProtocolParser;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.util.concurrent.DefaultEventExecutorGroup;
+import io.netty.util.concurrent.EventExecutorGroup;
+import io.netty.util.ResourceLeakDetector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,6 +60,7 @@ public class NettyRedisServer implements RedisServer {
     
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
+    private EventExecutorGroup businessGroup;
     private ChannelFuture channelFuture;
     private boolean running;
     
@@ -165,26 +172,61 @@ public class NettyRedisServer implements RedisServer {
             return;
         }
         
+        // Configure memory leak detection level
+        configureLeakDetection();
+        
+        // Calculate thread pool sizes based on configuration
+        int availableProcessors = Runtime.getRuntime().availableProcessors();
+        int ioThreads = config.getIoThreads() > 0 
+                ? config.getIoThreads() 
+                : Math.max(1, availableProcessors);
+        int workerThreads = config.getWorkerThreads() > 0 
+                ? config.getWorkerThreads() 
+                : Math.max(1, availableProcessors * 2);
+        int businessThreads = config.getBusinessThreads() > 0 
+                ? config.getBusinessThreads() 
+                : Math.max(1, availableProcessors);
+        
+        logger.info("Thread pool configuration: ioThreads={}, workerThreads={}, businessThreads={}", 
+                ioThreads, workerThreads, businessThreads);
+        
+        // Boss group: accepts incoming connections (usually 1 thread is enough)
         bossGroup = new NioEventLoopGroup(1);
-        workerGroup = new NioEventLoopGroup();
+        // Worker group: handles I/O read/write operations
+        workerGroup = new NioEventLoopGroup(workerThreads);
+        // Business group: handles business logic (command processing)
+        businessGroup = new DefaultEventExecutorGroup(businessThreads);
         
         try {
-            // 初始化全局服务器上下文
+            // Initialize global server context
             ServerContext.setInfoProvider(new LubanInfoProvider(this));
+            
+            // Configure ByteBuf allocator based on config
+            ByteBufAllocator allocator = config.isUsePool() 
+                    ? PooledByteBufAllocator.DEFAULT 
+                    : UnpooledByteBufAllocator.DEFAULT;
+            
+            logger.info("Using {} ByteBuf allocator", config.isUsePool() ? "pooled" : "unpooled");
             
             ServerBootstrap b = new ServerBootstrap();
             b.group(bossGroup, workerGroup)
              .channel(NioServerSocketChannel.class)
-             // 使用配置的 tcp-backlog
+             // Configure memory pool allocator
+             .option(ChannelOption.ALLOCATOR, allocator)
+             // Use configured tcp-backlog
              .option(ChannelOption.SO_BACKLOG, config.getTcpBacklog())
-             // 使用配置的 tcp-keepalive
+             // Configure child channel allocator
+             .childOption(ChannelOption.ALLOCATOR, allocator)
+             // Use configured tcp-keepalive
              .childOption(ChannelOption.SO_KEEPALIVE, config.getTcpKeepalive() > 0)
              .childHandler(new ChannelInitializer<SocketChannel>() {
                  @Override
                  public void initChannel(SocketChannel ch) throws Exception {
                      ChannelPipeline pipeline = ch.pipeline();
-                     // 传入 timeout 配置
-                     pipeline.addLast(new RedisServerHandler(memoryStore, commandHandler, protocolParser, config.getTimeout()));
+                     // Pass timeout config
+                     // Use businessGroup for command processing to avoid blocking I/O threads
+                     pipeline.addLast(businessGroup, "handler", 
+                             new RedisServerHandler(memoryStore, commandHandler, protocolParser, config.getTimeout()));
                  }
              });
             
@@ -192,10 +234,10 @@ public class NettyRedisServer implements RedisServer {
             running = true;
             logger.info("LbRDS server started on port {}", port);
             
-            // 启动定期持久化任务
+            // Start periodic persistence task
             startPeriodicPersistTask();
             
-            // 等待服务器关闭
+            // Wait for server to close
             channelFuture.channel().closeFuture().addListener(future -> {
                 running = false;
                 logger.info("LbRDS server stopped");
@@ -204,6 +246,38 @@ public class NettyRedisServer implements RedisServer {
             logger.error("Failed to start LbRDS server", e);
             stop();
         }
+    }
+    
+    /**
+     * Configure memory leak detection level based on config
+     */
+    private void configureLeakDetection() {
+        String level = config.getLeakDetection();
+        if (level == null || level.isEmpty()) {
+            level = "simple";
+        }
+        
+        ResourceLeakDetector.Level leakLevel;
+        switch (level.toLowerCase()) {
+            case "disabled":
+                leakLevel = ResourceLeakDetector.Level.DISABLED;
+                break;
+            case "simple":
+                leakLevel = ResourceLeakDetector.Level.SIMPLE;
+                break;
+            case "advanced":
+                leakLevel = ResourceLeakDetector.Level.ADVANCED;
+                break;
+            case "paranoid":
+                leakLevel = ResourceLeakDetector.Level.PARANOID;
+                break;
+            default:
+                leakLevel = ResourceLeakDetector.Level.SIMPLE;
+                logger.warn("Unknown leak detection level '{}', using 'simple'", level);
+        }
+        
+        ResourceLeakDetector.setLevel(leakLevel);
+        logger.info("Memory leak detection level set to: {}", leakLevel);
     }
     
     @Override
@@ -232,6 +306,9 @@ public class NettyRedisServer implements RedisServer {
         } catch (Exception e) {
             logger.error("Error stopping LbRDS server", e);
         } finally {
+            if (businessGroup != null) {
+                businessGroup.shutdownGracefully();
+            }
             if (workerGroup != null) {
                 workerGroup.shutdownGracefully();
             }

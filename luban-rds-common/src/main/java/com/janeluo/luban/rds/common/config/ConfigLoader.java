@@ -211,6 +211,30 @@ public class ConfigLoader {
                         config.setSlowlogMaxLen(Long.parseLong(value));
                         break;
 
+                    // Monitor 配置
+                    case "monitor-max-clients":
+                        config.setMonitorMaxClients(Integer.parseInt(value));
+                        break;
+
+                    // 多线程配置
+                    case "io-threads":
+                        config.setIoThreads(Integer.parseInt(value));
+                        break;
+                    case "worker-threads":
+                        config.setWorkerThreads(Integer.parseInt(value));
+                        break;
+                    case "business-threads":
+                        config.setBusinessThreads(Integer.parseInt(value));
+                        break;
+
+                    // 内存优化配置
+                    case "use-pool":
+                        config.setUsePool("yes".equalsIgnoreCase(value));
+                        break;
+                    case "memory-frag-threshold":
+                        config.setMemoryFragThreshold(Integer.parseInt(value));
+                        break;
+
                     default:
                         logger.debug("未知配置项: {} = {}", key, value);
                         break;

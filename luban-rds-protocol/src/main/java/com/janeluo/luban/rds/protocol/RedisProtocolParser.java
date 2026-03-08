@@ -1,7 +1,9 @@
 package com.janeluo.luban.rds.protocol;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
+import io.netty.buffer.UnpooledByteBufAllocator;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -432,18 +434,29 @@ public class RedisProtocolParser {
     }
 
     /**
-     * 序列化响应对象为 RESP 格式
+     * Serialize response object to RESP format
      *
-     * @param response 响应对象
-     * @return 序列化后的 ByteBuf
+     * @param response Response object
+     * @return Serialized ByteBuf
      */
     public ByteBuf serialize(Object response) {
+        return serialize(response, UnpooledByteBufAllocator.DEFAULT);
+    }
+
+    /**
+     * Serialize response object to RESP format using specified allocator
+     *
+     * @param response Response object
+     * @param allocator ByteBuf allocator to use
+     * @return Serialized ByteBuf
+     */
+    public ByteBuf serialize(Object response, ByteBufAllocator allocator) {
         if (response == null) {
-            return serializeNull();
+            return serializeNull(allocator);
         }
 
         if (response instanceof byte[]) {
-            return serializeBulkString((byte[]) response);
+            return serializeBulkString((byte[]) response, allocator);
         }
 
         if (response instanceof String) {
@@ -451,54 +464,54 @@ public class RedisProtocolParser {
             if (str.startsWith("+") || str.startsWith("-") || str.startsWith(":") || str.startsWith("*")
                     || str.startsWith("%") || str.startsWith("~") || str.startsWith("|") || str.startsWith("_")
                     || str.startsWith(",") || str.startsWith("#") || str.startsWith("(")) {
-                ByteBuf buffer = Unpooled.directBuffer(str.length());
+                ByteBuf buffer = allocator.directBuffer(str.length());
                 buffer.writeBytes(str.getBytes(StandardCharsets.UTF_8));
                 return buffer;
             }
             if (str.startsWith("$")) {
-                ByteBuf buffer = Unpooled.directBuffer(str.length());
+                ByteBuf buffer = allocator.directBuffer(str.length());
                 buffer.writeBytes(str.getBytes(StandardCharsets.ISO_8859_1));
                 return buffer;
             }
             if (str.startsWith("ERR")) {
-                return serializeError(str);
+                return serializeError(str, allocator);
             }
-            return serializeBulkString(str);
+            return serializeBulkString(str, allocator);
         }
 
         if (response instanceof Long || response instanceof Integer) {
-            return serializeInteger(((Number) response).longValue());
+            return serializeInteger(((Number) response).longValue(), allocator);
         }
 
         if (response instanceof Double) {
-            return serializeDouble((Double) response);
+            return serializeDouble((Double) response, allocator);
         }
 
         if (response instanceof Boolean) {
-            return serializeBoolean((Boolean) response);
+            return serializeBoolean((Boolean) response, allocator);
         }
 
         if (response instanceof List) {
-            return serializeArray((List<?>) response);
+            return serializeArray((List<?>) response, allocator);
         }
 
         if (response instanceof Map) {
-            return serializeMap((Map<?, ?>) response);
+            return serializeMap((Map<?, ?>) response, allocator);
         }
 
         if (response instanceof Set) {
-            return serializeSet((Set<?>) response);
+            return serializeSet((Set<?>) response, allocator);
         }
 
-        return serializeBulkString(response.toString());
+        return serializeBulkString(response.toString(), allocator);
     }
 
     /**
-     * 序列化简单字符串，使用 UTF-8 编码
+     * Serialize simple string using UTF-8 encoding
      */
-    private ByteBuf serializeSimpleString(String value) {
+    private ByteBuf serializeSimpleString(String value, ByteBufAllocator allocator) {
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
+        ByteBuf buffer = allocator.directBuffer(1 + bytes.length + 2);
         buffer.writeByte('+');
         buffer.writeBytes(bytes);
         buffer.writeBytes(CRLF);
@@ -506,11 +519,11 @@ public class RedisProtocolParser {
     }
 
     /**
-     * 序列化错误消息，使用 UTF-8 编码
+     * Serialize error message using UTF-8 encoding
      */
-    private ByteBuf serializeError(String error) {
+    private ByteBuf serializeError(String error, ByteBufAllocator allocator) {
         byte[] bytes = error.getBytes(StandardCharsets.UTF_8);
-        ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
+        ByteBuf buffer = allocator.directBuffer(1 + bytes.length + 2);
         buffer.writeByte('-');
         buffer.writeBytes(bytes);
         buffer.writeBytes(CRLF);
@@ -518,17 +531,17 @@ public class RedisProtocolParser {
     }
 
     /**
-     * 序列化整数
+     * Serialize integer
      */
-    private ByteBuf serializeInteger(long value) {
+    private ByteBuf serializeInteger(long value, ByteBufAllocator allocator) {
         if (value >= 0 && value < INT_CACHE.length) {
-            ByteBuf buffer = Unpooled.directBuffer(INT_CACHE[(int) value].length);
+            ByteBuf buffer = allocator.directBuffer(INT_CACHE[(int) value].length);
             buffer.writeBytes(INT_CACHE[(int) value]);
             return buffer;
         }
 
         byte[] bytes = longToBytes(value);
-        ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
+        ByteBuf buffer = allocator.directBuffer(1 + bytes.length + 2);
         buffer.writeByte(':');
         buffer.writeBytes(bytes);
         buffer.writeBytes(CRLF);
@@ -536,19 +549,20 @@ public class RedisProtocolParser {
     }
 
     /**
-     * 序列化批量字符串（二进制安全）
-     * 直接写入原始字节，不做任何编码转换
+     * Serialize bulk string (binary safe)
+     * Directly writes raw bytes without any encoding conversion
      *
-     * @param value 字节数组
-     * @return 序列化后的 ByteBuf
+     * @param value Byte array
+     * @param allocator ByteBuf allocator to use
+     * @return Serialized ByteBuf
      */
-    public ByteBuf serializeBulkString(byte[] value) {
+    public ByteBuf serializeBulkString(byte[] value, ByteBufAllocator allocator) {
         if (value == null) {
-            return Unpooled.directBuffer(5).writeBytes("$-1\r\n".getBytes(StandardCharsets.UTF_8));
+            return allocator.directBuffer(5).writeBytes("$-1\r\n".getBytes(StandardCharsets.UTF_8));
         }
 
         byte[] lengthBytes = longToBytes(value.length);
-        ByteBuf buffer = Unpooled.directBuffer(1 + lengthBytes.length + 2 + value.length + 2);
+        ByteBuf buffer = allocator.directBuffer(1 + lengthBytes.length + 2 + value.length + 2);
         buffer.writeByte('$');
         buffer.writeBytes(lengthBytes);
         buffer.writeBytes(CRLF);
@@ -558,37 +572,38 @@ public class RedisProtocolParser {
     }
 
     /**
-     * 序列化字符串为批量字符串
-     * 使用 ISO-8859-1 编码确保二进制安全
-     * ISO-8859-1 是单字节编码，可以无损地将字符串转换回原始字节
+     * Serialize string as bulk string
+     * Uses ISO-8859-1 encoding to ensure binary safety
+     * ISO-8859-1 is a single-byte encoding that can losslessly convert strings back to original bytes
      *
-     * @param value 字符串值
-     * @return 序列化后的 ByteBuf
+     * @param value String value
+     * @param allocator ByteBuf allocator to use
+     * @return Serialized ByteBuf
      */
-    public ByteBuf serializeBulkString(String value) {
+    public ByteBuf serializeBulkString(String value, ByteBufAllocator allocator) {
         if (value == null) {
-            return Unpooled.directBuffer(5).writeBytes("$-1\r\n".getBytes(StandardCharsets.UTF_8));
+            return allocator.directBuffer(5).writeBytes("$-1\r\n".getBytes(StandardCharsets.UTF_8));
         }
-        return serializeBulkString(value.getBytes(StandardCharsets.ISO_8859_1));
+        return serializeBulkString(value.getBytes(StandardCharsets.ISO_8859_1), allocator);
     }
 
     /**
-     * 序列化数组
+     * Serialize array
      */
-    private ByteBuf serializeArray(List<?> values) {
+    private ByteBuf serializeArray(List<?> values, ByteBufAllocator allocator) {
         if (values == null) {
-            return Unpooled.directBuffer(5).writeBytes("*-1\r\n".getBytes(StandardCharsets.UTF_8));
+            return allocator.directBuffer(5).writeBytes("*-1\r\n".getBytes(StandardCharsets.UTF_8));
         }
 
         byte[] lengthBytes = longToBytes(values.size());
         int estimatedSize = 1 + lengthBytes.length + 2 + values.size() * 16;
-        ByteBuf buffer = Unpooled.directBuffer(estimatedSize);
+        ByteBuf buffer = allocator.directBuffer(estimatedSize);
         buffer.writeByte('*');
         buffer.writeBytes(lengthBytes);
         buffer.writeBytes(CRLF);
 
         for (Object value : values) {
-            ByteBuf itemBuffer = serializeArrayItem(value);
+            ByteBuf itemBuffer = serializeArrayItem(value, allocator);
             buffer.writeBytes(itemBuffer);
             itemBuffer.release();
         }
@@ -597,15 +612,15 @@ public class RedisProtocolParser {
     }
 
     /**
-     * 序列化数组元素
+     * Serialize array item
      */
-    private ByteBuf serializeArrayItem(Object value) {
+    private ByteBuf serializeArrayItem(Object value, ByteBufAllocator allocator) {
         if (value == null) {
-            return Unpooled.directBuffer(5).writeBytes("$-1\r\n".getBytes(StandardCharsets.UTF_8));
+            return allocator.directBuffer(5).writeBytes("$-1\r\n".getBytes(StandardCharsets.UTF_8));
         }
 
         if (value instanceof byte[]) {
-            return serializeBulkString((byte[]) value);
+            return serializeBulkString((byte[]) value, allocator);
         }
 
         if (value instanceof String) {
@@ -614,62 +629,62 @@ public class RedisProtocolParser {
                 try {
                     String numStr = str.substring(1).trim();
                     long num = Long.parseLong(numStr);
-                    return serializeInteger(num);
+                    return serializeInteger(num, allocator);
                 } catch (NumberFormatException e) {
-                    ByteBuf buffer = Unpooled.directBuffer(str.length());
+                    ByteBuf buffer = allocator.directBuffer(str.length());
                     buffer.writeBytes(str.getBytes(StandardCharsets.UTF_8));
                     return buffer;
                 }
             } else if (str.startsWith("+") || str.startsWith("-") || str.startsWith("*")
                     || str.startsWith("%") || str.startsWith("~") || str.startsWith("|") || str.startsWith("_")
                     || str.startsWith(",") || str.startsWith("#") || str.startsWith("(")) {
-                ByteBuf buffer = Unpooled.directBuffer(str.length());
+                ByteBuf buffer = allocator.directBuffer(str.length());
                 buffer.writeBytes(str.getBytes(StandardCharsets.UTF_8));
                 return buffer;
             }
             if (str.startsWith("$")) {
-                ByteBuf buffer = Unpooled.directBuffer(str.length());
+                ByteBuf buffer = allocator.directBuffer(str.length());
                 buffer.writeBytes(str.getBytes(StandardCharsets.ISO_8859_1));
                 return buffer;
             }
-            return serializeBulkString(str);
+            return serializeBulkString(str, allocator);
         }
 
         if (value instanceof Long || value instanceof Integer) {
-            return serializeInteger(((Number) value).longValue());
+            return serializeInteger(((Number) value).longValue(), allocator);
         }
 
-        return serializeBulkString(value.toString());
+        return serializeBulkString(value.toString(), allocator);
     }
 
     /**
-     * 序列化空值
+     * Serialize null value
      */
-    private ByteBuf serializeNull() {
-        return Unpooled.directBuffer(3).writeBytes("_\r\n".getBytes(StandardCharsets.UTF_8));
+    private ByteBuf serializeNull(ByteBufAllocator allocator) {
+        return allocator.directBuffer(3).writeBytes("_\r\n".getBytes(StandardCharsets.UTF_8));
     }
 
     /**
-     * 序列化 RESP3 Map 类型
+     * Serialize RESP3 Map type
      */
-    private ByteBuf serializeMap(Map<?, ?> map) {
+    private ByteBuf serializeMap(Map<?, ?> map, ByteBufAllocator allocator) {
         if (map == null) {
-            return Unpooled.directBuffer(5).writeBytes("%-1\r\n".getBytes(StandardCharsets.UTF_8));
+            return allocator.directBuffer(5).writeBytes("%-1\r\n".getBytes(StandardCharsets.UTF_8));
         }
 
         byte[] lengthBytes = longToBytes(map.size());
         int estimatedSize = 1 + lengthBytes.length + 2 + map.size() * 32;
-        ByteBuf buffer = Unpooled.directBuffer(estimatedSize);
+        ByteBuf buffer = allocator.directBuffer(estimatedSize);
         buffer.writeByte('%');
         buffer.writeBytes(lengthBytes);
         buffer.writeBytes(CRLF);
 
         for (Map.Entry<?, ?> entry : map.entrySet()) {
-            ByteBuf keyBuffer = serializeArrayItem(entry.getKey());
+            ByteBuf keyBuffer = serializeArrayItem(entry.getKey(), allocator);
             buffer.writeBytes(keyBuffer);
             keyBuffer.release();
 
-            ByteBuf valueBuffer = serializeArrayItem(entry.getValue());
+            ByteBuf valueBuffer = serializeArrayItem(entry.getValue(), allocator);
             buffer.writeBytes(valueBuffer);
             valueBuffer.release();
         }
@@ -678,22 +693,22 @@ public class RedisProtocolParser {
     }
 
     /**
-     * 序列化 RESP3 Set 类型
+     * Serialize RESP3 Set type
      */
-    private ByteBuf serializeSet(Set<?> set) {
+    private ByteBuf serializeSet(Set<?> set, ByteBufAllocator allocator) {
         if (set == null) {
-            return Unpooled.directBuffer(5).writeBytes("~-1\r\n".getBytes(StandardCharsets.UTF_8));
+            return allocator.directBuffer(5).writeBytes("~-1\r\n".getBytes(StandardCharsets.UTF_8));
         }
 
         byte[] lengthBytes = longToBytes(set.size());
         int estimatedSize = 1 + lengthBytes.length + 2 + set.size() * 16;
-        ByteBuf buffer = Unpooled.directBuffer(estimatedSize);
+        ByteBuf buffer = allocator.directBuffer(estimatedSize);
         buffer.writeByte('~');
         buffer.writeBytes(lengthBytes);
         buffer.writeBytes(CRLF);
 
         for (Object value : set) {
-            ByteBuf itemBuffer = serializeArrayItem(value);
+            ByteBuf itemBuffer = serializeArrayItem(value, allocator);
             buffer.writeBytes(itemBuffer);
             itemBuffer.release();
         }
@@ -702,12 +717,12 @@ public class RedisProtocolParser {
     }
 
     /**
-     * 序列化 RESP3 Double 类型
+     * Serialize RESP3 Double type
      */
-    private ByteBuf serializeDouble(double value) {
+    private ByteBuf serializeDouble(double value, ByteBufAllocator allocator) {
         String str = Double.toString(value);
         byte[] bytes = str.getBytes(StandardCharsets.UTF_8);
-        ByteBuf buffer = Unpooled.directBuffer(1 + bytes.length + 2);
+        ByteBuf buffer = allocator.directBuffer(1 + bytes.length + 2);
         buffer.writeByte(',');
         buffer.writeBytes(bytes);
         buffer.writeBytes(CRLF);
@@ -715,11 +730,11 @@ public class RedisProtocolParser {
     }
 
     /**
-     * 序列化 RESP3 Boolean 类型
+     * Serialize RESP3 Boolean type
      */
-    private ByteBuf serializeBoolean(boolean value) {
+    private ByteBuf serializeBoolean(boolean value, ByteBufAllocator allocator) {
         byte[] bytes = value ? "#t\r\n".getBytes(StandardCharsets.UTF_8) : "#f\r\n".getBytes(StandardCharsets.UTF_8);
-        ByteBuf buffer = Unpooled.directBuffer(bytes.length);
+        ByteBuf buffer = allocator.directBuffer(bytes.length);
         buffer.writeBytes(bytes);
         return buffer;
     }

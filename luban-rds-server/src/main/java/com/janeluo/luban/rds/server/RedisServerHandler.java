@@ -10,9 +10,9 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelId;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.util.AttributeKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,7 +20,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -74,9 +73,11 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     private static final long SERVER_START_TIME = System.currentTimeMillis();
     private static final AtomicLong TOTAL_COMMANDS_PROCESSED = new AtomicLong(0);
     private static final AtomicLong TOTAL_CONNECTIONS_RECEIVED = new AtomicLong(0);
+    private static final AtomicLong CURRENT_CONNECTIONS = new AtomicLong(0);
     
-    // 客户端连接管理
-    private static final Map<ChannelId, ClientInfo> CLIENT_INFO_MAP = new ConcurrentHashMap<>();
+    // Attribute key for storing ClientInfo in Channel
+    private static final AttributeKey<ClientInfo> CLIENT_INFO_KEY = AttributeKey.valueOf("clientInfo");
+    
     // Pub/Sub 管理
     private static final PubSubManager PUB_SUB_MANAGER = new PubSubManager();
     private static final com.janeluo.luban.rds.protocol.RedisProtocolParser SHARED_PROTOCOL_PARSER = new com.janeluo.luban.rds.protocol.RedisProtocolParser();
@@ -190,17 +191,20 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         if (msg instanceof ByteBuf) {
             ByteBuf buffer = (ByteBuf) msg;
             try {
-                ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+                // Use Channel.attr() for thread-safe ClientInfo storage
+                ClientInfo clientInfo = ctx.channel().attr(CLIENT_INFO_KEY).get();
                 if (clientInfo == null) {
                     clientInfo = new ClientInfo(null);
-                    CLIENT_INFO_MAP.put(ctx.channel().id(), clientInfo);
+                    // Initialize inbound buffer using channel allocator for pooled memory support
+                    clientInfo.initInboundBuf(ctx.alloc());
+                    ctx.channel().attr(CLIENT_INFO_KEY).set(clientInfo);
                 }
                 clientInfo.updateLastActiveTime();
                 clientInfo.getInboundBuf().writeBytes(buffer);
                 while (true) {
-                    // 检查是否需要检测协议版本
+                    // Check if protocol version detection is needed
                     if (clientInfo.getProtocolVersion() == ProtocolVersion.RESP2) {
-                        // 检测是否是RESP3的HELLO命令
+                        // Detect if this is a RESP3 HELLO command
                         if (detectResp3Hello(clientInfo.getInboundBuf(), ctx, clientInfo)) {
                             continue;
                         }
@@ -503,17 +507,24 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         logger.info("Client connected: {}", ctx.channel().remoteAddress());
         TOTAL_CONNECTIONS_RECEIVED.incrementAndGet();
-        CLIENT_INFO_MAP.put(ctx.channel().id(), new ClientInfo(null));
+        CURRENT_CONNECTIONS.incrementAndGet();
+        ClientInfo clientInfo = new ClientInfo(null);
+        // Initialize inbound buffer using channel allocator for pooled memory support
+        clientInfo.initInboundBuf(ctx.alloc());
+        // Store ClientInfo in Channel attribute for thread-safe access
+        ctx.channel().attr(CLIENT_INFO_KEY).set(clientInfo);
     }
     
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         logger.info("Client disconnected: {}", ctx.channel().remoteAddress());
-        // 断开连接时清理订阅
+        CURRENT_CONNECTIONS.decrementAndGet();
+        // Unsubscribe all subscriptions when connection closes
         PUB_SUB_MANAGER.unsubscribeAll(ctx.channel());
         PUB_SUB_MANAGER.punsubscribeAll(ctx.channel());
         MonitorManager.getInstance().removeMonitor(ctx.channel());
-        ClientInfo info = CLIENT_INFO_MAP.remove(ctx.channel().id());
+        // Clean up ClientInfo from Channel attribute
+        ClientInfo info = ctx.channel().attr(CLIENT_INFO_KEY).getAndSet(null);
         if (info != null && info.getInboundBuf() != null) {
             info.getInboundBuf().release();
         }
@@ -524,31 +535,43 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
         RESP2, RESP3
     }
     
-    // 客户端信息类
+    // Client info class
     private static class ClientInfo {
         private final String name;
         private final long connectedTime;
-        private int currentDatabase; // 当前选择的数据库
-        private long lastActiveTime; // 最后活跃时间
-        private boolean authenticated; // 是否已认证
-        private boolean inPubSubMode; // 是否处于Pub/Sub模式
+        private int currentDatabase; // Current selected database
+        private long lastActiveTime; // Last active time
+        private boolean authenticated; // Whether authenticated
+        private boolean inPubSubMode; // Whether in Pub/Sub mode
         private boolean inMonitorMode;
         private boolean inTransaction;
         private java.util.List<Command> txQueue;
         private boolean txQueueError;
         private final java.util.Map<String, Long> watchedVersions = new HashMap<>();
-        private final io.netty.buffer.ByteBuf inboundBuf = io.netty.buffer.Unpooled.buffer();
-        private ProtocolVersion protocolVersion = ProtocolVersion.RESP2; // 默认使用RESP2
+        private io.netty.buffer.ByteBuf inboundBuf; // Initialized in channelActive using channel allocator
+        private ProtocolVersion protocolVersion = ProtocolVersion.RESP2; // Default to RESP2
         
         public ClientInfo(String name) {
             this.name = name;
             this.connectedTime = System.currentTimeMillis();
             this.lastActiveTime = System.currentTimeMillis();
-            this.currentDatabase = 0; // 默认选择0号数据库
+            this.currentDatabase = 0; // Default to database 0
             this.authenticated = false;
             this.inTransaction = false;
             this.txQueue = new ArrayList<>();
             this.txQueueError = false;
+        }
+        
+        /**
+         * Initialize inbound buffer using channel allocator
+         * Should be called in channelActive
+         * 
+         * @param allocator ByteBuf allocator from channel
+         */
+        public void initInboundBuf(io.netty.buffer.ByteBufAllocator allocator) {
+            if (this.inboundBuf == null) {
+                this.inboundBuf = allocator.buffer(1024);
+            }
         }
         
         public ProtocolVersion getProtocolVersion() {
@@ -654,7 +677,7 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
             }
             return;
         }
-        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        ClientInfo clientInfo = ctx.channel().attr(CLIENT_INFO_KEY).get();
         for (int i = 1; i < args.length; i++) {
             String channelName = args[i];
             PUB_SUB_MANAGER.subscribe(ctx.channel(), channelName);
@@ -674,9 +697,9 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
         }
     }
 
-    // 处理 UNSUBSCRIBE 命令
+    // Handle UNSUBSCRIBE command
     private void handleUnsubscribe(ChannelHandlerContext ctx, String[] args) {
-        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        ClientInfo clientInfo = ctx.channel().attr(CLIENT_INFO_KEY).get();
         if (args.length <= 1) {
             java.util.Set<String> subs = PUB_SUB_MANAGER.subscriptions(ctx.channel());
             if (subs.isEmpty()) {
@@ -736,7 +759,7 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
             }
             return;
         }
-        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        ClientInfo clientInfo = ctx.channel().attr(CLIENT_INFO_KEY).get();
         for (int i = 1; i < args.length; i++) {
             String pattern = args[i];
             PUB_SUB_MANAGER.psubscribe(ctx.channel(), pattern);
@@ -756,9 +779,9 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
         }
     }
 
-    // 处理 PUNSUBSCRIBE 命令
+    // Handle PUNSUBSCRIBE command
     private void handlePunsubscribe(ChannelHandlerContext ctx, String[] args) {
-        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        ClientInfo clientInfo = ctx.channel().attr(CLIENT_INFO_KEY).get();
         if (args.length <= 1) {
             java.util.Set<String> patterns = PUB_SUB_MANAGER.patternSubscriptions(ctx.channel());
             if (patterns.isEmpty()) {
@@ -842,7 +865,7 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
             }
             return;
         }
-        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        ClientInfo clientInfo = ctx.channel().attr(CLIENT_INFO_KEY).get();
         for (int i = 1; i < args.length; i++) {
             String streamName = args[i];
             PUB_SUB_MANAGER.ssubscribe(ctx.channel(), streamName);
@@ -862,9 +885,9 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
         }
     }
 
-    // 处理 SUNSUBSCRIBE 命令
+    // Handle SUNSUBSCRIBE command
     private void handleSunsubscribe(ChannelHandlerContext ctx, String[] args) {
-        ClientInfo clientInfo = CLIENT_INFO_MAP.get(ctx.channel().id());
+        ClientInfo clientInfo = ctx.channel().attr(CLIENT_INFO_KEY).get();
         if (args.length <= 1) {
             java.util.Set<String> subs = PUB_SUB_MANAGER.streamSubscriptions(ctx.channel());
             if (subs.isEmpty()) {
@@ -929,9 +952,9 @@ ByteBuf responseBuffer = protocolParser.serialize(response);
         return TOTAL_CONNECTIONS_RECEIVED.get();
     }
     
-    // 获取当前连接数
+    // Get current connection count
     public static int getCurrentConnections() {
-        return CLIENT_INFO_MAP.size();
+        return (int) CURRENT_CONNECTIONS.get();
     }
     
     private boolean isKnownCommand(String name) {
