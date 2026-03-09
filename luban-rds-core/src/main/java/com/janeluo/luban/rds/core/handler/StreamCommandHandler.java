@@ -256,7 +256,7 @@ public class StreamCommandHandler implements CommandHandler {
             stream.trim(minId);
         }
 
-        // 返回生成的 ID
+        // 返回生成的 ID (Bulk String 格式)
         String idResult = generatedId.toString();
         return "$" + idResult.length() + "\r\n" + idResult + "\r\n";
     }

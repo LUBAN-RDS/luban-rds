@@ -132,7 +132,96 @@ ZSCORE scores "Bob"
 ZINCRBY scores 5 "Alice"
 ```
 
-## 6. 通用命令
+## 6. Stream 类型命令
+
+Stream 是 Redis 5.0 引入的数据结构，类似于消息队列，支持消费者组功能。
+
+| 命令 | 语法 | 说明 |
+|------|------|------|
+| **XADD** | `XADD key [NOMKSTREAM] [MAXLEN\|MINID [=~] threshold [LIMIT count]] * \| ID field value [field value ...]` | 添加消息到流 |
+| **XLEN** | `XLEN key` | 获取流的长度 |
+| **XRANGE** | `XRANGE key start end [COUNT count]` | 获取范围内的消息 |
+| **XREVRANGE** | `XREVRANGE key end start [COUNT count]` | 逆序获取范围内的消息 |
+| **XDEL** | `XDEL key ID [ID ...]` | 删除消息 |
+| **XTRIM** | `XTRIM key MAXLEN\|MINID [=~] threshold [LIMIT count]` | 裁剪流 |
+| **XREAD** | `XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] ID [ID ...]` | 读取消息 |
+| **XINFO** | `XINFO STREAM key [FULL [COUNT count]]` | 获取流信息 |
+| **XGROUP** | `XGROUP CREATE key group ID [MKSTREAM]` | 创建消费者组 |
+| **XREADGROUP** | `XREADGROUP GROUP group consumer [COUNT count] [BLOCK milliseconds] [NOACK] STREAMS key [key ...] ID [ID ...]` | 以消费者组方式读取消息 |
+| **XACK** | `XACK key group ID [ID ...]` | 确认消息已处理 |
+| **XPENDING** | `XPENDING key group [start end count] [consumer]` | 获取待处理消息 |
+| **XCLAIM** | `XCLAIM key group consumer min-idle-time ID [ID ...]` | 转移消息所有权 |
+| **XAUTOCLAIM** | `XAUTOCLAIM key group consumer min-idle-time start [COUNT count]` | 自动转移消息所有权 |
+
+**示例**：
+```bash
+# 添加消息（自动生成 ID）
+XADD mystream * field1 value1
+# 返回: 1704067200000-0
+
+# 添加消息（指定 ID）
+XADD mystream 1704067200001-0 field1 value1 field2 value2
+
+# 添加消息（限制流长度）
+XADD mystream MAXLEN ~ 1000 * field1 value1
+
+# 获取流的长度
+XLEN mystream
+
+# 获取所有消息
+XRANGE mystream - +
+
+# 获取最近 10 条消息
+XRANGE mystream - + COUNT 10
+
+# 逆序获取消息
+XREVRANGE mystream + - COUNT 10
+
+# 删除消息
+XDEL mystream 1704067200000-0
+
+# 裁剪流（保留最近 1000 条）
+XTRIM mystream MAXLEN ~ 1000
+
+# 读取消息（非阻塞）
+XREAD STREAMS mystream 0
+
+# 读取消息（阻塞等待新消息）
+XREAD BLOCK 5000 STREAMS mystream $
+
+# 获取流信息
+XINFO STREAM mystream
+
+# 创建消费者组
+XGROUP CREATE mystream mygroup $ MKSTREAM
+
+# 消费者组方式读取消息
+XREADGROUP GROUP mygroup consumer1 STREAMS mystream >
+
+# 确认消息已处理
+XACK mystream mygroup 1704067200000-0
+
+# 查看待处理消息
+XPENDING mystream mygroup
+
+# 转移消息所有权
+XCLAIM mystream mygroup consumer2 3600000 1704067200000-0
+```
+
+### Stream ID 格式
+
+Stream 中的每个消息都有一个唯一的 ID，格式为 `<millisecondsTime>-<sequenceNumber>`：
+- `millisecondsTime`：毫秒级 Unix 时间戳
+- `sequenceNumber`：同一毫秒内的序列号
+
+特殊 ID：
+- `*`：自动生成 ID
+- `-`：最小可能 ID
+- `+`：最大可能 ID
+- `$`：流中最后一个消息的 ID（用于 XREAD 阻塞读取新消息）
+- `>`：消费者组中未消费的消息（用于 XREADGROUP）
+
+## 7. 通用命令
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
@@ -166,7 +255,7 @@ INFO memory
 SCAN 0 MATCH user:* COUNT 10
 ```
 
-## 7. 认证命令
+## 8. 认证命令
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
@@ -177,7 +266,7 @@ SCAN 0 MATCH user:* COUNT 10
 AUTH your-secure-password
 ```
 
-## 8. 客户端命令
+## 9. 客户端命令
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
@@ -194,7 +283,7 @@ CLIENT SETNAME "Application-1"
 CLIENT GETNAME
 ```
 
-## 9. Lua 脚本命令
+## 10. Lua 脚本命令
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
@@ -213,7 +302,7 @@ SCRIPT LOAD "return redis.call('GET', KEYS[1])"
 EVALSHA "a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c" 1 name
 ```
 
-## 10. 发布订阅命令
+## 11. 发布订阅命令
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
@@ -235,7 +324,7 @@ PUBLISH news "Breaking news!"
 PSUBSCRIBE news:*
 ```
 
-## 11. 事务命令
+## 12. 事务命令
  
 
 | 命令 | 语法 | 说明 |
@@ -265,7 +354,7 @@ EXEC
 *-1\r\n
 ```
 
-## 12. 内存管理命令
+## 13. 内存管理命令
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
@@ -283,7 +372,7 @@ MEMORY STATS
 MEMORY DOCTOR
 ```
 
-## 13. 慢查询日志命令
+## 14. 慢查询日志命令
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
@@ -298,30 +387,30 @@ SLOWLOG LEN
 SLOWLOG RESET
 ```
 
-## 14. 命令执行规则
+## 15. 命令执行规则
 
-### 13.1 命令大小写
+### 15.1 命令大小写
 
 - Redis 命令不区分大小写，但建议使用大写以提高可读性
 - 键名和值区分大小写
 
-### 13.2 参数数量
+### 15.2 参数数量
 
 - 不同命令需要不同数量的参数
 - 缺少参数会返回错误
 
-### 13.3 错误处理
+### 15.3 错误处理
 
 - 命令执行失败会返回错误信息
 - 错误信息格式：`-ERROR message`
 
-### 13.4 性能注意事项
+### 15.4 性能注意事项
 
 - **FLUSHALL** 和 **FLUSHDB** 会阻塞服务器
 - 大键的操作（如获取大型哈希表）可能会影响性能
 - Lua 脚本执行时间过长会阻塞服务器
 
-## 14. 命令返回值
+## 16. 命令返回值
 
 | 类型 | 说明 | 示例 |
 |------|------|------|
@@ -332,7 +421,7 @@ SLOWLOG RESET
 | **Error** | 错误信息 | `-ERROR message` |
 | **Status** | 状态信息 | `OK` |
 
-## 15. 监控命令
+## 17. 监控命令
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
@@ -363,7 +452,7 @@ MONITOR MATCH ^SET.*
 1614850000.123456 [0 127.0.0.1:54321] "SET" "key" "value"
 ```
 
-## 16. 下一步
+## 18. 下一步
 
 - **[核心接口](./core.md)**：了解 MemoryStore 等核心接口的详细定义
 - **[协议说明](./protocol.md)**：深入了解 RESP 协议的工作原理

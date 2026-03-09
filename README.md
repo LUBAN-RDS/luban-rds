@@ -17,7 +17,7 @@ Luban-RDS 是一个完全兼容 Redis 协议的轻量级内存数据库，使用
 
 - **完全兼容 Redis 协议**：支持标准 Redis 客户端（redis-cli、Jedis、Lettuce）连接
 - **轻量级设计**：核心依赖少，易于集成
-- **丰富的数据结构**：支持 String、Hash、List、Set、ZSet
+- **丰富的数据结构**：支持 String、Hash、List、Set、ZSet、Stream
 - **键过期机制**：实现惰性删除和主动定期清理相结合的策略
 - **内存淘汰策略**：支持 LRU、Random、TTL 等多种淘汰策略
 - **持久化支持**：支持 RDB 异步快照和 AOF 追加日志，完整保留 ZSet 分数
@@ -233,6 +233,10 @@ luban-rds/
 
 ### 有序集合命令
 - ZADD, ZREM, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZSCORE, ZCARD, ZRANK, ZREVRANK, ZCOUNT, ZINCRBY
+
+### Stream 命令
+- XADD, XLEN, XRANGE, XREVRANGE, XDEL, XTRIM, XREAD, XINFO
+- XGROUP, XREADGROUP, XACK, XPENDING, XCLAIM, XAUTOCLAIM
 
 ### 通用命令
 - PING, ECHO, DEL, EXISTS, EXPIRE, PEXPIRE, TTL, PTTL, PERSIST, TYPE, FLUSHALL, FLUSHDB, DBSIZE, SCAN, SELECT, INFO, TIME, LASTSAVE, BGREWRITEAOF, BGSAVE, KEYS, QUIT
@@ -509,7 +513,7 @@ mvn test
 
 - [ ] 支持集群模式
 - [ ] 支持哨兵模式（Sentinel）
-- [ ] 支持高级数据类型（Geo、Bitmap、HyperLogLog、Stream）
+- [ ] 支持高级数据类型（Geo、Bitmap、HyperLogLog）
 - [x] Docker 部署支持
 - [x] Kubernetes 部署支持
 - [ ] Kubernetes Operator
