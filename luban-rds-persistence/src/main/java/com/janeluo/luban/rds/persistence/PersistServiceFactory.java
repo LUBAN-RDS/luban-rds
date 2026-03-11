@@ -1,6 +1,7 @@
 package com.janeluo.luban.rds.persistence;
 
 import com.janeluo.luban.rds.persistence.impl.AofPersistService;
+import com.janeluo.luban.rds.persistence.impl.NonePersistService;
 import com.janeluo.luban.rds.persistence.impl.RdbPersistService;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 
@@ -35,6 +36,11 @@ public class PersistServiceFactory {
     public static final String PERSIST_MODE_BOTH = "both";
     
     /**
+     * 无持久化模式常量
+     */
+    public static final String PERSIST_MODE_NONE = "none";
+    
+    /**
      * 创建持久化服务实例
      * @param persistMode 持久化模式：rdb, aof, both
      * @param dataDir 数据目录
@@ -54,6 +60,9 @@ public class PersistServiceFactory {
                     new RdbPersistService(dataDir),
                     new AofPersistService(dataDir, aofFsyncInterval)
                 );
+            case PERSIST_MODE_NONE:
+                // 无持久化模式
+                return new NonePersistService();
             default:
                 throw new IllegalArgumentException("Invalid persist mode: " + persistMode);
         }

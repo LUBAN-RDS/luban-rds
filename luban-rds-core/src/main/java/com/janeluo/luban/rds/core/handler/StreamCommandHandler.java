@@ -11,6 +11,7 @@ import com.google.common.collect.Sets;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -79,7 +80,8 @@ public class StreamCommandHandler implements CommandHandler {
      * <p>格式: XADD key [NOMKSTREAM] [MAXLEN|MINID [=|~] threshold [LIMIT count]] *|ID field value [field value ...]
      */
     private Object handleXAdd(int database, String[] args, MemoryStore store) {
-        if (args.length < 4) {
+        // XADD 至少需要 key 和 id，field-value 对是可选的 (Redis 7.0+)
+        if (args.length < 3) {
             return "-ERR wrong number of arguments for 'xadd' command\r\n";
         }
 
@@ -200,20 +202,18 @@ public class StreamCommandHandler implements CommandHandler {
         index++;
 
         // 解析字段值对
-        if (index >= args.length) {
-            return "-ERR wrong number of arguments for 'xadd' command\r\n";
-        }
-
-        if ((args.length - index) % 2 != 0) {
-            return "-ERR wrong number of arguments for 'xadd' command\r\n";
-        }
-
+        // Redis 7.0+ 支持不带任何 field-value 对的 XADD（创建空消息）
         Map<String, String> fields = new LinkedHashMap<>();
-        while (index < args.length) {
-            String field = args[index];
-            String value = args[index + 1];
-            fields.put(field, value);
-            index += 2;
+        if (index < args.length) {
+            if ((args.length - index) % 2 != 0) {
+                return "-ERR wrong number of arguments for 'xadd' command\r\n";
+            }
+            while (index < args.length) {
+                String field = args[index];
+                String value = args[index + 1];
+                fields.put(field, value);
+                index += 2;
+            }
         }
 
         // 获取或创建 Stream
@@ -441,11 +441,8 @@ public class StreamCommandHandler implements CommandHandler {
             }
         }
 
-        // 获取范围内的消息（正序）
-        List<StreamEntry> entries = stream.getRange(start, end, exclusiveStart, exclusiveEnd, count);
-
-        // 反转结果
-        java.util.Collections.reverse(entries);
+        // 获取范围内的消息（倒序）
+        List<StreamEntry> entries = stream.getRangeReverse(start, end, exclusiveStart, exclusiveEnd, count);
 
         // 构建响应
         return buildStreamEntriesResponse(entries);
@@ -790,8 +787,8 @@ public class StreamCommandHandler implements CommandHandler {
     private Object buildStreamInfo(Stream stream, String key) {
         StringBuilder result = new StringBuilder();
 
-        // 返回一个包含多个字段的数组
-        result.append("*13\r\n");
+        // 返回一个包含多个字段的数组 (7 个键值对 = 14 个元素)
+        result.append("*14\r\n");
 
         // length
         result.append("$6\r\nlength\r\n");
@@ -847,42 +844,40 @@ public class StreamCommandHandler implements CommandHandler {
     private Object buildGroupsInfo(Stream stream, String key) {
         StreamConsumerGroupManager manager = getGroupManager(stream, key);
         if (manager == null || manager.isEmpty()) {
-            return "*0\r\n";
+            return Collections.emptyList();
         }
 
         List<com.janeluo.luban.rds.core.stream.ConsumerGroup> groups = manager.getGroups();
-        StringBuilder result = new StringBuilder();
-        result.append("*").append(groups.size()).append("\r\n");
+        List<List<Object>> result = new ArrayList<>();
 
         for (com.janeluo.luban.rds.core.stream.ConsumerGroup group : groups) {
-            // 每个组返回一个包含多个字段的数组
-            result.append("*8\r\n");
-
+            List<Object> groupInfo = new ArrayList<>();
+            
             // name
-            result.append("$4\r\nname\r\n");
-            String groupName = group.getName();
-            result.append("$").append(groupName.length()).append("\r\n").append(groupName).append("\r\n");
-
+            groupInfo.add("name");
+            groupInfo.add(group.getName());
+            
             // consumers
-            result.append("$9\r\nconsumers\r\n");
-            result.append(":").append(group.getConsumerCount()).append("\r\n");
-
+            groupInfo.add("consumers");
+            groupInfo.add((long) group.getConsumerCount());
+            
             // pending
-            result.append("$7\r\npending\r\n");
-            result.append(":").append(group.getPendingCount()).append("\r\n");
-
+            groupInfo.add("pending");
+            groupInfo.add(group.getPendingCount());
+            
             // last-delivered-id
-            result.append("$16\r\nlast-delivered-id\r\n");
+            groupInfo.add("last-delivered-id");
             StreamId lastDeliveredId = group.getLastDeliveredId();
             if (lastDeliveredId != null) {
-                String idStr = lastDeliveredId.toString();
-                result.append("$").append(idStr.length()).append("\r\n").append(idStr).append("\r\n");
+                groupInfo.add(lastDeliveredId.toString());
             } else {
-                result.append("$-1\r\n");
+                groupInfo.add(null);
             }
+            
+            result.add(groupInfo);
         }
 
-        return result.toString();
+        return result;
     }
 
     /**
@@ -891,7 +886,7 @@ public class StreamCommandHandler implements CommandHandler {
     private Object buildConsumersInfo(Stream stream, String key, String groupName) {
         StreamConsumerGroupManager manager = getGroupManager(stream, key);
         if (manager == null) {
-            return "*0\r\n";
+            return Collections.emptyList();
         }
 
         com.janeluo.luban.rds.core.stream.ConsumerGroup group = manager.getGroup(groupName);
@@ -900,28 +895,27 @@ public class StreamCommandHandler implements CommandHandler {
         }
 
         List<com.janeluo.luban.rds.core.stream.Consumer> consumers = group.getConsumers();
-        StringBuilder result = new StringBuilder();
-        result.append("*").append(consumers.size()).append("\r\n");
+        List<List<Object>> result = new ArrayList<>();
 
         for (com.janeluo.luban.rds.core.stream.Consumer consumer : consumers) {
-            // 每个消费者返回一个包含多个字段的数组
-            result.append("*6\r\n");
-
+            List<Object> consumerInfo = new ArrayList<>();
+            
             // name
-            result.append("$4\r\nname\r\n");
-            String consumerName = consumer.getName();
-            result.append("$").append(consumerName.length()).append("\r\n").append(consumerName).append("\r\n");
-
+            consumerInfo.add("name");
+            consumerInfo.add(consumer.getName());
+            
             // pending
-            result.append("$7\r\npending\r\n");
-            result.append(":").append(consumer.getPendingCount()).append("\r\n");
-
+            consumerInfo.add("pending");
+            consumerInfo.add((long) consumer.getPendingCount());
+            
             // idle
-            result.append("$4\r\nidle\r\n");
-            result.append(":").append(consumer.getIdleTime()).append("\r\n");
+            consumerInfo.add("idle");
+            consumerInfo.add((long) consumer.getIdleTime());
+            
+            result.add(consumerInfo);
         }
 
-        return result.toString();
+        return result;
     }
 
     /**
@@ -946,16 +940,18 @@ public class StreamCommandHandler implements CommandHandler {
      * 获取消费者组数量
      */
     private int getGroupCount(Stream stream, String key) {
-        // 暂时返回 0，后续实现消费者组管理后更新
-        return 0;
+        StreamConsumerGroupManager manager = stream.getConsumerGroupManager();
+        if (manager == null) {
+            return 0;
+        }
+        return manager.getGroups().size();
     }
 
     /**
      * 获取消费者组管理器
      */
     private StreamConsumerGroupManager getGroupManager(Stream stream, String key) {
-        // 暂时返回 null，后续实现消费者组管理后更新
-        return null;
+        return stream.getConsumerGroupManager();
     }
 
     @Override

@@ -3097,6 +3097,45 @@ public class DefaultMemoryStore implements MemoryStore {
     }
     
     /**
+     * 读取流消息
+     */
+    @Override
+    public Map<String, List<StreamEntry>> xread(int database, List<String> keys, List<StreamId> ids, int count, long block) {
+        Map<String, List<StreamEntry>> result = new LinkedHashMap<>();
+        
+        for (int i = 0; i < keys.size(); i++) {
+            String key = keys.get(i);
+            StreamId id = ids.get(i);
+            
+            StoreValue storeValue = getOrCreateDatabaseStore(database).storage.getIfPresent(key);
+            if (storeValue == null || storeValue.isExpired()) {
+                continue;
+            }
+            
+            Object val = storeValue.value;
+            if (!(val instanceof Stream)) {
+                continue;
+            }
+            
+            Stream stream = (Stream) val;
+            StreamId effectiveId = id;
+            if (effectiveId == null) {
+                effectiveId = stream.getLastGeneratedId();
+                if (effectiveId == null) {
+                    continue;
+                }
+            }
+            
+            List<StreamEntry> entries = stream.getRangeFrom(effectiveId, true, count > 0 ? count : Integer.MAX_VALUE);
+            if (!entries.isEmpty()) {
+                result.put(key, entries);
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
      * 消费者组读取消息
      */
     @Override
@@ -3106,41 +3145,67 @@ public class DefaultMemoryStore implements MemoryStore {
         StoreValue storeValue = store.storage.getIfPresent(key);
         
         if (storeValue == null || storeValue.isExpired()) {
-            return Collections.emptyMap();
+            throw new IllegalStateException("NOGROUP No such key '" + key + "' or consumer group '" + group + "'");
         }
         
         Object val = storeValue.value;
         if (!(val instanceof Stream)) {
-            return Collections.emptyMap();
+            throw new IllegalStateException("NOGROUP No such key '" + key + "' or consumer group '" + group + "'");
         }
         
         Stream stream = (Stream) val;
         StreamConsumerGroupManager groupManager = stream.getConsumerGroupManager();
         
         if (groupManager == null) {
-            return Collections.emptyMap();
+            throw new IllegalStateException("NOGROUP No such key '" + key + "' or consumer group '" + group + "'");
         }
         
         ConsumerGroup consumerGroup = groupManager.getGroup(group);
         if (consumerGroup == null) {
-            return Collections.emptyMap();
+            throw new IllegalStateException("NOGROUP No such key '" + key + "' or consumer group '" + group + "'");
         }
         
+        // 确保消费者存在（即使没有消息也要创建消费者）
+        consumerGroup.createConsumer(consumer);
+        
         List<StreamEntry> entries;
-        if (noack) {
-            entries = stream.getRangeFrom(id, false, count);
+        
+        // id 为 null 表示 ">"，读取新消息
+        if (id == null) {
+            // 从组的 last_delivered_id 之后读取新消息
+            StreamId effectiveId = consumerGroup.getLastDeliveredId();
+            if (effectiveId == null) {
+                effectiveId = StreamId.MIN_ID;
+            }
+            
+            entries = stream.getRangeFrom(effectiveId, true, count);
+            
+            if (!noack) {
+                // 非 NOACK 模式：添加到 PEL
+                for (StreamEntry entry : entries) {
+                    consumerGroup.addPendingMessage(entry.getId(), consumer);
+                }
+            }
+            
+            if (!entries.isEmpty()) {
+                consumerGroup.setLastDeliveredId(entries.get(entries.size() - 1).getId());
+            }
         } else {
-            entries = stream.getRangeFrom(id, false, count);
-            for (StreamEntry entry : entries) {
-                consumerGroup.addPendingMessage(entry.getId(), consumer);
+            // 指定 ID：从 PEL 中读取消息
+            List<PendingMessage> pendingMessages = consumerGroup.getPendingMessages(id, null, count, null, 0);
+            entries = new ArrayList<>();
+            for (PendingMessage pm : pendingMessages) {
+                StreamEntry entry = stream.getEntry(pm.getId());
+                if (entry != null) {
+                    entries.add(entry);
+                }
             }
         }
         
-        consumerGroup.setLastDeliveredId(entries.isEmpty() ? id : entries.get(entries.size() - 1).getId());
         bumpKeyVersion(database, key);
         
         Map<String, List<StreamEntry>> result = new HashMap<>();
-        result.put(group, entries);
+        result.put(key, entries);
         return result;
     }
     
@@ -3339,7 +3404,10 @@ public class DefaultMemoryStore implements MemoryStore {
             
             consumerGroup.claimMessage(id, consumer);
             
-            if (!justId) {
+            if (justId) {
+                // JUSTID: 只返回 ID，创建一个空的 StreamEntry
+                claimedEntries.add(new StreamEntry(id, Collections.emptyMap()));
+            } else {
                 StreamEntry entry = stream.getEntry(id);
                 if (entry != null) {
                     claimedEntries.add(entry);

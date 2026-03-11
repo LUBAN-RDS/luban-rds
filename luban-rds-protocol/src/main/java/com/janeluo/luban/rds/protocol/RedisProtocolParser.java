@@ -491,7 +491,7 @@ public class RedisProtocolParser {
             return serializeBoolean((Boolean) response, allocator);
         }
 
-        if (response instanceof List) {
+if (response instanceof List) {
             return serializeArray((List<?>) response, allocator);
         }
 
@@ -652,6 +652,18 @@ public class RedisProtocolParser {
 
         if (value instanceof Long || value instanceof Integer) {
             return serializeInteger(((Number) value).longValue(), allocator);
+        }
+
+        if (value instanceof List) {
+            return serializeArray((List<?>) value, allocator);
+        }
+
+        if (value instanceof Map) {
+            return serializeMap((Map<?, ?>) value, allocator);
+        }
+
+        if (value instanceof Set) {
+            return serializeSet((Set<?>) value, allocator);
         }
 
         return serializeBulkString(value.toString(), allocator);

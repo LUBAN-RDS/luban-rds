@@ -320,8 +320,16 @@ public class StreamGroupCommandHandler implements CommandHandler {
         List<List<StreamEntry>> resultEntries = new ArrayList<>();
 
         for (int i = 0; i < keyCount; i++) {
-            Map<String, List<StreamEntry>> entriesMap = store.xreadGroup(
-                database, keys[i], group, consumer, ids[i], count, noack);
+            Map<String, List<StreamEntry>> entriesMap;
+            try {
+                entriesMap = store.xreadGroup(
+                    database, keys[i], group, consumer, ids[i], count, noack);
+            } catch (IllegalStateException e) {
+                if (e.getMessage() != null && e.getMessage().contains("NOGROUP")) {
+                    return "-" + e.getMessage() + "\r\n";
+                }
+                return "-ERR " + e.getMessage() + "\r\n";
+            }
             
             if (entriesMap != null && !entriesMap.isEmpty()) {
                 List<StreamEntry> entries = entriesMap.get(keys[i]);

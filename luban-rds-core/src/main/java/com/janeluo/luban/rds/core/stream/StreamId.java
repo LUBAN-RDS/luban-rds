@@ -38,6 +38,16 @@ public class StreamId implements Comparable<StreamId>, Serializable {
     public static final StreamId MAX_ID = new StreamId(Long.MAX_VALUE, Long.MAX_VALUE);
 
     /**
+     * 最后一条消息的 ID：$（用于 XREAD 命令）
+     */
+    public static final StreamId LAST_ID = new StreamId(Long.MAX_VALUE, Long.MAX_VALUE);
+
+    /**
+     * 未接收的 ID：>（用于 XREADGROUP 命令）
+     */
+    public static final StreamId UNRECEIVED_ID = new StreamId(Long.MAX_VALUE, Long.MAX_VALUE);
+
+    /**
      * 毫秒时间戳
      */
     private final long millisecondsTime;

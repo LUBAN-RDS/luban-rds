@@ -42,6 +42,19 @@ public class JedisStreamCompatibilityTest {
         port = findRandomPort();
         server = new NettyRedisServer(port);
         server.start();
+        // 等待服务器完全启动
+        int maxRetries = 10;
+        for (int i = 0; i < maxRetries; i++) {
+            if (server.isRunning()) {
+                break;
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
         System.out.println("========================================");
         System.out.println("Jedis Stream Compatibility Test Started");
         System.out.println("Server Port: " + port);
@@ -339,6 +352,7 @@ public class JedisStreamCompatibilityTest {
         System.out.println("\n=== Test: XRANGE Exclusive ===");
         
         Map<String, String> fields = new HashMap<>();
+        fields.put("field", "value");
         jedis.xadd("mystream", new StreamEntryID(1000, 0), fields);
         jedis.xadd("mystream", new StreamEntryID(2000, 0), fields);
         jedis.xadd("mystream", new StreamEntryID(3000, 0), fields);
@@ -391,10 +405,26 @@ public class JedisStreamCompatibilityTest {
     void testXRevRangeWithCount() {
         System.out.println("\n=== Test: XREVRANGE COUNT ===");
         
+        // 先删除可能存在的流
+        jedis.del("mystream");
+        
         Map<String, String> fields = new HashMap<>();
         for (int i = 1; i <= 5; i++) {
             fields.put("field", "value" + i);
-            jedis.xadd("mystream", new StreamEntryID(1000 * i, 0), fields);
+            System.out.println("Adding entry with ID: " + 1000 * i + "-0");
+            StreamEntryID id = jedis.xadd("mystream", new StreamEntryID(1000 * i, 0), fields);
+            System.out.println("Added entry with ID: " + id);
+        }
+        
+        // 检查流的长度
+        long len = jedis.xlen("mystream");
+        System.out.println("Stream length: " + len);
+        
+        // 检查所有条目
+        List<StreamEntry> allEntries = jedis.xrevrange("mystream", StreamEntryID.MAXIMUM_ID, StreamEntryID.MINIMUM_ID);
+        System.out.println("All entries:");
+        for (StreamEntry entry : allEntries) {
+            System.out.println("  ID: " + entry.getID());
         }
         
         List<StreamEntry> entries = jedis.xrevrange("mystream", StreamEntryID.MAXIMUM_ID, StreamEntryID.MINIMUM_ID, 2);

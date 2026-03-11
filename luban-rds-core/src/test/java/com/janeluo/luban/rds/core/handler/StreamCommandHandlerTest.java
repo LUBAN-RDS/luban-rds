@@ -672,8 +672,9 @@ public class StreamCommandHandlerTest {
 
         Object result = handler.handle(DATABASE, args, store);
 
-        // 没有消费者组时返回空数组
-        assertEquals("*0\r\n", result);
+        // 没有消费者组时返回空列表
+        assertTrue("Result should be a List", result instanceof java.util.List);
+        assertTrue("Result should be empty", ((java.util.List<?>) result).isEmpty());
     }
 
     @Test
@@ -686,8 +687,9 @@ public class StreamCommandHandlerTest {
 
         Object result = handler.handle(DATABASE, args, store);
 
-        // 没有消费者组时返回空数组
-        assertEquals("*0\r\n", result);
+        // 没有消费者组时返回空列表
+        assertTrue("Result should be a List", result instanceof java.util.List);
+        assertTrue("Result should be empty", ((java.util.List<?>) result).isEmpty());
     }
 
     @Test

@@ -683,6 +683,17 @@ public interface MemoryStore {
                                    long minIdleTime, StreamId start, int count);
     
     /**
+     * 读取消息
+     * @param database 数据库索引
+     * @param keys 流键列表
+     * @param ids 起始 ID 列表
+     * @param count 返回数量限制
+     * @param block 阻塞时间（毫秒）
+     * @return 流键到消息列表的映射
+     */
+    Map<String, List<StreamEntry>> xread(int database, List<String> keys, List<StreamId> ids, int count, long block);
+    
+    /**
      * 获取消费者组管理器
      * @param database 数据库索引
      * @param key 流键

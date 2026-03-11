@@ -120,21 +120,22 @@ public class Stream {
         this.maxLen = maxLen;
     }
 
-    /**
+/**
      * 添加消息
      * 
-     * <p>如果 ID 为 null，则自动生成 ID。
+     * 如果 ID 为 null，则自动生成 ID。
      * 
-     * <p>如果指定了 ID，则验证 ID 必须大于最后生成的 ID。
+     * 如果指定了 ID，则验证 ID 必须大于最后生成的 ID。
      *
      * @param id     消息 ID（null 表示自动生成）
-     * @param fields 字段值对
+     * @param fields 字段值对（Redis 7.0+ 支持空字段）
      * @return 添加的消息 ID
-     * @throws IllegalArgumentException 如果 ID 无效或字段为空
+     * @throws IllegalArgumentException 如果 ID 无效
      */
     public StreamId addEntry(StreamId id, Map<String, String> fields) {
-        if (fields == null || fields.isEmpty()) {
-            throw new IllegalArgumentException("fields cannot be null or empty");
+        // Redis 7.0+ 支持空 fields
+        if (fields == null) {
+            fields = Collections.emptyMap();
         }
 
         StreamId actualId;
@@ -326,7 +327,7 @@ public class Stream {
             return Collections.emptyList();
         }
 
-        List<StreamEntry> result = new ArrayList<>(count);
+        List<StreamEntry> result = new ArrayList<>(Math.min(count, 100));
         NavigableMap<StreamId, StreamEntry> tailMap = entries.tailMap(start, !exclusive);
 
         for (Map.Entry<StreamId, StreamEntry> entry : tailMap.entrySet()) {
@@ -362,6 +363,57 @@ public class Stream {
                 break;
             }
         }
+
+        return result;
+    }
+
+    /**
+     * 范围查询（逆序）- 用于 XREVRANGE
+     *
+     * @param start          起始 ID（小值）
+     * @param end            结束 ID（大值）
+     * @param exclusiveStart 是否排除起始 ID（开区间）
+     * @param exclusiveEnd   是否排除结束 ID（开区间）
+     * @param count          最大返回数量（<= 0 表示无限制）
+     * @return 消息列表（按 ID 降序）
+     */
+    public List<StreamEntry> getRangeReverse(StreamId start, StreamId end,
+                                               boolean exclusiveStart, boolean exclusiveEnd, int count) {
+        if (start == null || end == null) {
+            return Collections.emptyList();
+        }
+
+        List<StreamEntry> result = new ArrayList<>();
+        int maxCount = count > 0 ? count : Integer.MAX_VALUE;
+
+        // 使用 NavigableMap 的子映射功能
+        NavigableMap<StreamId, StreamEntry> subMap;
+
+        if (exclusiveStart && exclusiveEnd) {
+            subMap = entries.subMap(start, false, end, false);
+        } else if (exclusiveStart) {
+            subMap = entries.subMap(start, false, end, true);
+        } else if (exclusiveEnd) {
+            subMap = entries.subMap(start, true, end, false);
+        } else {
+            subMap = entries.subMap(start, true, end, true);
+        }
+
+        logger.debug("getRangeReverse: start={}, end={}, subMap.size={}, entries={}", 
+                     start, end, subMap.size(), entries.keySet());
+
+        // 反向遍历（从大到小）- 使用 descendingMap 确保正确的降序遍历
+        NavigableMap<StreamId, StreamEntry> descendingMap = subMap.descendingMap();
+        for (Map.Entry<StreamId, StreamEntry> entry : descendingMap.entrySet()) {
+            logger.debug("getRangeReverse iterating: id={}", entry.getKey());
+            result.add(entry.getValue());
+            if (result.size() >= maxCount) {
+                break;
+            }
+        }
+
+        logger.debug("getRangeReverse result: first={}, count={}", 
+                     result.isEmpty() ? null : result.get(0).getId(), result.size());
 
         return result;
     }
