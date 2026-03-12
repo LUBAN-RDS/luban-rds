@@ -615,6 +615,53 @@ this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
         if (response == null) {
             return LuaValue.FALSE;
         }
+        
+        if (response instanceof List) {
+            List<?> list = (List<?>) response;
+            LuaTable table = new LuaTable();
+            int index = 1;
+            for (Object item : list) {
+                table.set(index++, convertRedisResponseToLuaValue(item));
+            }
+            return table;
+        }
+        
+        if (response instanceof Map) {
+            Map<?, ?> map = (Map<?, ?>) response;
+            LuaTable table = new LuaTable();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                LuaValue key = convertRedisResponseToLuaValue(entry.getKey());
+                LuaValue value = convertRedisResponseToLuaValue(entry.getValue());
+                table.set(key, value);
+            }
+            return table;
+        }
+        
+        if (response instanceof Set) {
+            Set<?> set = (Set<?>) response;
+            LuaTable table = new LuaTable();
+            int index = 1;
+            for (Object item : set) {
+                table.set(index++, convertRedisResponseToLuaValue(item));
+            }
+            return table;
+        }
+        
+        if (response instanceof Number) {
+            if (response instanceof Double || response instanceof Float) {
+                return LuaValue.valueOf(((Number) response).doubleValue());
+            }
+            return LuaValue.valueOf(((Number) response).longValue());
+        }
+        
+        if (response instanceof Boolean) {
+            return ((Boolean) response) ? LuaValue.TRUE : LuaValue.FALSE;
+        }
+        
+        if (response instanceof byte[]) {
+            return org.luaj.vm2.LuaString.valueOf((byte[]) response);
+        }
+        
         String str = response.toString();
         if (str.isEmpty()) {
             return LuaValue.FALSE;
@@ -983,7 +1030,8 @@ this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
             String bigNumStr = str.substring(1, end);
             return LuaValue.valueOf(bigNumStr);
         } else {
-            return LuaValue.FALSE;
+            byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
+            return org.luaj.vm2.LuaString.valueOf(bytes);
         }
     }
     
