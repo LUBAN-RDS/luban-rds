@@ -236,7 +236,7 @@ public class StructLib extends TwoArgFunction {
                             }
                             LuaValue val = args.arg(argIdx[0]);
                             String s = val.tojstring();
-                            bufferSize += s.getBytes(StandardCharsets.UTF_8).length;
+                            bufferSize += s.getBytes(StandardCharsets.ISO_8859_1).length;
                         } else {
                             bufferSize += strLen;
                         }
@@ -378,7 +378,7 @@ public class StructLib extends TwoArgFunction {
         
         private int packString(byte[] buffer, int pos, LuaValue value, int strLen) {
             String s = value.tojstring();
-            byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+            byte[] bytes = s.getBytes(StandardCharsets.ISO_8859_1);
             
             if (strLen == 0) {
                 // c0: 变长字符串，写入全部内容
@@ -636,7 +636,7 @@ public class StructLib extends TwoArgFunction {
         }
         
         private LuaValue unpackString(byte[] data, int pos, int len) {
-            return LuaValue.valueOf(new String(data, pos, len, StandardCharsets.UTF_8));
+            return LuaValue.valueOf(new String(data, pos, len, StandardCharsets.ISO_8859_1));
         }
     }
 
