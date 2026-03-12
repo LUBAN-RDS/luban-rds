@@ -459,21 +459,23 @@ this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
             return "$-1\r\n";
         } else if (value.isboolean()) {
             return value.toboolean() ? ":1\r\n" : "$-1\r\n";
+        } else if (value instanceof org.luaj.vm2.LuaString) {
+            org.luaj.vm2.LuaString luaString = (org.luaj.vm2.LuaString) value;
+            byte[] bytes = new byte[luaString.length()];
+            luaString.copyInto(0, bytes, 0, bytes.length);
+            return "$" + bytes.length + "\r\n" + new String(bytes, StandardCharsets.ISO_8859_1) + "\r\n";
         } else if (value.isnumber()) {
-            return ":" + value.toint() + "\r\n";
-        } else if (value.isstring()) {
-            // 处理LuaString，确保二进制安全
-            if (value instanceof org.luaj.vm2.LuaString) {
-                org.luaj.vm2.LuaString luaString = (org.luaj.vm2.LuaString) value;
-                byte[] bytes = new byte[luaString.length()];
-                luaString.copyInto(0, bytes, 0, bytes.length);
-                return "$" + bytes.length + "\r\n" + new String(bytes, StandardCharsets.ISO_8859_1) + "\r\n";
+            double d = value.todouble();
+            if (d == Math.floor(d) && d >= Long.MIN_VALUE && d <= Long.MAX_VALUE) {
+                return ":" + value.tolong() + "\r\n";
             } else {
-                // 其他字符串类型
-                String str = value.tojstring();
-                byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
+                byte[] bytes = String.valueOf(d).getBytes(StandardCharsets.ISO_8859_1);
                 return "$" + bytes.length + "\r\n" + new String(bytes, StandardCharsets.ISO_8859_1) + "\r\n";
             }
+        } else if (value.isstring()) {
+            String str = value.tojstring();
+            byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
+            return "$" + bytes.length + "\r\n" + new String(bytes, StandardCharsets.ISO_8859_1) + "\r\n";
         } else if (value.istable()) {
             LuaTable table = (LuaTable) value;
             int length = table.length();

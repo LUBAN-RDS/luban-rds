@@ -397,9 +397,6 @@ public class StructLib extends TwoArgFunction {
                 i++;
             }
             
-            // Add new position (1-based)
-            results.add(LuaValue.valueOf(bb.position() + 1));
-            
             return LuaValue.varargsOf(results.toArray(new LuaValue[0]));
         }
     }
