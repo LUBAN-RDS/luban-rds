@@ -1,6 +1,6 @@
 ---
 title: 更新日志
-last_updated: 2026-03-08
+last_updated: 2026-03-13
 version: 1.0.0-SNAPSHOT
 ---
 # Changelog
@@ -25,6 +25,7 @@ version: 1.0.0-SNAPSHOT
 - 扩展哈希命令：HSETNX, HINCRBY, HSCAN
 - 客户端管理命令：CLIENT LIST, CLIENT KILL, CLIENT SETNAME, CLIENT GETNAME
 - 键版本控制机制，支持 WATCH 乐观锁
+- 文档全面更新和整理
 
 ### Changed
 

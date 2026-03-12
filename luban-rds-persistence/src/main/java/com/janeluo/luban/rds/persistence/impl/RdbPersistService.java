@@ -464,7 +464,7 @@ public class RdbPersistService implements PersistService {
             
             if (value != null) {
                 memoryStore.set(db, key, value);
-                logger.info("Loaded data from RDB: DB={}, Key={}, Value={}, Type=0x{}", db, key, value, Integer.toHexString(opcode));
+                logger.debug("Loaded data from RDB: DB={}, Key={}, Type=0x{}", db, key, Integer.toHexString(opcode));
             }
         } catch (EOFException e) {
             logger.debug("End of file reached while reading key-value pair");
@@ -576,17 +576,20 @@ public class RdbPersistService implements PersistService {
     }
     
     private void writeLength(DataOutputStream dos, long length) throws IOException {
+        if (length < 0) {
+            throw new IllegalArgumentException("Length cannot be negative: " + length);
+        }
         if (length < 64) {
             dos.writeByte((byte) length);
         } else if (length < 16384) {
-            dos.writeByte((byte) (0xC0 | (length >> 8)));
+            dos.writeByte((byte) (0x40 | ((length >> 8) & 0x3F)));
             dos.writeByte((byte) (length & 0xFF));
         } else if (length < 2097152) {
-            dos.writeByte((byte) (0xE0 | (length >> 16)));
+            dos.writeByte((byte) (0x80 | ((length >> 16) & 0x1F)));
             dos.writeByte((byte) ((length >> 8) & 0xFF));
             dos.writeByte((byte) (length & 0xFF));
         } else {
-            dos.writeByte(0xFF);
+            dos.writeByte(0xC0);
             dos.writeLong(length);
         }
     }
@@ -595,10 +598,10 @@ public class RdbPersistService implements PersistService {
         int firstByte = dis.readByte() & 0xFF;
         if (firstByte < 64) {
             return firstByte;
-        } else if (firstByte < 192) {
+        } else if (firstByte < 128) {
             int secondByte = dis.readByte() & 0xFF;
             return ((firstByte & 0x3F) << 8) | secondByte;
-        } else if (firstByte < 224) {
+        } else if (firstByte < 192) {
             int secondByte = dis.readByte() & 0xFF;
             int thirdByte = dis.readByte() & 0xFF;
             return ((firstByte & 0x1F) << 16) | (secondByte << 8) | thirdByte;
