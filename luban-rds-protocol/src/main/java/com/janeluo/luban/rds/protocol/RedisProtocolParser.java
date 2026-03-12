@@ -464,13 +464,15 @@ public class RedisProtocolParser {
             if (str.startsWith("+") || str.startsWith("-") || str.startsWith(":") || str.startsWith("*")
                     || str.startsWith("%") || str.startsWith("~") || str.startsWith("|") || str.startsWith("_")
                     || str.startsWith(",") || str.startsWith("#") || str.startsWith("(")) {
-                ByteBuf buffer = allocator.directBuffer(str.length());
-                buffer.writeBytes(str.getBytes(StandardCharsets.UTF_8));
+                byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
+                ByteBuf buffer = allocator.directBuffer(bytes.length);
+                buffer.writeBytes(bytes);
                 return buffer;
             }
             if (str.startsWith("$")) {
-                ByteBuf buffer = allocator.directBuffer(str.length());
-                buffer.writeBytes(str.getBytes(StandardCharsets.ISO_8859_1));
+                byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
+                ByteBuf buffer = allocator.directBuffer(bytes.length);
+                buffer.writeBytes(bytes);
                 return buffer;
             }
             if (str.startsWith("ERR")) {
@@ -638,13 +640,15 @@ if (response instanceof List) {
             } else if (str.startsWith("+") || str.startsWith("-") || str.startsWith("*")
                     || str.startsWith("%") || str.startsWith("~") || str.startsWith("|") || str.startsWith("_")
                     || str.startsWith(",") || str.startsWith("#") || str.startsWith("(")) {
-                ByteBuf buffer = allocator.directBuffer(str.length());
-                buffer.writeBytes(str.getBytes(StandardCharsets.UTF_8));
+                byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
+                ByteBuf buffer = allocator.directBuffer(bytes.length);
+                buffer.writeBytes(bytes);
                 return buffer;
             }
             if (str.startsWith("$")) {
-                ByteBuf buffer = allocator.directBuffer(str.length());
-                buffer.writeBytes(str.getBytes(StandardCharsets.ISO_8859_1));
+                byte[] bytes = str.getBytes(StandardCharsets.ISO_8859_1);
+                ByteBuf buffer = allocator.directBuffer(bytes.length);
+                buffer.writeBytes(bytes);
                 return buffer;
             }
             return serializeBulkString(str, allocator);
