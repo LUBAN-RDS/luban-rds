@@ -522,3 +522,5 @@ Luban-RDS 采用分层架构设计，具有以下特点：
 - **[功能架构](./features.md)**：深入了解各功能模块的详细设计
 - **[设计决策](./design.md)**：了解重要设计选择的理由和权衡
 - **[部署指南](../deployment/)**：学习如何部署和配置 Luban-RDS
+- **[快速开始](../guide/quickstart.md)**：快速上手 Luban-RDS
+- **[API 文档](../api/)**：查看详细的 API 接口说明

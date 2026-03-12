@@ -495,6 +495,12 @@ mvn test
 - [x] 支持客户端管理（CLIENT 命令族）
 - [x] 支持 INFO 命令重构（可扩展框架）
 - [x] 支持 Pipeline（管道化请求）
+- [x] 多线程 I/O 优化（三层线程模型）
+- [x] 内存池集成（Netty PooledByteBufAllocator）
+- [x] 内存碎片整理（自动/手动）
+- [x] StoreValue 内存优化（每条记录节省 36-52 字节）
+- [x] Docker 部署支持
+- [x] Kubernetes 部署支持
 
 ### 正在开发
 
@@ -502,20 +508,11 @@ mvn test
 - [ ] 访问控制列表（ACL）
 - [ ] 传输加密（TLS/SSL）
 
-### 已完成（v1.0.x 新增）
-
-- [x] 多线程 I/O 优化（三层线程模型）
-- [x] 内存池集成（Netty PooledByteBufAllocator）
-- [x] 内存碎片整理（自动/手动）
-- [x] StoreValue 内存优化（每条记录节省 36-52 字节）
-
 ### 计划中
 
 - [ ] 支持集群模式
 - [ ] 支持哨兵模式（Sentinel）
 - [ ] 支持高级数据类型（Geo、Bitmap、HyperLogLog）
-- [x] Docker 部署支持
-- [x] Kubernetes 部署支持
 - [ ] Kubernetes Operator
 - [ ] Prometheus Exporter
 
