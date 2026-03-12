@@ -42,6 +42,55 @@ import java.util.List;
  *   <li>cN - N字节字符串，c0表示变长字符串</li>
  * </ul>
  *
+ * <h2>组合格式说明（Redisson兼容）</h2>
+ * <p>当长度格式符（L/l/I/i）紧跟c0时，形成组合格式，表示"长度前缀+字符串"的结构。
+ *
+ * <h3>Lc0 组合格式</h3>
+ * <p>表示：4字节长度前缀 + 变长字符串
+ *
+ * <h4>Pack 操作支持两种调用方式：</h4>
+ * <pre>
+ * -- 旧格式（显式传递长度，兼容Redisson）
+ * struct.pack('Lc0', string.len(key), key)
+ *
+ * -- 新格式（自动计算长度）
+ * struct.pack('Lc0', key)
+ * </pre>
+ *
+ * <h4>Unpack 操作：</h4>
+ * <pre>
+ * -- 只返回字符串，不返回长度值
+ * local str = struct.unpack('Lc0', data)
+ * </pre>
+ *
+ * <h3>dLc0 组合格式</h3>
+ * <p>表示：8字节double + 4字节长度前缀 + 变长字符串
+ * <pre>
+ * -- Pack
+ * struct.pack('dLc0', timestamp, value)
+ *
+ * -- Unpack（返回2个值：double和字符串）
+ * local t, val = struct.unpack('dLc0', data)
+ * </pre>
+ *
+ * <h3>Lc0Lc0 组合格式</h3>
+ * <p>表示：两个连续的"长度前缀+字符串"结构
+ * <pre>
+ * -- Pack
+ * struct.pack('Lc0Lc0', key, value)  -- 或 struct.pack('Lc0Lc0', #key, key, #val, val)
+ *
+ * -- Unpack（返回2个字符串）
+ * local k, v = struct.unpack('Lc0Lc0', data)
+ * </pre>
+ *
+ * <h2>二进制安全</h2>
+ * <p>本实现支持二进制安全的数据处理：
+ * <ul>
+ *   <li>字符串可包含任意字节值（包括0x00-0xFF）</li>
+ *   <li>使用ISO-8859-1编码进行Java String与字节之间的转换</li>
+ *   <li>LuaString直接操作原始字节，避免编码转换</li>
+ * </ul>
+ *
  * @author janeluo
  * @since 1.0.0
  */
@@ -202,13 +251,30 @@ public class StructLib extends TwoArgFunction {
     /**
      * Pack函数实现
      *
-     * <p>将Lua值打包为二进制字符串
+     * <p>将Lua值打包为二进制字符串。支持两种调用方式：
+     * <pre>
+     * -- 标准方式
+     * local packed = struct.pack('dLc0', timestamp, value)
      *
-     * <p>错误处理：
+     * -- 组合格式支持两种参数形式
+     * struct.pack('Lc0', length, string)  -- 显式指定长度
+     * struct.pack('Lc0', string)          -- 自动计算长度
+     * </pre>
+     *
+     * <h3>组合格式参数检测逻辑</h3>
+     * <p>对于Lc0/lc0/Ic0/ic0组合格式，根据第一个参数类型决定解析方式：
+     * <ul>
+     *   <li>如果第一个参数是数字：视为(length, string)形式，消耗2个参数</li>
+     *   <li>如果第一个参数是字符串：视为(string)形式，自动计算长度，消耗1个参数</li>
+     * </ul>
+     *
+     * <h3>错误处理</h3>
      * <ul>
      *   <li>参数不足时返回nil</li>
      *   <li>格式错误时返回nil</li>
      * </ul>
+     *
+     * @return 打包后的二进制字符串（LuaString），错误时返回nil
      */
     static class Pack extends VarArgFunction {
         @Override
@@ -542,20 +608,42 @@ public class StructLib extends TwoArgFunction {
     /**
      * Unpack函数实现
      *
-     * <p>从二进制字符串解包为Lua值
+     * <p>从二进制字符串解包为Lua值。
+     * <pre>
+     * -- 基本用法
+     * local d, s = struct.unpack('dLc0', data)
      *
-     * <p>错误处理：
+     * -- 返回值数量取决于格式
+     * local str = struct.unpack('Lc0', data)        -- 1个返回值
+     * local t, val = struct.unpack('dLc0', data)    -- 2个返回值
+     * local k, v = struct.unpack('Lc0Lc0', data)    -- 2个返回值
+     * </pre>
+     *
+     * <h3>组合格式返回值说明</h3>
+     * <p>对于Lc0/lc0/Ic0/ic0组合格式，unpack只返回字符串值，不返回长度：
+     * <ul>
+     *   <li>Lc0：读取4字节长度，再读取对应长度的字符串，只返回字符串</li>
+     *   <li>dLc0：返回double和字符串，共2个值</li>
+     *   <li>Lc0Lc0：返回两个字符串，共2个值</li>
+     * </ul>
+     *
+     * <h3>可选起始位置</h3>
+     * <p>支持第三个参数指定起始位置（Lua风格，从1开始）：
+     * <pre>
+     * local val = struct.unpack('Lc0', data, 1)  -- 从第1字节开始
+     * </pre>
+     *
+     * <h3>错误处理</h3>
      * <ul>
      *   <li>边界错误时返回nil</li>
      *   <li>格式错误时返回nil</li>
+     *   <li>起始位置超出范围时返回nil</li>
      * </ul>
      *
-     * <p>设计规范：
-     * <ul>
-     *   <li>所有解包操作前必须进行边界检查</li>
-     *   <li>使用快速内联函数避免ByteBuffer开销</li>
-     *   <li>统一返回nil表示错误</li>
-     * </ul>
+     * <h3>二进制安全</h3>
+     * <p>解包后的字符串使用LuaString直接存储原始字节，支持任意二进制数据。
+     *
+     * @return 解包后的Lua值（Varargs），错误时返回nil
      */
     static class Unpack extends VarArgFunction {
         @Override
@@ -800,9 +888,20 @@ public class StructLib extends TwoArgFunction {
     /**
      * Size函数实现
      *
-     * <p>计算格式字符串对应的二进制数据大小
+     * <p>计算格式字符串对应的二进制数据大小。
+     * <pre>
+     * local size = struct.size('di')  -- 返回12（8 + 4）
+     * local size = struct.size('Lc0') -- 返回nil（变长格式无法确定）
+     * </pre>
      *
-     * <p>注意：c0（变长字符串）无法确定静态大小，返回nil
+     * <h3>注意事项</h3>
+     * <ul>
+     *   <li>c0（变长字符串）无法确定静态大小，返回nil</li>
+     *   <li>Lc0等组合格式也返回nil，因为字符串长度不确定</li>
+     *   <li>固定长度格式（如cN）可以计算大小</li>
+     * </ul>
+     *
+     * @return 格式对应的大小（整数），变长格式返回nil
      */
     static class Size extends VarArgFunction {
         @Override
