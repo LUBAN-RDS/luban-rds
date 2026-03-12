@@ -2,13 +2,16 @@ package com.janeluo.luban.rds.server.redisson;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.Serializable;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -722,7 +725,7 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         assertEquals(testObject, retrieved);
     }
 
-@Test
+    @Test
     @DisplayName("Test RMap with Object for SerializationCodec")
     @Order(18)
     void testMapObject4SerializationCodec() {
@@ -731,6 +734,400 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         map.put("key1", testObject);
         TestObject retrieved = map.get("key1");
         assertEquals(testObject, retrieved);
+    }
+
+    // ==========================================
+    // HSCAN Tests
+    // ==========================================
+
+    @Test
+    @DisplayName("Test HSCAN - Hash Scan Operation")
+    @Order(19)
+    void testHScan() {
+        // Clean up any existing test data
+        redisson.getKeys().delete("hscanTest");
+        
+        RMap<String, String> map = redisson.getMap("hscanTest");
+        
+        // Prepare test data
+        map.put("field1", "value1");
+        map.put("field2", "value2");
+        map.put("field3", "value3");
+        map.put("user:1", "Alice");
+        map.put("user:2", "Bob");
+        map.put("config:host", "localhost");
+        map.put("config:port", "9736");
+        
+        // Test 1: Basic HSCAN with entryIterator
+        int count = 0;
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            assertNotNull(entry.getKey());
+            assertNotNull(entry.getValue());
+            count++;
+        }
+        assertEquals(7, count);
+
+        // Test 2: HSCAN with MATCH pattern using readAllMap and filter
+        Map<String, String> allEntries = map.readAllMap();
+        int userCount = 0;
+        for (Map.Entry<String, String> entry : allEntries.entrySet()) {
+            if (entry.getKey().startsWith("user:")) {
+                userCount++;
+            }
+        }
+        assertEquals(2, userCount);
+        
+        // Test 3: Verify all fields can be scanned
+        Set<String> allFields = new HashSet<>();
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            allFields.add(entry.getKey());
+        }
+        assertTrue(allFields.contains("field1"));
+        assertTrue(allFields.contains("user:1"));
+        assertTrue(allFields.contains("config:host"));
+        
+        // Test 4: HSCAN on empty hash
+        redisson.getKeys().delete("emptyHash");
+        RMap<String, String> emptyMap = redisson.getMap("emptyHash");
+        int emptyCount = 0;
+        for (Map.Entry<String, String> entry : emptyMap.entrySet()) {
+            emptyCount++;
+        }
+        assertEquals(0, emptyCount);
+    }
+
+    @Test
+    @DisplayName("Test HSCAN - Large Dataset Scan")
+    @Order(20)
+    void testHScanLargeDataset() {
+        // Clean up any existing test data
+        redisson.getKeys().delete("hscanLargeTest");
+        
+        RMap<String, String> largeMap = redisson.getMap("hscanLargeTest");
+        
+        // Insert 100 fields
+        int totalFields = 100;
+        for (int i = 0; i < totalFields; i++) {
+            largeMap.put("key" + i, "value" + i);
+        }
+        
+        // Verify all entries can be scanned
+        int scannedCount = 0;
+        for (Map.Entry<String, String> entry : largeMap.entrySet()) {
+            assertNotNull(entry.getKey());
+            assertNotNull(entry.getValue());
+            scannedCount++;
+        }
+        assertEquals(totalFields, scannedCount);
+        
+        // Test pattern matching on large dataset using readAllMap and filter
+        Map<String, String> allEntries = largeMap.readAllMap();
+        int matchCount = 0;
+        for (Map.Entry<String, String> entry : allEntries.entrySet()) {
+            if (entry.getKey().startsWith("key")) {
+                matchCount++;
+            }
+        }
+        assertTrue(matchCount > 0);
+        assertTrue(matchCount <= totalFields);
+    }
+
+    @Test
+    @DisplayName("Test HSCAN - Concurrent Access")
+    @Order(21)
+    void testHScanConcurrentAccess() throws InterruptedException {
+        // Clean up any existing test data
+        redisson.getKeys().delete("hscanConcurrentTest");
+        
+        RMap<String, String> concurrentMap = redisson.getMap("hscanConcurrentTest");
+        
+        // Initial data
+        for (int i = 0; i < 10; i++) {
+            concurrentMap.put("field" + i, "value" + i);
+        }
+        
+        CountDownLatch latch = new CountDownLatch(5);
+        AtomicInteger successCount = new AtomicInteger(0);
+        ExecutorService executor = Executors.newFixedThreadPool(5);
+        
+        for (int i = 0; i < 5; i++) {
+            final int threadId = i;
+            executor.submit(() -> {
+                try {
+                    // Add more fields
+                    concurrentMap.put("thread" + threadId + "_field", "thread" + threadId + "_value");
+                    
+                    // Scan all entries
+                    int count = 0;
+                    for (Map.Entry<String, String> entry : concurrentMap.entrySet()) {
+                        count++;
+                    }
+                    
+                    // Should have at least 10 + threadId + 1 fields
+                    if (count >= 11) {
+                        successCount.incrementAndGet();
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+        
+        latch.await(10, TimeUnit.SECONDS);
+        executor.shutdown();
+        
+        assertEquals(5, successCount.get());
+    }
+
+    // ==========================================
+    // Large Object Tests
+    // ==========================================
+
+    @Test
+    @DisplayName("Test RMap with Large Object")
+    @Order(22)
+    void testMapWithLargeObject() {
+        RMap<String, LargeTestObject> map = redisson.getMap("largeObjectMap", new JsonJacksonCodec());
+        
+        // 创建一个大对象（包含大量字段和嵌套结构）
+        LargeTestObject largeObject = createLargeTestObject();
+        
+        // 测试存储大对象
+        map.put("largeKey", largeObject);
+        
+        // 验证存储成功
+        LargeTestObject retrieved = map.get("largeKey");
+        assertEquals(largeObject.getId(), retrieved.getId());
+        assertEquals(largeObject.getName(), retrieved.getName());
+        assertEquals(largeObject.getTags().size(), retrieved.getTags().size());
+        assertEquals(largeObject.getMetadata().size(), retrieved.getMetadata().size());
+        assertEquals(largeObject.getItems().size(), retrieved.getItems().size());
+        
+        // 验证嵌套数据
+        assertEquals(largeObject.getNestedObject().getLevel(), retrieved.getNestedObject().getLevel());
+        assertEquals(largeObject.getNestedObject().getData().size(), retrieved.getNestedObject().getData().size());
+    }
+
+    @Test
+    @DisplayName("Test RMap with Multiple Large Objects")
+    @Order(23)
+    void testMapWithMultipleLargeObjects() {
+        RMap<String, LargeTestObject> map = redisson.getMap("multiLargeObjectMap", new JsonJacksonCodec());
+        
+        // 存储多个大对象
+        int objectCount = 10;
+        for (int i = 0; i < objectCount; i++) {
+            LargeTestObject obj = createLargeTestObject();
+            obj.setId("object-" + i);
+            obj.setName("Large Object " + i);
+            map.put("key-" + i, obj);
+        }
+        
+        // 验证所有对象都能正确检索
+        assertEquals(objectCount, map.size());
+        
+        for (int i = 0; i < objectCount; i++) {
+            LargeTestObject retrieved = map.get("key-" + i);
+            assertNotNull(retrieved);
+            assertEquals("object-" + i, retrieved.getId());
+            assertEquals("Large Object " + i, retrieved.getName());
+            assertTrue(retrieved.getTags().size() > 0);
+            assertTrue(retrieved.getItems().size() > 0);
+        }
+        
+        // 测试批量操作
+        Map<String, LargeTestObject> allObjects = map.readAllMap();
+        assertEquals(objectCount, allObjects.size());
+    }
+
+    @Test
+    @DisplayName("Test RMap Large Object Update and Delete")
+    @Order(24)
+    void testMapLargeObjectUpdateAndDelete() {
+        RMap<String, LargeTestObject> map = redisson.getMap("updateLargeObjectMap", new JsonJacksonCodec());
+        
+        LargeTestObject original = createLargeTestObject();
+        original.setId("update-test");
+        map.put("updateKey", original);
+        
+        // 验证初始值
+        LargeTestObject retrieved = map.get("updateKey");
+        assertEquals("update-test", retrieved.getId());
+        assertEquals(50, retrieved.getTags().size());
+        
+        // 更新对象
+        LargeTestObject updated = createLargeTestObject();
+        updated.setId("update-test");
+        updated.setName("Updated Name");
+        map.put("updateKey", updated);
+        
+        // 验证更新后的值
+        LargeTestObject afterUpdate = map.get("updateKey");
+        assertEquals("Updated Name", afterUpdate.getName());
+        assertEquals(50, afterUpdate.getTags().size());
+        
+        // 删除对象
+        map.remove("updateKey");
+        assertNull(map.get("updateKey"));
+        assertFalse(map.containsKey("updateKey"));
+    }
+
+    @Test
+    @DisplayName("Test RMap Large Object Concurrency")
+    @Order(25)
+    void testMapLargeObjectConcurrency() throws InterruptedException {
+        RMap<String, LargeTestObject> map = redisson.getMap("concurrentLargeObjectMap", new JsonJacksonCodec());
+        
+        int threads = 5;
+        CountDownLatch latch = new CountDownLatch(threads);
+        AtomicInteger successCount = new AtomicInteger(0);
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        
+        for (int i = 0; i < threads; i++) {
+            final int threadId = i;
+            executor.submit(() -> {
+                try {
+                    LargeTestObject obj = createLargeTestObject();
+                    obj.setId("thread-" + threadId);
+                    map.put("key-" + threadId, obj);
+                    
+                    LargeTestObject retrieved = map.get("key-" + threadId);
+                    if (retrieved != null && ("thread-" + threadId).equals(retrieved.getId())) {
+                        successCount.incrementAndGet();
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+        
+        latch.await(10, TimeUnit.SECONDS);
+        executor.shutdown();
+        
+        assertEquals(threads, successCount.get(), "All threads should successfully write and read large objects");
+        assertEquals(threads, map.size());
+    }
+
+    // ==========================================
+    // Helper Methods for Large Object Tests
+    // ==========================================
+
+    private LargeTestObject createLargeTestObject() {
+        LargeTestObject obj = new LargeTestObject();
+        obj.setId("test-id");
+        obj.setName("Test Large Object");
+        obj.setDescription("这是一个用于测试的大对象，包含多个字段和嵌套结构。".repeat(100));
+        
+        // 添加大量标签
+        java.util.List<String> tags = new java.util.ArrayList<>();
+        for (int i = 0; i < 50; i++) {
+            tags.add("tag-" + i + "-description-" + System.currentTimeMillis());
+        }
+        obj.setTags(tags);
+        
+        // 添加大量元数据
+        java.util.Map<String, String> metadata = new java.util.HashMap<>();
+        for (int i = 0; i < 100; i++) {
+            metadata.put("meta-key-" + i, "meta-value-" + i + "-data-" + System.currentTimeMillis());
+        }
+        obj.setMetadata(metadata);
+        
+        // 添加嵌套对象列表
+        java.util.List<NestedItem> items = new java.util.ArrayList<>();
+        for (int i = 0; i < 30; i++) {
+            NestedItem item = new NestedItem();
+            item.setItemId("item-" + i);
+            item.setItemName("Item Name " + i);
+            item.setItemValue(i * 100);
+            item.setItemData("Item data " + i + " with some content".repeat(10));
+            items.add(item);
+        }
+        obj.setItems(items);
+        
+        // 添加深度嵌套对象
+        NestedObject nested = new NestedObject();
+        nested.setLevel(1);
+        java.util.Map<String, Object> nestedData = new java.util.HashMap<>();
+        for (int i = 0; i < 20; i++) {
+            nestedData.put("nested-key-" + i, "nested-value-" + i + "-complex-data");
+        }
+        nested.setData(nestedData);
+        obj.setNestedObject(nested);
+        
+        // 设置新增的20个属性
+        obj.setTimestamp(System.currentTimeMillis());
+        obj.setPriority(5);
+        obj.setActive(true);
+        obj.setScore(95.5);
+        obj.setRating(4.8f);
+        obj.setStatus((byte)1);
+        obj.setCode((short)1234);
+        obj.setType('A');
+        obj.setCategory("Test Category");
+        obj.setVersion("1.0.0");
+        obj.setAuthor("Test Author");
+        obj.setCreatedBy("System");
+        obj.setUpdatedBy("User");
+        
+        // 设置numbers列表
+        java.util.List<Integer> numbers = new java.util.ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            numbers.add(i);
+        }
+        obj.setNumbers(numbers);
+        
+        // 设置values列表
+        java.util.List<Double> values = new java.util.ArrayList<>();
+        for (int i = 0; i < 15; i++) {
+            values.add(i * 1.5);
+        }
+        obj.setValues(values);
+        
+        // 设置counters映射
+        java.util.Map<String, Integer> counters = new java.util.HashMap<>();
+        for (int i = 0; i < 10; i++) {
+            counters.put("counter-" + i, i * 10);
+        }
+        obj.setCounters(counters);
+        
+        // 设置flags映射
+        java.util.Map<String, Boolean> flags = new java.util.HashMap<>();
+        for (int i = 0; i < 8; i++) {
+            flags.put("flag-" + i, i % 2 == 0);
+        }
+        obj.setFlags(flags);
+        
+        // 设置categories集合
+        java.util.Set<String> categories = new java.util.HashSet<>();
+        for (int i = 0; i < 12; i++) {
+            categories.add("category-" + i);
+        }
+        obj.setCategories(categories);
+        
+        // 设置ids集合
+        java.util.Set<Integer> ids = new java.util.HashSet<>();
+        for (int i = 0; i < 15; i++) {
+            ids.add(i * 100);
+        }
+        obj.setIds(ids);
+        
+        // 设置complexData列表
+        java.util.List<java.util.Map<String, Object>> complexData = new java.util.ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            java.util.Map<String, Object> data = new java.util.HashMap<>();
+            data.put("id", i);
+            data.put("name", "Complex Data " + i);
+            data.put("value", i * 1000);
+            data.put("active", i % 2 == 0);
+            complexData.add(data);
+        }
+        obj.setComplexData(complexData);
+        
+        return obj;
     }
 
     // Serializable Test Object
@@ -762,5 +1159,163 @@ public class RedissonIntegrationTest extends RedissonTestBase {
         public int hashCode() {
             return Objects.hash(name, value);
         }
+    }
+
+    // Large Test Object Classes
+    static class LargeTestObject implements Serializable {
+        private String id;
+        private String name;
+        private String description;
+        private java.util.List<String> tags;
+        private java.util.Map<String, String> metadata;
+        private java.util.List<NestedItem> items;
+        private NestedObject nestedObject;
+        
+        // 新增的20个属性
+        private long timestamp;
+        private int priority;
+        private boolean active;
+        private double score;
+        private float rating;
+        private byte status;
+        private short code;
+        private char type;
+        private String category;
+        private String version;
+        private String author;
+        private String createdBy;
+        private String updatedBy;
+        private java.util.List<Integer> numbers;
+        private java.util.List<Double> values;
+        private java.util.Map<String, Integer> counters;
+        private java.util.Map<String, Boolean> flags;
+        private java.util.Set<String> categories;
+        private java.util.Set<Integer> ids;
+        private java.util.List<java.util.Map<String, Object>> complexData;
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+        
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+        
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+        
+        public java.util.List<String> getTags() { return tags; }
+        public void setTags(java.util.List<String> tags) { this.tags = tags; }
+        
+        public java.util.Map<String, String> getMetadata() { return metadata; }
+        public void setMetadata(java.util.Map<String, String> metadata) { this.metadata = metadata; }
+        
+        public java.util.List<NestedItem> getItems() { return items; }
+        public void setItems(java.util.List<NestedItem> items) { this.items = items; }
+        
+        public NestedObject getNestedObject() { return nestedObject; }
+        public void setNestedObject(NestedObject nestedObject) { this.nestedObject = nestedObject; }
+        
+        // 新增属性的getter和setter方法
+        public long getTimestamp() { return timestamp; }
+        public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
+        
+        public int getPriority() { return priority; }
+        public void setPriority(int priority) { this.priority = priority; }
+        
+        public boolean isActive() { return active; }
+        public void setActive(boolean active) { this.active = active; }
+        
+        public double getScore() { return score; }
+        public void setScore(double score) { this.score = score; }
+        
+        public float getRating() { return rating; }
+        public void setRating(float rating) { this.rating = rating; }
+        
+        public byte getStatus() { return status; }
+        public void setStatus(byte status) { this.status = status; }
+        
+        public short getCode() { return code; }
+        public void setCode(short code) { this.code = code; }
+        
+        public char getType() { return type; }
+        public void setType(char type) { this.type = type; }
+        
+        public String getCategory() { return category; }
+        public void setCategory(String category) { this.category = category; }
+        
+        public String getVersion() { return version; }
+        public void setVersion(String version) { this.version = version; }
+        
+        public String getAuthor() { return author; }
+        public void setAuthor(String author) { this.author = author; }
+        
+        public String getCreatedBy() { return createdBy; }
+        public void setCreatedBy(String createdBy) { this.createdBy = createdBy; }
+        
+        public String getUpdatedBy() { return updatedBy; }
+        public void setUpdatedBy(String updatedBy) { this.updatedBy = updatedBy; }
+        
+        public java.util.List<Integer> getNumbers() { return numbers; }
+        public void setNumbers(java.util.List<Integer> numbers) { this.numbers = numbers; }
+        
+        public java.util.List<Double> getValues() { return values; }
+        public void setValues(java.util.List<Double> values) { this.values = values; }
+        
+        public java.util.Map<String, Integer> getCounters() { return counters; }
+        public void setCounters(java.util.Map<String, Integer> counters) { this.counters = counters; }
+        
+        public java.util.Map<String, Boolean> getFlags() { return flags; }
+        public void setFlags(java.util.Map<String, Boolean> flags) { this.flags = flags; }
+        
+        public java.util.Set<String> getCategories() { return categories; }
+        public void setCategories(java.util.Set<String> categories) { this.categories = categories; }
+        
+        public java.util.Set<Integer> getIds() { return ids; }
+        public void setIds(java.util.Set<Integer> ids) { this.ids = ids; }
+        
+        public java.util.List<java.util.Map<String, Object>> getComplexData() { return complexData; }
+        public void setComplexData(java.util.List<java.util.Map<String, Object>> complexData) { this.complexData = complexData; }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            LargeTestObject that = (LargeTestObject) o;
+            return Objects.equals(id, that.id) && Objects.equals(name, that.name);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(id, name);
+        }
+    }
+
+    static class NestedItem implements Serializable {
+        private String itemId;
+        private String itemName;
+        private long itemValue;
+        private String itemData;
+
+        public String getItemId() { return itemId; }
+        public void setItemId(String itemId) { this.itemId = itemId; }
+        
+        public String getItemName() { return itemName; }
+        public void setItemName(String itemName) { this.itemName = itemName; }
+        
+        public long getItemValue() { return itemValue; }
+        public void setItemValue(long itemValue) { this.itemValue = itemValue; }
+        
+        public String getItemData() { return itemData; }
+        public void setItemData(String itemData) { this.itemData = itemData; }
+    }
+
+    static class NestedObject implements Serializable {
+        private int level;
+        private java.util.Map<String, Object> data;
+
+        public int getLevel() { return level; }
+        public void setLevel(int level) { this.level = level; }
+        
+        public java.util.Map<String, Object> getData() { return data; }
+        public void setData(java.util.Map<String, Object> data) { this.data = data; }
     }
 }

@@ -116,7 +116,7 @@ public class RMapSerializationTest {
             System.out.println("序列化对象字节前20: " + bytesToHex(java.util.Arrays.copyOf(expectedBytes, Math.min(20, expectedBytes.length))));
             
             String mapName = "testMapSerialization";
-            RMap<String, TestObject> map = redisson.getMap(mapName);
+            RMap<String, TestObject> map = redisson.getMap(mapName, new SerializationCodec());
             
             System.out.println("\n执行 map.put(\"key1\", obj)...");
             map.put("key1", obj);

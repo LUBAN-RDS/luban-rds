@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.redisson.Redisson;
 import org.redisson.api.RedissonClient;
 import org.redisson.client.codec.StringCodec;
+import org.redisson.codec.JsonJacksonCodec;
 import org.redisson.config.Config;
 
 import java.io.IOException;
@@ -33,7 +34,7 @@ public abstract class RedissonTestBase {
                 .setTimeout(3000); // 3 seconds timeout
         
         // Use StringCodec to avoid binary data corruption issues in Luban-RDS (which stores values as Strings)
-        config.setCodec(new StringCodec());
+        config.setCodec(new JsonJacksonCodec());
         
         redisson = Redisson.create(config);
     }

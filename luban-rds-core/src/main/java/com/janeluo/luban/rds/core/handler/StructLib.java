@@ -6,14 +6,11 @@ import org.luaj.vm2.Varargs;
 import org.luaj.vm2.lib.TwoArgFunction;
 import org.luaj.vm2.lib.VarArgFunction;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Lua struct库实现
@@ -21,19 +18,60 @@ import java.util.regex.Pattern;
  * <p>为Luban-RDS提供Lua struct库支持，用于二进制数据的打包和解包。
  * 支持Redis/Redisson使用的格式说明符子集。
  * 
- * <p>支持的格式说明符：
+ * <h2>设计规范</h2>
+ * <ul>
+ *   <li>安全性 - 所有操作必须进行边界检查</li>
+ *   <li>可移植性 - 统一的字节序处理</li>
+ *   <li>高效性 - 最小化内存拷贝，热点函数内联</li>
+ * </ul>
+ * 
+ * <h2>支持的格式说明符</h2>
  * <ul>
  *   <li>&gt; - 大端字节序</li>
  *   <li>&lt; - 小端字节序（默认）</li>
+ *   <li>! - 本机对齐（忽略）</li>
  *   <li>d - double（8字节）</li>
- *   <li>L/l - unsigned/signed long（4字节）</li>
- *   <li>I/i - unsigned/signed int（4字节）</li>
+ *   <li>L - unsigned long（4字节）</li>
+ *   <li>l - signed long（4字节）</li>
+ *   <li>I - unsigned int（4字节）</li>
+ *   <li>i - signed int（4字节）</li>
+ *   <li>H - unsigned short（2字节）</li>
+ *   <li>h - signed short（2字节）</li>
+ *   <li>B - unsigned byte（1字节）</li>
+ *   <li>b - signed byte（1字节）</li>
+ *   <li>cN - N字节字符串，c0表示变长字符串</li>
  * </ul>
  * 
  * @author janeluo
  * @since 1.0.0
  */
 public class StructLib extends TwoArgFunction {
+
+    /* ==================== 错误码定义 ==================== */
+    
+    /** 操作成功 */
+    public static final int UNPACK_OK = 0;
+    /** 边界错误 */
+    public static final int UNPACK_ERR_BOUNDS = -1;
+    /** 类型错误 */
+    public static final int UNPACK_ERR_TYPE = -2;
+    /** 内存错误 */
+    public static final int UNPACK_ERR_MEMORY = -3;
+    /** 格式错误 */
+    public static final int UNPACK_ERR_FORMAT = -4;
+    /** 参数错误 */
+    public static final int UNPACK_ERR_ARGS = -5;
+    
+    /* ==================== 常量定义 ==================== */
+    
+    /** 数据类型大小 */
+    private static final int SIZE_DOUBLE = 8;
+    private static final int SIZE_LONG = 4;
+    private static final int SIZE_SHORT = 2;
+    private static final int SIZE_BYTE = 1;
+    
+    /** 默认字节序：小端（Redis兼容） */
+    private static final ByteOrder DEFAULT_ORDER = ByteOrder.LITTLE_ENDIAN;
 
     @Override
     public LuaValue call(LuaValue modname, LuaValue env) {
@@ -48,398 +86,620 @@ public class StructLib extends TwoArgFunction {
         return struct;
     }
 
+    /* ==================== 边界检查宏（Java实现） ==================== */
+    
+    /**
+     * 边界检查
+     * @param pos 当前位置
+     * @param end 结束位置
+     * @param needed 需要的字节数
+     * @return true 如果越界
+     */
+    private static boolean checkBounds(int pos, int end, int needed) {
+        return pos + needed > end;
+    }
+    
+    /**
+     * 边界检查（long版本）
+     * @param pos 当前位置
+     * @param end 结束位置
+     * @param needed 需要的字节数
+     * @return true 如果越界
+     */
+    private static boolean checkBounds(long pos, long end, long needed) {
+        return pos + needed > end;
+    }
+
+    /* ==================== 内联优化函数 ==================== */
+    
+    /**
+     * 快速读取小端uint32
+     * 避免ByteBuffer开销
+     */
+    private static long readUint32LE(byte[] data, int pos) {
+        return ((data[pos] & 0xFFL)) |
+               ((data[pos + 1] & 0xFFL) << 8) |
+               ((data[pos + 2] & 0xFFL) << 16) |
+               ((data[pos + 3] & 0xFFL) << 24);
+    }
+    
+    /**
+     * 快速读取大端uint32
+     */
+    private static long readUint32BE(byte[] data, int pos) {
+        return ((data[pos] & 0xFFL) << 24) |
+               ((data[pos + 1] & 0xFFL) << 16) |
+               ((data[pos + 2] & 0xFFL) << 8) |
+               ((data[pos + 3] & 0xFFL));
+    }
+    
+    /**
+     * 快速读取小端int32
+     */
+    private static int readInt32LE(byte[] data, int pos) {
+        return (int) readUint32LE(data, pos);
+    }
+    
+    /**
+     * 快速读取大端int32
+     */
+    private static int readInt32BE(byte[] data, int pos) {
+        return (int) readUint32BE(data, pos);
+    }
+    
+    /**
+     * 快速写入小端uint32
+     */
+    private static void writeUint32LE(byte[] data, int pos, long value) {
+        data[pos] = (byte) (value & 0xFF);
+        data[pos + 1] = (byte) ((value >> 8) & 0xFF);
+        data[pos + 2] = (byte) ((value >> 16) & 0xFF);
+        data[pos + 3] = (byte) ((value >> 24) & 0xFF);
+    }
+    
+    /**
+     * 快速写入大端uint32
+     */
+    private static void writeUint32BE(byte[] data, int pos, long value) {
+        data[pos] = (byte) ((value >> 24) & 0xFF);
+        data[pos + 1] = (byte) ((value >> 16) & 0xFF);
+        data[pos + 2] = (byte) ((value >> 8) & 0xFF);
+        data[pos + 3] = (byte) (value & 0xFF);
+    }
+    
+    /**
+     * 快速写入小端int32
+     */
+    private static void writeInt32LE(byte[] data, int pos, int value) {
+        writeUint32LE(data, pos, value & 0xFFFFFFFFL);
+    }
+    
+    /**
+     * 快速写入大端int32
+     */
+    private static void writeInt32BE(byte[] data, int pos, int value) {
+        writeUint32BE(data, pos, value & 0xFFFFFFFFL);
+    }
+
+    /**
+     * Pack函数实现
+     * 
+     * <p>将Lua值打包为二进制字符串
+     * 
+     * <p>错误处理：
+     * <ul>
+     *   <li>参数不足时返回nil</li>
+     *   <li>格式错误时返回nil</li>
+     * </ul>
+     */
     static class Pack extends VarArgFunction {
         @Override
         public Varargs invoke(Varargs args) {
             String fmt = args.checkjstring(1);
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            ByteOrder order = ByteOrder.LITTLE_ENDIAN; // Default to Little Endian for Redis compatibility
-
-            int argIdx = 2;
-            int i = 0;
-            int len = fmt.length();
-
-            while (i < len) {
+            int fmtLen = fmt.length();
+            ByteOrder order = DEFAULT_ORDER;
+            
+            // 第一遍：计算所需缓冲区大小
+            int bufferSize = 0;
+            int argCount = 2;
+            int[] argIdx = {argCount};
+            
+            for (int i = 0; i < fmtLen; i++) {
                 char c = fmt.charAt(i);
                 switch (c) {
-                    case '>':
-                        order = ByteOrder.BIG_ENDIAN;
+                    case '>': case '<': case '!':
                         break;
-                    case '<':
-                        order = ByteOrder.LITTLE_ENDIAN;
+                    case 'd':
+                        bufferSize += SIZE_DOUBLE;
+                        argIdx[0]++;
                         break;
-                    case '!': // Native alignment (ignore for now, treat as default)
+                    case 'L': case 'l': case 'I': case 'i':
+                        bufferSize += SIZE_LONG;
+                        argIdx[0]++;
                         break;
-                    case 'd': // double (8 bytes)
-                    {
-                        double val = args.checkdouble(argIdx++);
-                        ByteBuffer bb = ByteBuffer.allocate(8).order(order);
-                        bb.putDouble(val);
-                        try {
-                            baos.write(bb.array());
-                        } catch (IOException e) {
-                            // Should not happen
-                        }
-                    }
-                    break;
-                    case 'L': // unsigned long (4 bytes)
-                    {
-                        long val = (long) args.checkdouble(argIdx++);
-                        ByteBuffer bb = ByteBuffer.allocate(4).order(order);
-                        // Write as unsigned int (4 bytes)
-                        bb.putInt((int) (val & 0xFFFFFFFFL));
-                        try {
-                            baos.write(bb.array());
-                        } catch (IOException e) {
-                            // Should not happen
-                        }
-                    }
-                    break;
-                    case 'l': // signed long (4 bytes)
-                    {
-                        long val = (long) args.checkdouble(argIdx++);
-                        ByteBuffer bb = ByteBuffer.allocate(4).order(order);
-                        bb.putInt((int) val);
-                        try {
-                            baos.write(bb.array());
-                        } catch (IOException e) {
-                            // Should not happen
-                        }
-                    }
-                    break;
-                    case 'I': // unsigned int (4 bytes) - same as L
-                    {
-                        long val = (long) args.checkdouble(argIdx++);
-                        ByteBuffer bb = ByteBuffer.allocate(4).order(order);
-                        bb.putInt((int) (val & 0xFFFFFFFFL));
-                        try {
-                            baos.write(bb.array());
-                        } catch (IOException e) {
-                            // Should not happen
-                        }
-                    }
-                    break;
-                    case 'i': // signed int (4 bytes) - same as l
-                    {
-                        long val = (long) args.checkdouble(argIdx++);
-                        ByteBuffer bb = ByteBuffer.allocate(4).order(order);
-                        bb.putInt((int) val);
-                        try {
-                            baos.write(bb.array());
-                        } catch (IOException e) {
-                            // Should not happen
-                        }
-                    }
-                    break;
-                    case 'H': // unsigned short (2 bytes)
-                    {
-                        int val = args.checkint(argIdx++);
-                        ByteBuffer bb = ByteBuffer.allocate(2).order(order);
-                        bb.putShort((short) (val & 0xFFFF));
-                        try {
-                            baos.write(bb.array());
-                        } catch (IOException e) {
-                            // Should not happen
-                        }
-                    }
-                    break;
-                    case 'h': // signed short (2 bytes)
-                    {
-                        int val = args.checkint(argIdx++);
-                        ByteBuffer bb = ByteBuffer.allocate(2).order(order);
-                        bb.putShort((short) val);
-                        try {
-                            baos.write(bb.array());
-                        } catch (IOException e) {
-                            // Should not happen
-                        }
-                    }
-                    break;
-                    case 'b': // signed byte
-                    {
-                        int val = args.checkint(argIdx++);
-                        baos.write((byte) val);
-                    }
-                    break;
-                    case 'B': // unsigned byte
-                    {
-                        int val = args.checkint(argIdx++);
-                        baos.write((byte) (val & 0xFF));
-                    }
-                    break;
-                    case 'c': // char/string
-                    {
-                        // Check for length
-                        int next = i + 1;
-                        int strLen = 0;
-                        boolean isC0 = false;
-                        if (next < len && Character.isDigit(fmt.charAt(next))) {
-                            // Parse length
-                            int start = next;
-                            while (next < len && Character.isDigit(fmt.charAt(next))) {
-                                next++;
+                    case 'H': case 'h':
+                        bufferSize += SIZE_SHORT;
+                        argIdx[0]++;
+                        break;
+                    case 'b': case 'B':
+                        bufferSize += SIZE_BYTE;
+                        argIdx[0]++;
+                        break;
+                    case 'c':
+                        int[] result = parseCStringLen(fmt, i);
+                        int strLen = result[0];
+                        i = result[1];
+                        if (strLen == 0) {
+                            // c0: 需要读取参数来计算长度
+                            if (argIdx[0] > args.narg()) {
+                                return LuaValue.NIL;
                             }
-                            String numStr = fmt.substring(start, next);
-                            strLen = Integer.parseInt(numStr);
-                            i = next - 1; // Advance i
-                            if (strLen == 0) {
-                                isC0 = true;
-                            }
-                        } else {
-                            // Default c is 1 byte char? In standard struct it is.
-                            // But here we might just treat 'c' without number as 1 char?
-                            strLen = 1;
-                        }
-
-                        if (isC0) {
-                            // c0: write variable length string
-                            LuaValue val = args.checkvalue(argIdx++);
+                            LuaValue val = args.arg(argIdx[0]);
                             String s = val.tojstring();
-                            try {
-                                baos.write(s.getBytes("UTF-8")); // Assuming UTF-8 for Lua strings
-                            } catch (IOException e) {
-                            }
+                            bufferSize += s.getBytes(StandardCharsets.UTF_8).length;
                         } else {
-                            // cn: fixed length string
-                            LuaValue val = args.checkvalue(argIdx++);
-                            String s = val.tojstring();
-                            byte[] bytes;
-                            try {
-                                bytes = s.getBytes("UTF-8");
-                            } catch (Exception e) {
-                                bytes = new byte[0];
-                            }
-                            // Pad or truncate
-                            if (bytes.length < strLen) {
-                                try {
-                                    baos.write(bytes);
-                                    for (int k = 0; k < strLen - bytes.length; k++) {
-                                        baos.write(0);
-                                    }
-                                } catch (IOException e) {}
-                            } else {
-                                baos.write(bytes, 0, strLen);
-                            }
+                            bufferSize += strLen;
                         }
-                    }
-                    break;
+                        argIdx[0]++;
+                        break;
                     default:
-                        // Ignore unknown chars (like space)
                         break;
                 }
-                i++;
             }
-
-            try {
-                return LuaValue.valueOf(new String(baos.toByteArray(), "ISO-8859-1")); // Return as raw bytes string
-            } catch (Exception e) {
-                return LuaValue.NIL;
-            }
-        }
-    }
-
-    static class Unpack extends VarArgFunction {
-        @Override
-        public Varargs invoke(Varargs args) {
-            String fmt = args.checkjstring(1);
-            String data = args.checkjstring(2);
-            int pos = args.optint(3, 1) - 1; // Lua 1-based to Java 0-based
-
-            if (pos < 0) pos = 0;
             
-            byte[] bytes;
-            try {
-                bytes = data.getBytes("ISO-8859-1"); // Get raw bytes
-            } catch (Exception e) {
-                return LuaValue.NIL;
-            }
-
-            ByteBuffer bb = ByteBuffer.wrap(bytes);
-            ByteOrder order = ByteOrder.LITTLE_ENDIAN; // Default
-            bb.order(order);
-
-            List<LuaValue> results = new ArrayList<>();
-
-            int i = 0;
-            int len = fmt.length();
+            // 分配缓冲区
+            byte[] buffer = new byte[bufferSize];
+            int pos = 0;
             
-            // Set position
-            if (pos < bytes.length) {
-                bb.position(pos);
-            } else {
-                // If pos is out of bounds but we expect to read, it might be an issue. 
-                // But for c0 it implies empty.
-                bb.position(bytes.length);
-            }
-
-            while (i < len) {
+            // 第二遍：执行打包
+            order = DEFAULT_ORDER;
+            argIdx[0] = 2;
+            
+            for (int i = 0; i < fmtLen; i++) {
                 char c = fmt.charAt(i);
+                
+                // 边界检查：参数数量
+                if (needArgument(c) && argIdx[0] > args.narg()) {
+                    return LuaValue.NIL;
+                }
+                
                 switch (c) {
                     case '>':
                         order = ByteOrder.BIG_ENDIAN;
-                        bb.order(order);
                         break;
                     case '<':
                         order = ByteOrder.LITTLE_ENDIAN;
-                        bb.order(order);
                         break;
                     case '!':
                         break;
                     case 'd':
-                        if (bb.remaining() >= 8) {
-                            results.add(LuaValue.valueOf(bb.getDouble()));
-                        } else {
-                            // Fail?
-                            return LuaValue.NIL;
-                        }
+                        pos = packDouble(buffer, pos, args.checkdouble(argIdx[0]++), order);
                         break;
-                    case 'L': // unsigned long (4 bytes) -> Java long
-                        if (bb.remaining() >= 4) {
-                            long val = bb.getInt() & 0xFFFFFFFFL;
-                            results.add(LuaValue.valueOf(val));
-                        } else {
-                            return LuaValue.NIL;
-                        }
+                    case 'L':
+                        pos = packUnsignedLong(buffer, pos, args.checkdouble(argIdx[0]++), order);
                         break;
-                    case 'l': // signed long (4 bytes) -> Java int/long
-                        if (bb.remaining() >= 4) {
-                            results.add(LuaValue.valueOf(bb.getInt()));
-                        } else {
-                            return LuaValue.NIL;
-                        }
+                    case 'l':
+                        pos = packSignedLong(buffer, pos, args.checkdouble(argIdx[0]++), order);
                         break;
                     case 'I':
-                        if (bb.remaining() >= 4) {
-                            long val = bb.getInt() & 0xFFFFFFFFL;
-                            results.add(LuaValue.valueOf(val));
-                        } else {
-                            return LuaValue.NIL;
-                        }
+                        pos = packUnsignedLong(buffer, pos, args.checkdouble(argIdx[0]++), order);
                         break;
                     case 'i':
-                        if (bb.remaining() >= 4) {
-                            results.add(LuaValue.valueOf(bb.getInt()));
-                        } else {
-                            return LuaValue.NIL;
-                        }
+                        pos = packSignedLong(buffer, pos, args.checkdouble(argIdx[0]++), order);
                         break;
-                    case 'H': // unsigned short
-                        if (bb.remaining() >= 2) {
-                            results.add(LuaValue.valueOf(bb.getShort() & 0xFFFF));
-                        } else {
-                            return LuaValue.NIL;
-                        }
+                    case 'H':
+                        pos = packUnsignedShort(buffer, pos, args.checkint(argIdx[0]++), order);
                         break;
-                    case 'h': // signed short
-                        if (bb.remaining() >= 2) {
-                            results.add(LuaValue.valueOf(bb.getShort()));
-                        } else {
-                            return LuaValue.NIL;
-                        }
+                    case 'h':
+                        pos = packSignedShort(buffer, pos, args.checkint(argIdx[0]++), order);
                         break;
-                    case 'b': // signed byte
-                        if (bb.remaining() >= 1) {
-                            results.add(LuaValue.valueOf(bb.get()));
-                        } else {
-                            return LuaValue.NIL;
-                        }
+                    case 'b':
+                        pos = packByte(buffer, pos, args.checkint(argIdx[0]++));
                         break;
-                    case 'B': // unsigned byte
-                        if (bb.remaining() >= 1) {
-                            results.add(LuaValue.valueOf(bb.get() & 0xFF));
-                        } else {
-                            return LuaValue.NIL;
-                        }
+                    case 'B':
+                        pos = packUnsignedByte(buffer, pos, args.checkint(argIdx[0]++));
                         break;
                     case 'c':
-                    {
-                        int next = i + 1;
-                        int strLen = 0;
-                        boolean isC0 = false;
-                        if (next < len && Character.isDigit(fmt.charAt(next))) {
-                            int start = next;
-                            while (next < len && Character.isDigit(fmt.charAt(next))) {
-                                next++;
-                            }
-                            String numStr = fmt.substring(start, next);
-                            strLen = Integer.parseInt(numStr);
-                            i = next - 1;
-                            if (strLen == 0) {
-                                isC0 = true;
-                            }
-                        } else {
-                            strLen = 1;
-                        }
+                        int[] result = parseCStringLen(fmt, i);
+                        int strLen = result[0];
+                        i = result[1];
+                        pos = packString(buffer, pos, args.arg(argIdx[0]++), strLen);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            
+            return LuaValue.valueOf(new String(buffer, StandardCharsets.ISO_8859_1));
+        }
+        
+        private boolean needArgument(char c) {
+            return c != '>' && c != '<' && c != '!' && c != ' ';
+        }
+        
+        private int packDouble(byte[] buffer, int pos, double value, ByteOrder order) {
+            ByteBuffer.wrap(buffer, pos, SIZE_DOUBLE).order(order).putDouble(value);
+            return pos + SIZE_DOUBLE;
+        }
+        
+        private int packUnsignedLong(byte[] buffer, int pos, double value, ByteOrder order) {
+            long val = (long) value;
+            if (order == ByteOrder.LITTLE_ENDIAN) {
+                writeUint32LE(buffer, pos, val);
+            } else {
+                writeUint32BE(buffer, pos, val);
+            }
+            return pos + SIZE_LONG;
+        }
+        
+        private int packSignedLong(byte[] buffer, int pos, double value, ByteOrder order) {
+            int val = (int) value;
+            if (order == ByteOrder.LITTLE_ENDIAN) {
+                writeInt32LE(buffer, pos, val);
+            } else {
+                writeInt32BE(buffer, pos, val);
+            }
+            return pos + SIZE_LONG;
+        }
+        
+        private int packUnsignedShort(byte[] buffer, int pos, int value, ByteOrder order) {
+            int val = value & 0xFFFF;
+            if (order == ByteOrder.LITTLE_ENDIAN) {
+                buffer[pos] = (byte) (val & 0xFF);
+                buffer[pos + 1] = (byte) ((val >> 8) & 0xFF);
+            } else {
+                buffer[pos] = (byte) ((val >> 8) & 0xFF);
+                buffer[pos + 1] = (byte) (val & 0xFF);
+            }
+            return pos + SIZE_SHORT;
+        }
+        
+        private int packSignedShort(byte[] buffer, int pos, int value, ByteOrder order) {
+            short val = (short) value;
+            if (order == ByteOrder.LITTLE_ENDIAN) {
+                buffer[pos] = (byte) (val & 0xFF);
+                buffer[pos + 1] = (byte) ((val >> 8) & 0xFF);
+            } else {
+                buffer[pos] = (byte) ((val >> 8) & 0xFF);
+                buffer[pos + 1] = (byte) (val & 0xFF);
+            }
+            return pos + SIZE_SHORT;
+        }
+        
+        private int packByte(byte[] buffer, int pos, int value) {
+            buffer[pos] = (byte) value;
+            return pos + SIZE_BYTE;
+        }
+        
+        private int packUnsignedByte(byte[] buffer, int pos, int value) {
+            buffer[pos] = (byte) (value & 0xFF);
+            return pos + SIZE_BYTE;
+        }
+        
+        private int packString(byte[] buffer, int pos, LuaValue value, int strLen) {
+            String s = value.tojstring();
+            byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+            
+            if (strLen == 0) {
+                // c0: 变长字符串，写入全部内容
+                System.arraycopy(bytes, 0, buffer, pos, bytes.length);
+                return pos + bytes.length;
+            } else {
+                // cN: 固定长度字符串
+                int copyLen = Math.min(bytes.length, strLen);
+                System.arraycopy(bytes, 0, buffer, pos, copyLen);
+                // 填充零
+                for (int j = copyLen; j < strLen; j++) {
+                    buffer[pos + j] = 0;
+                }
+                return pos + strLen;
+            }
+        }
+        
+        private int[] parseCStringLen(String fmt, int start) {
+            int i = start + 1;
+            int fmtLen = fmt.length();
+            
+            if (i < fmtLen && Character.isDigit(fmt.charAt(i))) {
+                int digitStart = i;
+                while (i < fmtLen && Character.isDigit(fmt.charAt(i))) {
+                    i++;
+                }
+                int strLen = Integer.parseInt(fmt.substring(digitStart, i));
+                return new int[]{strLen, i - 1};
+            }
+            return new int[]{1, start};
+        }
+    }
 
-                        if (isC0) {
-                            // c0: read all remaining
-                            int remaining = bb.remaining();
-                            byte[] buf = new byte[remaining];
-                            bb.get(buf);
-                            try {
-                                results.add(LuaValue.valueOf(new String(buf, "UTF-8"))); // Assuming UTF-8
-                            } catch (Exception e) {}
-                        } else {
-                            // cn: read n bytes
-                            if (bb.remaining() >= strLen) {
-                                byte[] buf = new byte[strLen];
-                                bb.get(buf);
-                                try {
-                                    results.add(LuaValue.valueOf(new String(buf, "UTF-8")));
-                                } catch (Exception e) {}
+    /**
+     * Unpack函数实现
+     * 
+     * <p>从二进制字符串解包为Lua值
+     * 
+     * <p>错误处理：
+     * <ul>
+     *   <li>边界错误时返回nil</li>
+     *   <li>格式错误时返回nil</li>
+     * </ul>
+     * 
+     * <p>设计规范：
+     * <ul>
+     *   <li>所有解包操作前必须进行边界检查</li>
+     *   <li>使用快速内联函数避免ByteBuffer开销</li>
+     *   <li>统一返回nil表示错误</li>
+     * </ul>
+     */
+    static class Unpack extends VarArgFunction {
+        @Override
+        public Varargs invoke(Varargs args) {
+            // 参数验证
+            String fmt = args.checkjstring(1);
+            String data = args.checkjstring(2);
+            int startPos = args.optint(3, 1) - 1; // Lua 1-based to Java 0-based
+            
+            // 边界检查：起始位置
+            if (startPos < 0) {
+                startPos = 0;
+            }
+            
+            byte[] bytes = data.getBytes(StandardCharsets.ISO_8859_1);
+            int dataLen = bytes.length;
+            
+            // 边界检查：起始位置超出范围
+            if (startPos > dataLen) {
+                return LuaValue.NIL;
+            }
+            
+            int pos = startPos;
+            int fmtLen = fmt.length();
+            ByteOrder order = DEFAULT_ORDER;
+            List<LuaValue> results = new ArrayList<>();
+            
+            for (int i = 0; i < fmtLen; i++) {
+                char c = fmt.charAt(i);
+                
+                switch (c) {
+                    case '>':
+                        order = ByteOrder.BIG_ENDIAN;
+                        break;
+                    case '<':
+                        order = ByteOrder.LITTLE_ENDIAN;
+                        break;
+                    case '!':
+                        break;
+                    case 'd':
+                        // 边界检查：double需要8字节
+                        if (checkBounds(pos, dataLen, SIZE_DOUBLE)) {
+                            return LuaValue.NIL;
+                        }
+                        results.add(unpackDouble(bytes, pos, order));
+                        pos += SIZE_DOUBLE;
+                        break;
+                    case 'L':
+                        // 边界检查：long需要4字节
+                        if (checkBounds(pos, dataLen, SIZE_LONG)) {
+                            return LuaValue.NIL;
+                        }
+                        results.add(unpackUnsignedLong(bytes, pos, order));
+                        pos += SIZE_LONG;
+                        break;
+                    case 'l':
+                        if (checkBounds(pos, dataLen, SIZE_LONG)) {
+                            return LuaValue.NIL;
+                        }
+                        results.add(unpackSignedLong(bytes, pos, order));
+                        pos += SIZE_LONG;
+                        break;
+                    case 'I':
+                        if (checkBounds(pos, dataLen, SIZE_LONG)) {
+                            return LuaValue.NIL;
+                        }
+                        results.add(unpackUnsignedLong(bytes, pos, order));
+                        pos += SIZE_LONG;
+                        break;
+                    case 'i':
+                        if (checkBounds(pos, dataLen, SIZE_LONG)) {
+                            return LuaValue.NIL;
+                        }
+                        results.add(unpackSignedLong(bytes, pos, order));
+                        pos += SIZE_LONG;
+                        break;
+                    case 'H':
+                        if (checkBounds(pos, dataLen, SIZE_SHORT)) {
+                            return LuaValue.NIL;
+                        }
+                        results.add(unpackUnsignedShort(bytes, pos, order));
+                        pos += SIZE_SHORT;
+                        break;
+                    case 'h':
+                        if (checkBounds(pos, dataLen, SIZE_SHORT)) {
+                            return LuaValue.NIL;
+                        }
+                        results.add(unpackSignedShort(bytes, pos, order));
+                        pos += SIZE_SHORT;
+                        break;
+                    case 'b':
+                        if (checkBounds(pos, dataLen, SIZE_BYTE)) {
+                            return LuaValue.NIL;
+                        }
+                        results.add(unpackSignedByte(bytes, pos));
+                        pos += SIZE_BYTE;
+                        break;
+                    case 'B':
+                        if (checkBounds(pos, dataLen, SIZE_BYTE)) {
+                            return LuaValue.NIL;
+                        }
+                        results.add(unpackUnsignedByte(bytes, pos));
+                        pos += SIZE_BYTE;
+                        break;
+                    case 'c':
+                        int[] result = parseCStringLen(fmt, i);
+                        int strLen = result[0];
+                        i = result[1];
+                        
+                        if (strLen == 0) {
+                            // c0: 读取剩余所有字节
+                            int remaining = dataLen - pos;
+                            if (remaining > 0) {
+                                results.add(unpackString(bytes, pos, remaining));
+                                pos += remaining;
                             } else {
+                                results.add(LuaValue.valueOf(""));
+                            }
+                        } else {
+                            // cN: 读取N字节
+                            if (checkBounds(pos, dataLen, strLen)) {
                                 return LuaValue.NIL;
                             }
+                            results.add(unpackString(bytes, pos, strLen));
+                            pos += strLen;
                         }
-                    }
-                    break;
+                        break;
+                    default:
+                        break;
                 }
-                i++;
             }
             
             return LuaValue.varargsOf(results.toArray(new LuaValue[0]));
         }
+        
+        private int[] parseCStringLen(String fmt, int start) {
+            int i = start + 1;
+            int fmtLen = fmt.length();
+            
+            if (i < fmtLen && Character.isDigit(fmt.charAt(i))) {
+                int digitStart = i;
+                while (i < fmtLen && Character.isDigit(fmt.charAt(i))) {
+                    i++;
+                }
+                int strLen = Integer.parseInt(fmt.substring(digitStart, i));
+                return new int[]{strLen, i - 1};
+            }
+            return new int[]{1, start};
+        }
+        
+        // ========== 内联优化的解包函数 ==========
+        
+        private LuaValue unpackDouble(byte[] data, int pos, ByteOrder order) {
+            double val = ByteBuffer.wrap(data, pos, SIZE_DOUBLE).order(order).getDouble();
+            return LuaValue.valueOf(val);
+        }
+        
+        private LuaValue unpackUnsignedLong(byte[] data, int pos, ByteOrder order) {
+            long val;
+            if (order == ByteOrder.LITTLE_ENDIAN) {
+                val = readUint32LE(data, pos);
+            } else {
+                val = readUint32BE(data, pos);
+            }
+            return LuaValue.valueOf(val);
+        }
+        
+        private LuaValue unpackSignedLong(byte[] data, int pos, ByteOrder order) {
+            int val;
+            if (order == ByteOrder.LITTLE_ENDIAN) {
+                val = readInt32LE(data, pos);
+            } else {
+                val = readInt32BE(data, pos);
+            }
+            return LuaValue.valueOf(val);
+        }
+        
+        private LuaValue unpackUnsignedShort(byte[] data, int pos, ByteOrder order) {
+            int val;
+            if (order == ByteOrder.LITTLE_ENDIAN) {
+                val = ((data[pos] & 0xFF)) | ((data[pos + 1] & 0xFF) << 8);
+            } else {
+                val = ((data[pos] & 0xFF) << 8) | ((data[pos + 1] & 0xFF));
+            }
+            return LuaValue.valueOf(val & 0xFFFF);
+        }
+        
+        private LuaValue unpackSignedShort(byte[] data, int pos, ByteOrder order) {
+            int val;
+            if (order == ByteOrder.LITTLE_ENDIAN) {
+                val = ((data[pos] & 0xFF)) | ((data[pos + 1] & 0xFF) << 8);
+            } else {
+                val = ((data[pos] & 0xFF) << 8) | ((data[pos + 1] & 0xFF));
+            }
+            // 转换为有符号short
+            return LuaValue.valueOf((short) val);
+        }
+        
+        private LuaValue unpackSignedByte(byte[] data, int pos) {
+            return LuaValue.valueOf((byte) data[pos]);
+        }
+        
+        private LuaValue unpackUnsignedByte(byte[] data, int pos) {
+            return LuaValue.valueOf(data[pos] & 0xFF);
+        }
+        
+        private LuaValue unpackString(byte[] data, int pos, int len) {
+            return LuaValue.valueOf(new String(data, pos, len, StandardCharsets.UTF_8));
+        }
     }
 
+    /**
+     * Size函数实现
+     * 
+     * <p>计算格式字符串对应的二进制数据大小
+     * 
+     * <p>注意：c0（变长字符串）无法确定静态大小，返回nil
+     */
     static class Size extends VarArgFunction {
         @Override
         public Varargs invoke(Varargs args) {
             String fmt = args.checkjstring(1);
             int size = 0;
-            int i = 0;
-            int len = fmt.length();
-            while (i < len) {
+            int fmtLen = fmt.length();
+            
+            for (int i = 0; i < fmtLen; i++) {
                 char c = fmt.charAt(i);
                 switch (c) {
-                    case 'd': size += 8; break;
-                    case 'L': case 'l': case 'I': case 'i': size += 4; break;
-                    case 'H': case 'h': size += 2; break;
-                    case 'b': case 'B': size += 1; break;
+                    case 'd':
+                        size += SIZE_DOUBLE;
+                        break;
+                    case 'L': case 'l': case 'I': case 'i':
+                        size += SIZE_LONG;
+                        break;
+                    case 'H': case 'h':
+                        size += SIZE_SHORT;
+                        break;
+                    case 'b': case 'B':
+                        size += SIZE_BYTE;
+                        break;
                     case 'c':
-                        int next = i + 1;
-                        int strLen = 0;
-                        if (next < len && Character.isDigit(fmt.charAt(next))) {
-                            int start = next;
-                            while (next < len && Character.isDigit(fmt.charAt(next))) {
-                                next++;
-                            }
-                            String numStr = fmt.substring(start, next);
-                            strLen = Integer.parseInt(numStr);
-                            i = next - 1;
-                        } else {
-                            strLen = 1;
-                        }
+                        int[] result = parseCStringLen(fmt, i);
+                        int strLen = result[0];
+                        i = result[1];
                         if (strLen == 0) {
                             // c0 has variable size, cannot determine static size
-                            // Return error or 0? Standard struct.size might error?
-                            // For now, let's just ignore or return 0
+                            // 返回nil表示无法确定
+                            return LuaValue.NIL;
                         }
                         size += strLen;
                         break;
+                    default:
+                        break;
                 }
-                i++;
             }
             return LuaValue.valueOf(size);
+        }
+        
+        private int[] parseCStringLen(String fmt, int start) {
+            int i = start + 1;
+            int fmtLen = fmt.length();
+            
+            if (i < fmtLen && Character.isDigit(fmt.charAt(i))) {
+                int digitStart = i;
+                while (i < fmtLen && Character.isDigit(fmt.charAt(i))) {
+                    i++;
+                }
+                int strLen = Integer.parseInt(fmt.substring(digitStart, i));
+                return new int[]{strLen, i - 1};
+            }
+            return new int[]{1, start};
         }
     }
 }
