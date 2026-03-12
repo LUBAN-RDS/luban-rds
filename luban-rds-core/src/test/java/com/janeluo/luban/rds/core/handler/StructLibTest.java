@@ -300,53 +300,44 @@ public class StructLibTest {
         assertEquals("Should return nil for variable size format (c0)", "$-1\r\n", resp);
     }
 
-    /* ==================== Redisson 兼容性测试 ==================== */
+/* ==================== Redisson 兼容性测试 ==================== */
 
 @Test
     public void testRedissonLc0Lc0CombinedFormat() {
-        // Lc0Lc0 格式说明：
-        // L = 4字节无符号整数
-        // c0 = 读取剩余所有字节
-        // 第二个 L 和 c0 无法执行，因为第一个 c0 已经读取了所有剩余数据
         String script = 
-            "local packed = struct.pack('Lc0', 5, 'mykey') " +
+            "local packed = struct.pack('Lc0', 'mykey') " +
             "local results = {struct.unpack('Lc0', packed)} " +
-            "return {#results, results[1], results[2]}";
+            "return {#results, results[1]}";
         
         Object result = luaCommandHandler.handle(database, new String[]{"EVAL", script, "0"}, memoryStore);
         String resp = result.toString();
         
         System.out.println("testRedissonLc0Lc0CombinedFormat result: " + resp.replace("\r\n", "\\r\\n"));
         
-        // Lc0 返回 2 个值：L的值 和 c0的字符串
-        assertTrue("Should return array with 3 elements", resp.startsWith("*3\r\n"));
-        assertTrue("First element should be 2 (count)", resp.contains(":2\r\n"));
-        assertTrue("Should contain length 5", resp.contains(":5\r\n"));
+        assertTrue("Should return array with 2 elements", resp.startsWith("*2\r\n"));
+        assertTrue("First element should be 1 (count)", resp.contains(":1\r\n"));
         assertTrue("Should contain 'mykey'", resp.contains("mykey"));
     }
 
     @Test
     public void testRedissonDLc0ReturnCount() {
         String script = 
-            "local packed = struct.pack('dLc0', 12345.678, 10, 'helloWorld') " +
+            "local packed = struct.pack('dLc0', 12345.678, 'helloWorld') " +
             "local results = {struct.unpack('dLc0', packed)} " +
             "return #results";
         
         Object result = luaCommandHandler.handle(database, new String[]{"EVAL", script, "0"}, memoryStore);
         String resp = result.toString();
         
-        assertEquals("struct.unpack('dLc0', ...) should return exactly 3 values", ":3\r\n", resp);
+        assertEquals("struct.unpack('dLc0', ...) should return 2 values (d + Lc0 combined)", ":2\r\n", resp);
     }
 
     @Test
     public void testRedissonLc0Format() {
-        // 测试 Lc0 格式：L 读取长度，c0 读取对应长度的字符串
-        // L 读取 4 字节无符号整数
-        // c0 读取剩余所有字节
         String script = 
-            "local packed = struct.pack('Lc0', 5, 'mykey') " +
-            "local len, str = struct.unpack('Lc0', packed) " +
-            "return {len, str}";
+            "local packed = struct.pack('Lc0', 'mykey') " +
+            "local str = struct.unpack('Lc0', packed) " +
+            "return {#str, str}";
         
         Object result = luaCommandHandler.handle(database, new String[]{"EVAL", script, "0"}, memoryStore);
         String resp = result.toString();
@@ -362,21 +353,19 @@ public class StructLibTest {
 
     @Test
     public void testComplexFormat() {
-        // d=double, L=unsigned long, c0=variable string, b=byte, h=short
         String script = 
-            "local packed = struct.pack('dLc0', 1.5, 3, 'abc') " +
-            "local d, L, c = struct.unpack('dLc0', packed) " +
-            "return {d, L, c}";
+            "local packed = struct.pack('dLc0', 1.5, 'abc') " +
+            "local d, c = struct.unpack('dLc0', packed) " +
+            "return {d, c}";
         
         Object result = luaCommandHandler.handle(database, new String[]{"EVAL", script, "0"}, memoryStore);
         String resp = result.toString();
         
         System.out.println("testComplexFormat result: " + resp.replace("\r\n", "\\r\\n"));
         
-        assertTrue("Should return array with 3 elements", resp.startsWith("*3\r\n"));
+        assertTrue("Should return array with 2 elements", resp.startsWith("*2\r\n"));
         assertTrue("Should contain double", resp.contains("1.5"));
-        assertTrue("Should contain length 3", resp.contains(":3\r\n"));
-        assertTrue("Should contain 'abc'", resp.contains("abc"));
+        assertTrue("Should contain string", resp.contains("abc"));
     }
 
     @Test

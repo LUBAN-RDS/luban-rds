@@ -261,7 +261,7 @@ public class RedissonMapCacheScriptTest {
         String originalValue = "testValue123";
         double originalTimestamp = 12345.678;
         
-        String packedValue = structPack("dLc0", originalTimestamp, originalValue.length(), originalValue);
+        String packedValue = structPack("dLc0", originalTimestamp, originalValue);
         
         hset(hashKey, key, packedValue);
         
@@ -269,8 +269,8 @@ public class RedissonMapCacheScriptTest {
             "local s = redis.call('hgetall', KEYS[1]); " +
             "for i, v in ipairs(s) do " +
             "    if i % 2 == 0 then " +
-            "        local t, len, val = struct.unpack('dLc0', v); " +
-            "        return {t, len, val}; " +
+            "        local t, val = struct.unpack('dLc0', v); " +
+            "        return {t, val}; " +
             "    end; " +
             "end; " +
             "return nil;";
@@ -279,7 +279,7 @@ public class RedissonMapCacheScriptTest {
         String resp = result.toString();
 
         System.out.println("testStructUnpackInLoop resp: " + resp.replace("\r\n", "\\r\\n"));
-        assertTrue("Should return array with 3 elements", resp.startsWith("*3\r\n"));
+        assertTrue("Should return array with 2 elements", resp.startsWith("*2\r\n"));
         assertTrue("Should contain timestamp: " + resp, resp.contains("12345"));
         assertTrue("Should contain original value: " + resp, resp.contains(originalValue));
     }
@@ -292,40 +292,29 @@ public class RedissonMapCacheScriptTest {
         String originalValue = "mySecretValue123";
         double originalTimestamp = 9999999999999.0;
         
-        String packedValue = structPack("dLc0", originalTimestamp, originalValue.length(), originalValue);
+        String packedValue = structPack("dLc0", originalTimestamp, originalValue);
         
         hset(hashKey, key, packedValue);
         
-        String wrongScript = 
+        String script = 
             "local value = redis.call('hget', KEYS[1], ARGV[1]); " +
             "if value == false then return nil; end; " +
             "local t, val = struct.unpack('dLc0', value); " +
             "return val;";
         
-        String correctScript = 
-            "local value = redis.call('hget', KEYS[1], ARGV[1]); " +
-            "if value == false then return nil; end; " +
-            "local t, len, val = struct.unpack('dLc0', value); " +
-            "return val;";
+        Object result = executeScript(script, new String[]{hashKey}, new String[]{key});
+        String resp = result.toString();
         
-        Object wrongResult = executeScript(wrongScript, new String[]{hashKey}, new String[]{key});
-        Object correctResult = executeScript(correctScript, new String[]{hashKey}, new String[]{key});
+        System.out.println("Script result: " + resp.replace("\r\n", "\\r\\n"));
         
-        String wrongResp = wrongResult.toString();
-        String correctResp = correctResult.toString();
-        
-        System.out.println("Wrong script result: " + wrongResp.replace("\r\n", "\\r\\n"));
-        System.out.println("Correct script result: " + correctResp.replace("\r\n", "\\r\\n"));
-        
-        assertTrue("Wrong script returns length as integer: " + wrongResp, wrongResp.startsWith(":" + originalValue.length() + "\r\n"));
-        assertTrue("Correct script returns actual value: " + correctResp, correctResp.startsWith("$" + originalValue.length() + "\r\n"));
-        assertTrue("Correct script contains value: " + correctResp, correctResp.contains(originalValue));
+        assertTrue("Script returns actual value: " + resp, resp.startsWith("$" + originalValue.length() + "\r\n"));
+        assertTrue("Script contains value: " + resp, resp.contains(originalValue));
     }
     
     @Test
     public void testStructUnpackReturnCount() {
         String script = 
-            "local packed = struct.pack('dLc0', 12345.678, 10, 'helloWorld'); " +
+            "local packed = struct.pack('dLc0', 12345.678, 'helloWorld'); " +
             "local results = {struct.unpack('dLc0', packed)}; " +
             "return #results;";
         
@@ -333,6 +322,6 @@ public class RedissonMapCacheScriptTest {
         String resp = result.toString();
 
         System.out.println("testStructUnpackReturnCount resp: " + resp.replace("\r\n", "\\r\\n"));
-        assertEquals("struct.unpack('dLc0', ...) should return 3 values (d, L, c0)", ":3\r\n", resp);
+        assertEquals("struct.unpack('dLc0', ...) should return 2 values (d + Lc0 combined)", ":2\r\n", resp);
     }
 }
