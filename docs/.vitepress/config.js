@@ -112,7 +112,8 @@ export default defineConfig({
             { text: '开发流程', link: '/development/process' },
             { text: '代码规范', link: '/development/standards' },
             { text: '测试指南', link: '/development/testing' },
-            { text: '贡献指南', link: '/development/contributing' }
+            { text: '贡献指南', link: '/development/contributing' },
+            { text: '开发路线图', link: '/development/roadmap' }
           ]
         }
       ],
@@ -122,7 +123,6 @@ export default defineConfig({
           items: [
             { text: '介绍', link: '/resources/' },
             { text: '常见问题', link: '/resources/faq' },
-            { text: '路线图', link: '/resources/roadmap' },
             { text: '相关资源', link: '/resources/related' }
           ]
         }
