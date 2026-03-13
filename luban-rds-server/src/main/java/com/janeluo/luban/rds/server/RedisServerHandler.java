@@ -354,6 +354,12 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             int currentDatabase = clientInfo.getCurrentDatabase();
             logger.debug("Processing command: {} In Pub/Sub mode: {}", commandName, clientInfo.isInPubSubMode());
 
+            // MONITOR 钩子：在命令处理前提交到监控队列
+            // 排除 MONITOR 命令本身，避免递归监控
+            if (!"MONITOR".equals(commandName)) {
+                MonitorManager.getInstance().submit(currentDatabase, ctx.channel().remoteAddress().toString(), commandName, args);
+            }
+
             if ("WATCH".equals(commandName)) {
                 logger.debug("Handling WATCH command");
                 handleWatchCommand(ctx, clientInfo, currentDatabase, args);
@@ -467,9 +473,6 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 handlePublish(ctx, args);
                 return;
             }
-
-            // MONITOR hook
-            MonitorManager.getInstance().submit(currentDatabase, ctx.channel().remoteAddress().toString(), commandName, args);
 
             long startTime = System.nanoTime();
             Object response = commandHandler.handle(commandName, currentDatabase, args, memoryStore);
