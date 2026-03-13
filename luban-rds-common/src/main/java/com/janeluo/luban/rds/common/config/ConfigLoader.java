@@ -235,6 +235,32 @@ public class ConfigLoader {
                         config.setMemoryFragThreshold(Integer.parseInt(value));
                         break;
 
+                    // Lua 配置
+                    case "lua-timeout":
+                        config.setLuaTimeout(Long.parseLong(value));
+                        break;
+                    case "lua-sandbox-enabled":
+                        config.setLuaSandboxEnabled("yes".equalsIgnoreCase(value));
+                        break;
+                    case "lua-max-script-bytes":
+                        config.setLuaMaxScriptBytes(Long.parseLong(value));
+                        break;
+                    case "lua-max-return-bytes":
+                        config.setLuaMaxReturnBytes(Long.parseLong(value));
+                        break;
+                    case "lua-max-ops-per-script":
+                        config.setLuaMaxOpsPerScript(Long.parseLong(value));
+                        break;
+                    case "lua-yield-ms":
+                        config.setLuaYieldMs(Long.parseLong(value));
+                        break;
+                    case "lua-allowed-modules":
+                        config.setLuaAllowedModules(value);
+                        break;
+                    case "lua-blocked-functions":
+                        config.setLuaBlockedFunctions(value);
+                        break;
+
                     default:
                         logger.debug("未知配置项: {} = {}", key, value);
                         break;

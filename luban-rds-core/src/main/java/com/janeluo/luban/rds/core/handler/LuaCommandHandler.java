@@ -804,6 +804,27 @@ this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
                     }
                     String msg = str.substring(index + 1, end);
                     throw new RuntimeException(msg);
+                } else if (c == '*') {
+                    // 嵌套数组 (Nested array) - 关键修复：支持HSCAN等命令返回的嵌套数组
+                    int nestedLenEnd = str.indexOf("\r\n", index + 1);
+                    if (nestedLenEnd == -1) {
+                        break;
+                    }
+                    String nestedLenStr = str.substring(index + 1, nestedLenEnd);
+                    int nestedCount;
+                    try {
+                        nestedCount = Integer.parseInt(nestedLenStr);
+                    } catch (NumberFormatException e) {
+                        table.set(elementIndex++, LuaValue.FALSE);
+                        index = nestedLenEnd + 2;
+                        continue;
+                    }
+                    // 递归解析嵌套数组
+                    String nestedResp = str.substring(index);
+                    LuaValue nestedTable = convertRedisResponseToLuaValue(nestedResp);
+                    table.set(elementIndex++, nestedTable);
+                    // 计算嵌套数组结束位置
+                    index = getNextIndex(str, index);
                 } else if (c == '%') {
                     // RESP3 Map类型
                     int mapLenEnd = str.indexOf("\r\n", index + 1);

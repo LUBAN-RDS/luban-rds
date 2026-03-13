@@ -213,4 +213,69 @@ public class LuaScriptIntegrationTest {
         Object count = luaCommandHandler.handle(database, new String[]{"EVAL", "return redis.call('ZCARD', KEYS[1])", "1", zsetExp}, memoryStore);
         assertEquals(":0\r\n", count.toString());
     }
+
+    @Test
+    public void testUnpackWithLargeArray() {
+        // 测试 unpack 是否能处理大量参数
+        String script = 
+            "local arr = {}; " +
+            "for i = 1, 100 do " +
+            "    table.insert(arr, 'key'..i); " +
+            "end; " +
+            "local result = {unpack(arr, 1, #arr)}; " +
+            "return #result;";
+        
+        Object result = executeScript(script, new String[]{}, new String[]{});
+        String resp = result.toString();
+        System.out.println("testUnpackWithLargeArray: " + resp);
+        assertEquals(":100\r\n", resp);
+    }
+
+    @Test
+    public void testUnpackWithTableGetn() {
+        // 测试 table.getn 和 unpack 组合
+        String script = 
+            "local arr = {}; " +
+            "for i = 1, 50 do " +
+            "    table.insert(arr, 'key'..i); " +
+            "end; " +
+            "local result = {unpack(arr, 1, table.getn(arr))}; " +
+            "return #result;";
+        
+        Object result = executeScript(script, new String[]{}, new String[]{});
+        String resp = result.toString();
+        System.out.println("testUnpackWithTableGetn: " + resp);
+        assertEquals(":50\r\n", resp);
+    }
+
+    @Test
+    public void testRedissonEvictScript() {
+        // 模拟 Redisson 的 evict 脚本
+        String hashKey = "igrisk_dbs:RPT:SHEET:UPDATE_MAP_KEY";
+        String timeoutSet = "redisson__timeout__set:{igrisk_dbs:RPT:SHEET:UPDATE_MAP_KEY}";
+        String idleSet = "redisson__idle__set:{igrisk_dbs:RPT:SHEET:UPDATE_MAP_KEY}";
+        String channel = "redisson_map_cache_expired:{igrisk_dbs:RPT:SHEET:UPDATE_MAP_KEY}";
+        String lastAccessSet = "redisson__map_cache__last_access__set:{igrisk_dbs:RPT:SHEET:UPDATE_MAP_KEY}";
+        String lockKey = "redisson__execute_task_once_latch:{igrisk_dbs:RPT:SHEET:UPDATE_MAP_KEY}";
+        
+        String[] keys = {hashKey, timeoutSet, idleSet, channel, lastAccessSet, lockKey};
+        String[] argv = {"1773421509046", "100", "60", "lock_val", "PUBLISH"};
+        
+        // 插入测试数据
+        StringBuilder luaInsert = new StringBuilder();
+        luaInsert.append("for i=1,50 do ");
+        luaInsert.append("local k = 'testKey'..i; ");
+        luaInsert.append("local v = struct.pack('dLc0', 1773287349770, 10, 'testValue'..i); ");
+        luaInsert.append("redis.call('HSET', KEYS[1], k, v); ");
+        luaInsert.append("redis.call('ZADD', KEYS[2], 1773421509046, k); ");
+        luaInsert.append("end; return 50;");
+        
+        executeScript(luaInsert.toString(), new String[]{hashKey, timeoutSet}, new String[]{});
+        
+        // 执行 evict 脚本
+        Object result = executeScript(REAPER_SCRIPT, keys, argv);
+        String resp = result.toString();
+        System.out.println("testRedissonEvictScript result: " + resp);
+        assertTrue("Should process keys", resp.startsWith(":"));
+    }
 }

@@ -147,6 +147,16 @@ public class NettyRedisServer implements RedisServer {
         RuntimeConfig.setSlowlogLogSlowerThan(config.getSlowlogLogSlowerThan());
         RuntimeConfig.setSlowlogMaxLen(config.getSlowlogMaxLen());
         RuntimeConfig.setMonitorMaxClients(config.getMonitorMaxClients());
+        
+        // 初始化 Lua 配置
+        RuntimeConfig.setLuaScriptTimeoutMs(config.getLuaTimeout());
+        RuntimeConfig.setLuaSandboxEnabled(config.isLuaSandboxEnabled());
+        RuntimeConfig.setLuaMaxScriptBytes(config.getLuaMaxScriptBytes());
+        RuntimeConfig.setLuaMaxReturnBytes(config.getLuaMaxReturnBytes());
+        RuntimeConfig.setLuaMaxOpsPerScript(config.getLuaMaxOpsPerScript());
+        RuntimeConfig.setLuaYieldMs(config.getLuaYieldMs());
+        RuntimeConfig.setLuaAllowedModules(config.getLuaAllowedModules());
+        RuntimeConfig.setLuaBlockedFunctions(config.getLuaBlockedFunctions());
     }
     
     /**

@@ -171,6 +171,48 @@ public class RdsConfig {
      */
     private int businessThreads = 0;
 
+    // ==================== Lua 配置 ====================
+
+    /**
+     * Lua 脚本执行超时时间（毫秒），默认 5000
+     */
+    private long luaTimeout = 5000L;
+
+    /**
+     * 是否启用 Lua 沙箱模式，默认 true
+     */
+    private boolean luaSandboxEnabled = true;
+
+    /**
+     * Lua 脚本最大字节数，默认 65536
+     */
+    private long luaMaxScriptBytes = 65536L;
+
+    /**
+     * Lua 脚本最大返回字节数，默认 1048576
+     */
+    private long luaMaxReturnBytes = 1048576L;
+
+    /**
+     * Lua 脚本最大操作数，默认 1000
+     */
+    private long luaMaxOpsPerScript = 1000L;
+
+    /**
+     * Lua 脚本让步间隔（毫秒），默认 1
+     */
+    private long luaYieldMs = 1L;
+
+    /**
+     * Lua 允许的模块列表（逗号分隔）
+     */
+    private String luaAllowedModules = "";
+
+    /**
+     * Lua 阻止的函数列表（逗号分隔）
+     */
+    private String luaBlockedFunctions = "";
+
     // ==================== Getter 和 Setter ====================
 
     public String getBind() {
@@ -403,6 +445,70 @@ public class RdsConfig {
 
     public void setMemoryFragThreshold(int memoryFragThreshold) {
         this.memoryFragThreshold = memoryFragThreshold;
+    }
+
+    public long getLuaTimeout() {
+        return luaTimeout;
+    }
+
+    public void setLuaTimeout(long luaTimeout) {
+        this.luaTimeout = luaTimeout;
+    }
+
+    public boolean isLuaSandboxEnabled() {
+        return luaSandboxEnabled;
+    }
+
+    public void setLuaSandboxEnabled(boolean luaSandboxEnabled) {
+        this.luaSandboxEnabled = luaSandboxEnabled;
+    }
+
+    public long getLuaMaxScriptBytes() {
+        return luaMaxScriptBytes;
+    }
+
+    public void setLuaMaxScriptBytes(long luaMaxScriptBytes) {
+        this.luaMaxScriptBytes = luaMaxScriptBytes;
+    }
+
+    public long getLuaMaxReturnBytes() {
+        return luaMaxReturnBytes;
+    }
+
+    public void setLuaMaxReturnBytes(long luaMaxReturnBytes) {
+        this.luaMaxReturnBytes = luaMaxReturnBytes;
+    }
+
+    public long getLuaMaxOpsPerScript() {
+        return luaMaxOpsPerScript;
+    }
+
+    public void setLuaMaxOpsPerScript(long luaMaxOpsPerScript) {
+        this.luaMaxOpsPerScript = luaMaxOpsPerScript;
+    }
+
+    public long getLuaYieldMs() {
+        return luaYieldMs;
+    }
+
+    public void setLuaYieldMs(long luaYieldMs) {
+        this.luaYieldMs = luaYieldMs;
+    }
+
+    public String getLuaAllowedModules() {
+        return luaAllowedModules;
+    }
+
+    public void setLuaAllowedModules(String luaAllowedModules) {
+        this.luaAllowedModules = luaAllowedModules;
+    }
+
+    public String getLuaBlockedFunctions() {
+        return luaBlockedFunctions;
+    }
+
+    public void setLuaBlockedFunctions(String luaBlockedFunctions) {
+        this.luaBlockedFunctions = luaBlockedFunctions;
     }
 
     @Override

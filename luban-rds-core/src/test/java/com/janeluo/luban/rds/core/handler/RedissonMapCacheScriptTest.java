@@ -324,4 +324,96 @@ public class RedissonMapCacheScriptTest {
         System.out.println("testStructUnpackReturnCount resp: " + resp.replace("\r\n", "\\r\\n"));
         assertEquals("struct.unpack('dLc0', ...) should return 2 values (d + Lc0 combined)", ":2\r\n", resp);
     }
+
+    @Test
+    public void testHscanNestedArrayInLua() {
+        String hashKey = "test:hscan:lua";
+        String packedVal1 = structPack("dLc0", 12345.0, "value1");
+        String packedVal2 = structPack("dLc0", 67890.0, "value2");
+        
+        hset(hashKey, "field1", packedVal1);
+        hset(hashKey, "field2", packedVal2);
+        
+        String script = 
+            "local res = redis.call('hscan', KEYS[1], ARGV[1], 'count', ARGV[2]); " +
+            "local cursor = res[1]; " +
+            "local data = res[2]; " +
+            "if data == nil then return {'err', 'res[2] is nil'} end; " +
+            "local result = {}; " +
+            "for i, v in ipairs(data) do " +
+            "    if i % 2 == 0 then " +
+            "        local key = data[i-1]; " +
+            "        local t, val = struct.unpack('dLc0', v); " +
+            "        table.insert(result, key); " +
+            "        table.insert(result, val); " +
+            "    end; " +
+            "end; " +
+            "return result;";
+        
+        Object result = executeScript(script, new String[]{hashKey}, new String[]{"0", "100"});
+        String resp = result.toString();
+        
+        System.out.println("testHscanNestedArrayInLua resp: " + resp.replace("\r\n", "\\r\\n"));
+        
+        assertTrue("Response should be array: " + resp, resp.startsWith("*"));
+        assertTrue("Response should contain field1: " + resp, resp.contains("field1"));
+        assertTrue("Response should contain field2: " + resp, resp.contains("field2"));
+        assertTrue("Response should contain value1: " + resp, resp.contains("value1"));
+        assertTrue("Response should contain value2: " + resp, resp.contains("value2"));
+    }
+
+    @Test
+    public void testRedissonHscanScriptLikeRBlockingQueue() {
+        String hashKey = "igrisk_dbs:RPT:SHEET:UPDATE_MAP_KEY";
+        String timeoutSet = "redisson__timeout__set:{igrisk_dbs:RPT:SHEET:UPDATE_MAP_KEY}";
+        String idleSet = "redisson__idle__set:{igrisk_dbs:RPT:SHEET:UPDATE_MAP_KEY}";
+        
+        String packedVal = structPack("dLc0", 1773287349770.0, "testPayload");
+        hset(hashKey, "testKey", packedVal);
+        zadd(timeoutSet, 9999999999000.0, "testKey");
+        
+        String script = 
+            "local result = {}; " +
+            "local idleKeys = {}; " +
+            "local res; " +
+            "if (#ARGV == 4) then " +
+            "    res = redis.call('hscan', KEYS[1], ARGV[2], 'match', ARGV[3], 'count', ARGV[4]); " +
+            "else " +
+            "    res = redis.call('hscan', KEYS[1], ARGV[2], 'count', ARGV[3]); " +
+            "end; " +
+            "local currentTime = tonumber(ARGV[1]); " +
+            "for i, value in ipairs(res[2]) do " +
+            "    if i % 2 == 0 then " +
+            "        local key = res[2][i-1]; " +
+            "        local expireDate = 92233720368547758; " +
+            "        local expireDateScore = redis.call('zscore', KEYS[2], key); " +
+            "        if expireDateScore ~= false then " +
+            "            expireDate = tonumber(expireDateScore) " +
+            "        end; " +
+            "        local t, val = struct.unpack('dLc0', value); " +
+            "        if t ~= 0 then " +
+            "            local expireIdle = redis.call('zscore', KEYS[3], key); " +
+            "            if expireIdle ~= false then " +
+            "                if tonumber(expireIdle) > currentTime and expireDate > currentTime then " +
+            "                    table.insert(idleKeys, key); " +
+            "                end; " +
+            "                expireDate = math.min(expireDate, tonumber(expireIdle)) " +
+            "            end; " +
+            "        end; " +
+            "        if expireDate > currentTime then " +
+            "            table.insert(result, key); " +
+            "        end; " +
+            "    end; " +
+            "end; " +
+            "return {res[1], result, idleKeys};";
+        
+        Object result = executeScript(script, new String[]{hashKey, timeoutSet, idleSet}, 
+                                       new String[]{"1773420104752", "0", "10"});
+        String resp = result.toString();
+        
+        System.out.println("testRedissonHscanScriptLikeRBlockingQueue resp: " + resp.replace("\r\n", "\\r\\n"));
+        
+        assertTrue("Response should be array: " + resp, resp.startsWith("*3"));
+        assertTrue("Response should contain testKey: " + resp, resp.contains("testKey"));
+    }
 }
