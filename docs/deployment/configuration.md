@@ -281,14 +281,32 @@ expired_keys:50
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| lua-time-limit | 整数 | 5000 | Lua 脚本执行超时时间（毫秒） |
-| lua-sandbox-enabled | 布尔值 | true | 是否启用 Lua 沙箱模式 |
-| lua-allowed-modules | 字符串 | "base,string,table,math" | 允许使用的 Lua 模块 |
-| lua-blocked-functions | 字符串 | "os.execute,io.open" | 禁止使用的 Lua 函数 |
-| lua-max-script-bytes | 整数 | 524288 | Lua 脚本最大大小（字节） |
-| lua-max-return-bytes | 整数 | 524288 | Lua 脚本返回值最大大小（字节） |
-| lua-max-ops-per-script | 整数 | 0 | 脚本单次执行允许的最大 Redis 命令调用次数。0 表示无限制。 |
-| lua-yield-ms | 整数 | 0 | 脚本执行期间让出 CPU 的时间间隔（毫秒），防止长时间阻塞。0 表示不让出。 |
+| lua-timeout | 整数 | 10000 | Lua 脚本执行超时时间（毫秒）。脚本执行超过此时间将被终止。0 表示无限制。 |
+| lua-sandbox-enabled | 布尔值 | true | 是否启用 Lua 沙箱模式。启用后将限制危险函数和模块的访问。 |
+| lua-allowed-modules | 字符串 | "" | 允许使用的 Lua 模块（逗号分隔）。为空表示使用默认安全模块。 |
+| lua-blocked-functions | 字符串 | "" | 禁止使用的 Lua 函数（逗号分隔）。如 `os.execute,io.open`。 |
+| lua-max-script-bytes | 整数 | 65536 | Lua 脚本最大大小（字节）。超过此大小的脚本将被拒绝执行。 |
+| lua-max-return-bytes | 整数 | 1048576 | Lua 脚本返回值最大大小（字节）。超过此大小将被截断。 |
+| lua-max-ops-per-script | 整数 | 1000 | 脚本单次执行允许的最大 Redis 命令调用次数。0 表示无限制。 |
+| lua-yield-ms | 整数 | 1 | 脚本执行期间让出 CPU 的时间间隔（毫秒），防止长时间阻塞。0 表示不让出。 |
+
+**配置文件示例**：
+```conf
+# Lua 脚本配置
+lua-timeout 10000
+lua-sandbox-enabled yes
+lua-max-script-bytes 65536
+lua-max-return-bytes 1048576
+```
+
+**运行时修改**：
+```bash
+# 查看当前配置
+CONFIG GET lua-timeout
+
+# 修改超时时间为 5 秒
+CONFIG SET lua-timeout 5000
+```
 
 ### 5.2 脚本缓存
 

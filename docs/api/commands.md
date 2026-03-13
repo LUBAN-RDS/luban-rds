@@ -74,11 +74,14 @@ HSCAN user:1 0 MATCH n* COUNT 10
 | **RPUSH** | `RPUSH key value [value ...]` | 右侧推入元素 |
 | **LPOP** | `LPOP key` | 左侧弹出元素 |
 | **RPOP** | `RPOP key` | 右侧弹出元素 |
+| **BLPOP** | `BLPOP key [key ...] timeout` | 阻塞式左侧弹出，支持多键等待 |
+| **BRPOP** | `BRPOP key [key ...] timeout` | 阻塞式右侧弹出，支持多键等待 |
 | **LLEN** | `LLEN key` | 获取列表长度 |
 | **LRANGE** | `LRANGE key start stop` | 获取列表范围 |
 | **LINDEX** | `LINDEX key index` | 获取指定索引的元素 |
 | **LSET** | `LSET key index value` | 设置指定索引的元素 |
 | **LREM** | `LREM key count value` | 删除指定值的元素 |
+| **LTRIM** | `LTRIM key start stop` | 裁剪列表，保留指定范围 |
 
 **示例**：
 ```bash
@@ -87,6 +90,51 @@ RPUSH fruits date
 LRANGE fruits 0 -1
 LPOP fruits
 LLEN fruits
+
+# 阻塞式弹出（等待 5 秒）
+BLPOP mylist 5
+
+# 多键阻塞等待（任一列表有元素即返回）
+BLPOP list1 list2 list3 10
+
+# 无限等待（timeout=0）
+BRPOP mylist 0
+```
+
+### BLPOP/BRPOP 阻塞命令详解
+
+BLPOP 和 BRPOP 是 Redis 的阻塞式列表弹出命令，符合 Redis 规范：
+
+**特点**：
+- 如果列表有元素，立即弹出并返回 `[key, value]`
+- 如果列表为空，阻塞等待直到有元素被推入（LPUSH/RPUSH）
+- 支持同时等待多个键，按顺序检查
+- 可设置超时时间（秒），0 表示无限等待
+- 超时返回 `nil`
+
+**返回值格式**：
+```
+1) "key"      # 弹出元素的键名
+2) "value"    # 弹出的元素值
+```
+
+**使用场景**：
+- 消息队列（生产者-消费者模式）
+- 任务队列
+- 事件通知
+
+**示例流程**：
+```bash
+# 终端 A：阻塞等待消息
+BLPOP task_queue 0
+# 阻塞中...
+
+# 终端 B：推送任务
+LPUSH task_queue "task1"
+
+# 终端 A：收到消息
+1) "task_queue"
+2) "task1"
 ```
 
 ## 4. Set 类型命令

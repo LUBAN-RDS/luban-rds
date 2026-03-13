@@ -1,6 +1,6 @@
 ---
 title: 更新日志
-last_updated: 2026-03-13
+last_updated: 2026-03-14
 version: 1.0.0-SNAPSHOT
 ---
 # Changelog
@@ -19,9 +19,9 @@ version: 1.0.0-SNAPSHOT
 - 流订阅支持（SSUBSCRIBE/SUNSUBSCRIBE）
 - 慢查询日志功能（SLOWLOG GET/LEN/RESET）
 - 扩展字符串命令：SETNX, GETSET, SETRANGE, GETRANGE, PSETEX
-- 扩展集合命令：SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF
-- 扩展有序集合命令：ZREVRANGE, ZRANGEBYSCORE, ZRANK, ZREVRANK, ZCOUNT, ZINCRBY
-- 扩展列表命令：LINDEX, LSET, LREM
+- 扩展集合命令：SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF, SSCAN
+- 扩展有序集合命令：ZREVRANGE, ZRANGEBYSCORE, ZRANK, ZREVRANK, ZCOUNT, ZINCRBY, ZPOPMAX, ZPOPMIN, ZSCAN
+- 扩展列表命令：LINDEX, LSET, LREM, LTRIM
 - 扩展哈希命令：HSETNX, HINCRBY, HSCAN
 - 客户端管理命令：CLIENT LIST, CLIENT KILL, CLIENT SETNAME, CLIENT GETNAME
 - 键版本控制机制，支持 WATCH 乐观锁
@@ -29,6 +29,8 @@ version: 1.0.0-SNAPSHOT
 - Lua struct 库增强：支持 Lc0、Ic0、ic0 等组合格式说明符，变长字符串打包和解包
 - MONITOR 命令重构：采用 MPSC 无锁环形缓冲区实现高性能命令监控（<40ns 开销）
 - 分布式追踪支持：基于 TraceId 的全链路追踪，自动注入日志 MDC，支持多线程环境下的 TraceId 传递
+- **BLPOP/BRPOP 阻塞命令支持**：完整实现 Redis 规范的阻塞列表弹出命令，支持多键等待、超时设置、LPUSH/RPUSH 唤醒
+- **配置文件 Lua 支持**：新增 lua-timeout、lua-sandbox-enabled、lua-max-script-bytes 等配置项
 
 ### Changed
 
@@ -61,6 +63,8 @@ version: 1.0.0-SNAPSHOT
 - 修复 RDB 持久化 ZSet 分数丢失问题，完整保存和恢复分数
 - 修复 RDB 长度编码错误，添加边界检查
 - 添加过期键主动清理机制，避免过期键长期占用内存
+- **修复 Lua 脚本中 HSCAN/SSCAN/ZSCAN 嵌套数组解析问题**：当 HSCAN 等命令在 Lua 脚本中返回嵌套数组时，`res[2]` 为 nil 的问题
+- **修复 BLPOP/BRPOP 命令未注册问题**：命令未被识别的问题
 
 ### Security
 

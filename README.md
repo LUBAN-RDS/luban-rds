@@ -229,7 +229,8 @@ luban-rds/
 - HSET, HSETNX, HMSET, HGET, HMGET, HGETALL, HDEL, HEXISTS, HKEYS, HVALS, HLEN, HINCRBY, HSCAN
 
 ### 列表命令
-- LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LREM, LINDEX, LSET
+- LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LREM, LINDEX, LSET, LTRIM
+- BLPOP, BRPOP（阻塞式弹出，支持多键等待和超时）
 
 ### 集合命令
 - SADD, SREM, SMEMBERS, SISMEMBER, SCARD, SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF
@@ -324,6 +325,10 @@ luban-rds/
 | `business-threads` | 业务线程数 | CPU 核心数 |
 | `use-pool` | 是否使用内存池 | yes |
 | `memory-frag-threshold` | 内存碎片率阈值（%） | 30 |
+| `lua-timeout` | Lua 脚本执行超时时间（毫秒） | 10000 |
+| `lua-sandbox-enabled` | 是否启用 Lua 沙箱模式 | yes |
+| `lua-max-script-bytes` | Lua 脚本最大字节数 | 65536 |
+| `lua-max-return-bytes` | Lua 脚本最大返回字节数 | 1048576 |
 
 ## 💾 持久化
 
@@ -554,6 +559,9 @@ mvn test
 - [x] Docker 部署支持
 - [x] Kubernetes 部署支持
 - [x] 分布式追踪（TraceId 全链路追踪，自动日志注入，多线程传递）
+- [x] **阻塞列表命令（BLPOP/BRPOP）**：完整实现 Redis 规范，支持多键等待、超时设置、LPUSH/RPUSH 唤醒
+- [x] **Lua 嵌套数组支持**：修复 HSCAN/SSCAN/ZSCAN 在 Lua 脚本中的嵌套数组解析问题
+- [x] **配置文件 Lua 支持**：支持 lua-timeout、lua-sandbox-enabled 等配置项
 
 ### 正在开发
 
