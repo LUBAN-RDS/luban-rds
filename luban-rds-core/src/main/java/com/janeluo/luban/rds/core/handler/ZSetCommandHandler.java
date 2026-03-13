@@ -2,9 +2,11 @@ package com.janeluo.luban.rds.core.handler;
 
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.constant.RdsCommandConstant;
+import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.google.common.collect.Sets;
 
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -13,10 +15,15 @@ import java.util.Set;
  * <p>负责处理Redis ZSet类型相关的所有命令，包括：
  * <ul>
  *   <li>ZADD - 有序集合元素添加</li>
- *   <li>ZRANGE/ZRANGEBYSCORE - 有序集合范围获取</li>
+ *   <li>ZRANGE/ZRANGEBYSCORE/ZREVRANGE - 有序集合范围获取</li>
  *   <li>ZSCORE - 元素分数获取</li>
- *   <li>ZREM - 有序集合元素删除</li>
+ *   <li>ZREM/ZREMRANGEBYSCORE/ZREMRANGEBYRANK - 有序集合元素删除</li>
  *   <li>ZCARD - 有序集合基数获取</li>
+ *   <li>ZSCAN - 有序集合迭代扫描</li>
+ *   <li>ZRANK/ZREVRANK - 元素排名获取</li>
+ *   <li>ZINCRBY - 元素分数增量</li>
+ *   <li>ZCOUNT - 分数范围内计数</li>
+ *   <li>ZPOPMAX/ZPOPMIN - 弹出最高/最低分元素</li>
  * </ul>
  * 
  * @author janeluo
@@ -29,7 +36,17 @@ public class ZSetCommandHandler implements CommandHandler {
         RdsCommandConstant.ZRANGEBYSCORE,
         RdsCommandConstant.ZSCORE,
         RdsCommandConstant.ZREM,
-        RdsCommandConstant.ZCARD
+        RdsCommandConstant.ZCARD,
+        RdsCommandConstant.ZSCAN,
+        RdsCommandConstant.ZREMRANGEBYSCORE,
+        RdsCommandConstant.ZREMRANGEBYRANK,
+        RdsCommandConstant.ZRANK,
+        RdsCommandConstant.ZREVRANK,
+        RdsCommandConstant.ZINCRBY,
+        RdsCommandConstant.ZCOUNT,
+        RdsCommandConstant.ZPOPMAX,
+        RdsCommandConstant.ZPOPMIN,
+        RdsCommandConstant.ZREVRANGE
     );
     
     @Override
@@ -49,6 +66,26 @@ public class ZSetCommandHandler implements CommandHandler {
                 return handleZRem(database, args, store);
             case RdsCommandConstant.ZCARD:
                 return handleZCard(database, args, store);
+            case RdsCommandConstant.ZSCAN:
+                return handleZScan(database, args, store);
+            case RdsCommandConstant.ZREMRANGEBYSCORE:
+                return handleZRemRangeByScore(database, args, store);
+            case RdsCommandConstant.ZREMRANGEBYRANK:
+                return handleZRemRangeByRank(database, args, store);
+            case RdsCommandConstant.ZRANK:
+                return handleZRank(database, args, store);
+            case RdsCommandConstant.ZREVRANK:
+                return handleZRevRank(database, args, store);
+            case RdsCommandConstant.ZINCRBY:
+                return handleZIncrBy(database, args, store);
+            case RdsCommandConstant.ZCOUNT:
+                return handleZCount(database, args, store);
+            case RdsCommandConstant.ZPOPMAX:
+                return handleZPopMax(database, args, store);
+            case RdsCommandConstant.ZPOPMIN:
+                return handleZPopMin(database, args, store);
+            case RdsCommandConstant.ZREVRANGE:
+                return handleZRevRange(database, args, store);
             default:
                 return "-ERR unknown command\r\n";
         }
@@ -101,7 +138,7 @@ public class ZSetCommandHandler implements CommandHandler {
         }
         
         // 使用优化的 zrange 方法（已排序，无需再排序）
-        java.util.List<String> resultList = store.zrange(database, key, start, stop);
+        List<String> resultList = store.zrange(database, key, start, stop);
         
         if (resultList.isEmpty()) {
             return "*0\r\n";
@@ -150,7 +187,7 @@ public class ZSetCommandHandler implements CommandHandler {
             }
         }
         
-        java.util.List<String> resultList = store.zrangeByScore(database, key, min, max, offset, count);
+        List<String> resultList = store.zrangeByScore(database, key, min, max, offset, count);
         
         if (resultList.isEmpty()) {
             return "*0\r\n";
@@ -213,6 +250,263 @@ public class ZSetCommandHandler implements CommandHandler {
         int size = store.zcard(database, key);
         
         return ":" + size + "\r\n";
+    }
+    
+    private Object handleZScan(int database, String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return "-ERR wrong number of arguments for 'zscan' command\r\n";
+        }
+        
+        String key = args[1];
+        long cursor;
+        try {
+            cursor = Long.parseLong(args[2]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        String pattern = "*";
+        int count = 10;
+        for (int i = 3; i < args.length; i++) {
+            if ("MATCH".equalsIgnoreCase(args[i]) && i + 1 < args.length) {
+                pattern = args[i + 1];
+                i++;
+            } else if ("COUNT".equalsIgnoreCase(args[i]) && i + 1 < args.length) {
+                try {
+                    count = Integer.parseInt(args[i + 1]);
+                } catch (NumberFormatException ex) {
+                    return "-ERR value is not an integer or out of range\r\n";
+                }
+                i++;
+            }
+        }
+        
+        java.util.List<Object> scan = store.zscan(database, key, cursor, pattern, count);
+        long newCursor = (Long) scan.get(0);
+        
+        StringBuilder resp = new StringBuilder();
+        resp.append("*2\r\n");
+        resp.append(RdsResponseConstant.bulkString(String.valueOf(newCursor)));
+        int pairCount = scan.size() - 1;
+        resp.append("*").append(pairCount).append("\r\n");
+        for (int i = 1; i < scan.size(); i++) {
+            String v = scan.get(i).toString();
+            resp.append(RdsResponseConstant.bulkString(v));
+        }
+        return resp.toString();
+    }
+    
+    private Object handleZRemRangeByScore(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'zremrangebyscore' command\r\n";
+        }
+        
+        String key = args[1];
+        double min, max;
+        try {
+            min = Double.parseDouble(args[2]);
+            max = Double.parseDouble(args[3]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not a valid float\r\n";
+        }
+        
+        int removed = store.zremrangeByScore(database, key, min, max);
+        return ":" + removed + "\r\n";
+    }
+    
+    private Object handleZRemRangeByRank(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'zremrangebyrank' command\r\n";
+        }
+        
+        String key = args[1];
+        long start, stop;
+        try {
+            start = Long.parseLong(args[2]);
+            stop = Long.parseLong(args[3]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        int removed = store.zremrangeByRank(database, key, start, stop);
+        return ":" + removed + "\r\n";
+    }
+    
+    private Object handleZRank(int database, String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return "-ERR wrong number of arguments for 'zrank' command\r\n";
+        }
+        
+        String key = args[1];
+        String member = args[2];
+        
+        Long rank = store.zrank(database, key, member);
+        
+        if (rank == null) {
+            return "$-1\r\n";
+        }
+        
+        return ":" + rank + "\r\n";
+    }
+    
+    private Object handleZRevRank(int database, String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return "-ERR wrong number of arguments for 'zrevrank' command\r\n";
+        }
+        
+        String key = args[1];
+        String member = args[2];
+        
+        Long rank = store.zrevrank(database, key, member);
+        
+        if (rank == null) {
+            return "$-1\r\n";
+        }
+        
+        return ":" + rank + "\r\n";
+    }
+    
+    private Object handleZIncrBy(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'zincrby' command\r\n";
+        }
+        
+        String key = args[1];
+        double increment;
+        try {
+            increment = Double.parseDouble(args[2]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not a valid float\r\n";
+        }
+        String member = args[3];
+        
+        try {
+            double newScore = store.zincrby(database, key, increment, member);
+            String scoreStr = Double.toString(newScore);
+            byte[] bytes = scoreStr.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
+        } catch (RuntimeException e) {
+            String msg = e.getMessage() != null ? e.getMessage() : "";
+            if (msg.startsWith("OOM command not allowed")) {
+                RuntimeConfig.incErrorRepliesOom();
+                return "-OOM command not allowed when used memory > 'maxmemory'\r\n";
+            }
+            throw e;
+        }
+    }
+    
+    private Object handleZCount(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'zcount' command\r\n";
+        }
+        
+        String key = args[1];
+        double min, max;
+        try {
+            min = Double.parseDouble(args[2]);
+            max = Double.parseDouble(args[3]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not a valid float\r\n";
+        }
+        
+        int count = store.zcount(database, key, min, max);
+        return ":" + count + "\r\n";
+    }
+    
+    private Object handleZPopMax(int database, String[] args, MemoryStore store) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'zpopmax' command\r\n";
+        }
+        
+        String key = args[1];
+        int count = 1;
+        if (args.length >= 3) {
+            try {
+                count = Integer.parseInt(args[2]);
+            } catch (NumberFormatException e) {
+                return "-ERR value is not an integer or out of range\r\n";
+            }
+        }
+        
+        List<String> result = store.zpopmax(database, key, count);
+        
+        if (result.isEmpty()) {
+            return "*0\r\n";
+        }
+        
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(result.size()).append("\r\n");
+        for (String item : result) {
+            byte[] bytes = item.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            sb.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        }
+        
+        return sb.toString();
+    }
+    
+    private Object handleZPopMin(int database, String[] args, MemoryStore store) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'zpopmin' command\r\n";
+        }
+        
+        String key = args[1];
+        int count = 1;
+        if (args.length >= 3) {
+            try {
+                count = Integer.parseInt(args[2]);
+            } catch (NumberFormatException e) {
+                return "-ERR value is not an integer or out of range\r\n";
+            }
+        }
+        
+        List<String> result = store.zpopmin(database, key, count);
+        
+        if (result.isEmpty()) {
+            return "*0\r\n";
+        }
+        
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(result.size()).append("\r\n");
+        for (String item : result) {
+            byte[] bytes = item.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            sb.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        }
+        
+        return sb.toString();
+    }
+    
+    private Object handleZRevRange(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'zrevrange' command\r\n";
+        }
+        
+        String key = args[1];
+        long start, stop;
+        
+        try {
+            start = Long.parseLong(args[2]);
+            stop = Long.parseLong(args[3]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        List<String> resultList = store.zrevrange(database, key, start, stop);
+        
+        if (resultList.isEmpty()) {
+            return "*0\r\n";
+        }
+        
+        StringBuilder result = new StringBuilder();
+        result.append("*");
+        result.append(resultList.size());
+        result.append("\r\n");
+        
+        for (String member : resultList) {
+            byte[] bytes = member.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            result.append("$").append(bytes.length).append("\r\n").append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        }
+        
+        return result.toString();
     }
     
     @Override

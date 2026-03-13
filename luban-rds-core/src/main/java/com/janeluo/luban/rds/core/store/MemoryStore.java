@@ -315,6 +315,33 @@ public interface MemoryStore {
      * @return 元素列表
      */
     java.util.List<String> lrange(int database, String key, long start, long stop);
+
+    /**
+     * 裁剪列表，保留指定范围内的元素
+     * @param database 数据库索引
+     * @param key List 键
+     * @param start 起始索引
+     * @param stop 结束索引
+     */
+    void ltrim(int database, String key, long start, long stop);
+
+    /**
+     * 阻塞式从列表左侧弹出元素
+     * @param database 数据库索引
+     * @param keys 列表键数组
+     * @param timeout 超时时间（秒），0表示无限等待
+     * @return 弹出结果 [key, value]，超时返回 null
+     */
+    java.util.List<String> blpop(int database, String[] keys, long timeout);
+
+    /**
+     * 阻塞式从列表右侧弹出元素
+     * @param database 数据库索引
+     * @param keys 列表键数组
+     * @param timeout 超时时间（秒），0表示无限等待
+     * @return 弹出结果 [key, value]，超时返回 null
+     */
+    java.util.List<String> brpop(int database, String[] keys, long timeout);
     
     // ==================== Set 操作优化接口 ====================
     
@@ -385,6 +412,17 @@ public interface MemoryStore {
      */
     java.util.Set<String> sdiff(int database, String... keys);
 
+    /**
+     * 扫描集合成员
+     * @param database 数据库索引
+     * @param key Set 键
+     * @param cursor 游标
+     * @param pattern 成员匹配模式（glob）
+     * @param count 返回的最大成员数
+     * @return [newCursor, member1, member2, ...]
+     */
+    java.util.List<Object> sscan(int database, String key, long cursor, String pattern, int count);
+
     // ==================== ZSet 操作优化接口 ====================
     
     /**
@@ -444,6 +482,103 @@ public interface MemoryStore {
      * @return 成员列表
      */
     java.util.List<String> zrangeByScore(int database, String key, double min, double max, int offset, int count);
+
+    /**
+     * 扫描有序集合成员
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param cursor 游标
+     * @param pattern 成员匹配模式（glob）
+     * @param count 返回的最大成员数
+     * @return [newCursor, member1, score1, member2, score2, ...]
+     */
+    java.util.List<Object> zscan(int database, String key, long cursor, String pattern, int count);
+
+    /**
+     * 按分数范围删除成员
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param min 最小分数
+     * @param max 最大分数
+     * @return 删除的成员数量
+     */
+    int zremrangeByScore(int database, String key, double min, double max);
+
+    /**
+     * 按排名范围删除成员
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param start 起始排名
+     * @param stop 结束排名
+     * @return 删除的成员数量
+     */
+    int zremrangeByRank(int database, String key, long start, long stop);
+
+    /**
+     * 获取成员排名（按分数升序，从0开始）
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param member 成员
+     * @return 排名，不存在返回 null
+     */
+    Long zrank(int database, String key, String member);
+
+    /**
+     * 获取成员排名（按分数降序，从0开始）
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param member 成员
+     * @return 排名，不存在返回 null
+     */
+    Long zrevrank(int database, String key, String member);
+
+    /**
+     * 增加成员分数
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param increment 增量
+     * @param member 成员
+     * @return 增量后的分数
+     */
+    double zincrby(int database, String key, double increment, String member);
+
+    /**
+     * 统计分数范围内的成员数量
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param min 最小分数
+     * @param max 最大分数
+     * @return 成员数量
+     */
+    int zcount(int database, String key, double min, double max);
+
+    /**
+     * 弹出分数最高的成员
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param count 弹出数量
+     * @return 成员和分数列表 [member1, score1, member2, score2, ...]
+     */
+    java.util.List<String> zpopmax(int database, String key, int count);
+
+    /**
+     * 弹出分数最低的成员
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param count 弹出数量
+     * @return 成员和分数列表 [member1, score1, member2, score2, ...]
+     */
+    java.util.List<String> zpopmin(int database, String key, int count);
+
+    /**
+     * 按分数降序获取成员范围
+     * @param database 数据库索引
+     * @param key ZSet 键
+     * @param start 起始排名
+     * @param stop 结束排名
+     * @return 成员列表
+     */
+    java.util.List<String> zrevrange(int database, String key, long start, long stop);
 
     /**
      * 获取有序集合的所有成员和分数

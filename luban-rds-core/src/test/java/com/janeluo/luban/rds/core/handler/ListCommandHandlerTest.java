@@ -288,7 +288,7 @@ public class ListCommandHandlerTest {
     @Test
     public void testSupportedCommands() {
         java.util.Set<String> supportedCommands = handler.supportedCommands();
-        assertEquals(9, supportedCommands.size());
+        assertEquals(12, supportedCommands.size());
         assert(supportedCommands.contains("LPUSH"));
         assert(supportedCommands.contains("RPUSH"));
         assert(supportedCommands.contains("LPOP"));
@@ -298,5 +298,97 @@ public class ListCommandHandlerTest {
         assert(supportedCommands.contains("LREM"));
         assert(supportedCommands.contains("LINDEX"));
         assert(supportedCommands.contains("LSET"));
+        assert(supportedCommands.contains("BLPOP"));
+        assert(supportedCommands.contains("BRPOP"));
+        assert(supportedCommands.contains("LTRIM"));
+    }
+    
+    // ==================== BLPOP 命令测试 ====================
+    
+    @Test
+    public void testBLPopNormal() {
+        String[] args = {"BLPOP", "list1", "list2", "5"};
+        when(store.blpop(DATABASE, new String[]{"list1", "list2"}, 5L)).thenReturn(java.util.Arrays.asList("list1", "value1"));
+        
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("*2\r\n$5\r\nlist1\r\n$6\r\nvalue1\r\n", result);
+    }
+    
+    @Test
+    public void testBLPopTimeout() {
+        String[] args = {"BLPOP", "list1", "0"};
+        when(store.blpop(DATABASE, new String[]{"list1"}, 0L)).thenReturn(null);
+        
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("$-1\r\n", result);
+    }
+    
+    @Test
+    public void testBLPopWrongArguments() {
+        String[] args = {"BLPOP", "list1"};
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR wrong number of arguments for 'blpop' command\r\n", result);
+    }
+    
+    @Test
+    public void testBLPopInvalidTimeout() {
+        String[] args = {"BLPOP", "list1", "abc"};
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR value is not an integer or out of range\r\n", result);
+    }
+    
+    // ==================== BRPOP 命令测试 ====================
+    
+    @Test
+    public void testBRPopNormal() {
+        String[] args = {"BRPOP", "list1", "list2", "5"};
+        when(store.brpop(DATABASE, new String[]{"list1", "list2"}, 5L)).thenReturn(java.util.Arrays.asList("list2", "value2"));
+        
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("*2\r\n$5\r\nlist2\r\n$6\r\nvalue2\r\n", result);
+    }
+    
+    @Test
+    public void testBRPopTimeout() {
+        String[] args = {"BRPOP", "list1", "0"};
+        when(store.brpop(DATABASE, new String[]{"list1"}, 0L)).thenReturn(null);
+        
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("$-1\r\n", result);
+    }
+    
+    @Test
+    public void testBRPopWrongArguments() {
+        String[] args = {"BRPOP", "list1"};
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR wrong number of arguments for 'brpop' command\r\n", result);
+    }
+    
+    // ==================== LTRIM 命令测试 ====================
+    
+    @Test
+    public void testLTrimNormal() {
+        String[] args = {"LTRIM", "list1", "0", "2"};
+        doNothing().when(store).ltrim(DATABASE, "list1", 0L, 2L);
+        
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("+OK\r\n", result);
+        verify(store, times(1)).ltrim(DATABASE, "list1", 0L, 2L);
+    }
+    
+    @Test
+    public void testLTrimWrongArguments() {
+        String[] args = {"LTRIM", "list1", "0"};
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR wrong number of arguments for 'ltrim' command\r\n", result);
+        verify(store, never()).ltrim(anyInt(), anyString(), anyLong(), anyLong());
+    }
+    
+    @Test
+    public void testLTrimInvalidRange() {
+        String[] args = {"LTRIM", "list1", "a", "b"};
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR value is not an integer or out of range\r\n", result);
+        verify(store, never()).ltrim(anyInt(), anyString(), anyLong(), anyLong());
     }
 }

@@ -2,6 +2,7 @@ package com.janeluo.luban.rds.core.handler;
 
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.constant.RdsCommandConstant;
+import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.google.common.collect.Sets;
 
@@ -16,6 +17,7 @@ import java.util.Set;
  *   <li>SMEMBERS/SISMEMBER - 集合成员获取和检查</li>
  *   <li>SCARD - 集合基数获取</li>
  *   <li>SINTER/SUNION/SDIFF - 集合交集/并集/差集操作</li>
+ *   <li>SSCAN - 集合迭代扫描</li>
  * </ul>
  * 
  * @author janeluo
@@ -30,7 +32,8 @@ public class SetCommandHandler implements CommandHandler {
         RdsCommandConstant.SCARD,
         RdsCommandConstant.SINTER,
         RdsCommandConstant.SUNION,
-        RdsCommandConstant.SDIFF
+        RdsCommandConstant.SDIFF,
+        RdsCommandConstant.SSCAN
     );
     
     @Override
@@ -54,6 +57,8 @@ public class SetCommandHandler implements CommandHandler {
                 return handleSUnion(database, args, store);
             case RdsCommandConstant.SDIFF:
                 return handleSDiff(database, args, store);
+            case RdsCommandConstant.SSCAN:
+                return handleSScan(database, args, store);
             default:
                 return "-ERR unknown command\r\n";
         }
@@ -204,6 +209,50 @@ public class SetCommandHandler implements CommandHandler {
         }
         
         return sb.toString();
+    }
+    
+    private Object handleSScan(int database, String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return "-ERR wrong number of arguments for 'sscan' command\r\n";
+        }
+        
+        String key = args[1];
+        long cursor;
+        try {
+            cursor = Long.parseLong(args[2]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        String pattern = "*";
+        int count = 10;
+        for (int i = 3; i < args.length; i++) {
+            if ("MATCH".equalsIgnoreCase(args[i]) && i + 1 < args.length) {
+                pattern = args[i + 1];
+                i++;
+            } else if ("COUNT".equalsIgnoreCase(args[i]) && i + 1 < args.length) {
+                try {
+                    count = Integer.parseInt(args[i + 1]);
+                } catch (NumberFormatException ex) {
+                    return "-ERR value is not an integer or out of range\r\n";
+                }
+                i++;
+            }
+        }
+        
+        java.util.List<Object> scan = store.sscan(database, key, cursor, pattern, count);
+        long newCursor = (Long) scan.get(0);
+        
+        StringBuilder resp = new StringBuilder();
+        resp.append("*2\r\n");
+        resp.append(RdsResponseConstant.bulkString(String.valueOf(newCursor)));
+        int memberCount = scan.size() - 1;
+        resp.append("*").append(memberCount).append("\r\n");
+        for (int i = 1; i < scan.size(); i++) {
+            String v = scan.get(i).toString();
+            resp.append(RdsResponseConstant.bulkString(v));
+        }
+        return resp.toString();
     }
     
     @Override

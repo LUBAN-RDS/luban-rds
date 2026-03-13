@@ -2129,6 +2129,92 @@ public class DefaultMemoryStore implements MemoryStore {
         return result;
     }
     
+    @Override
+    public void ltrim(int database, String key, long start, long stop) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof java.util.List)) {
+            return;
+        }
+        
+        @SuppressWarnings("unchecked")
+        java.util.List<String> list = (java.util.List<String>) val;
+        int size = list.size();
+        
+        // 处理负数索引
+        if (start < 0) {
+            start = Math.max(0, size + start);
+        }
+        if (stop < 0) {
+            stop = Math.max(-1, size + stop);
+        }
+        
+        int startIdx = (int) Math.min(start, size);
+        int stopIdx = (int) Math.min(stop + 1, size);
+        
+        if (startIdx >= stopIdx || startIdx >= size) {
+            // 清空列表
+            long oldSize = storeValue.getEstimatedSize();
+            list.clear();
+            storeValue.updateEstimatedSize(-oldSize);
+            updateMemory(-oldSize);
+        } else {
+            // 保留指定范围的元素
+            java.util.List<String> subList = new java.util.ArrayList<>(list.subList(startIdx, stopIdx));
+            list.clear();
+            list.addAll(subList);
+            // 重新计算大小（简化处理）
+            long newSize = 64;
+            for (String s : list) {
+                newSize += 32 + s.length() * 2L;
+            }
+            long oldSize = storeValue.getEstimatedSize();
+            storeValue.updateEstimatedSize(newSize - oldSize);
+            updateMemory(newSize - oldSize);
+        }
+        
+        bumpKeyVersion(database, key);
+    }
+    
+    @Override
+    public java.util.List<String> blpop(int database, String[] keys, long timeout) {
+        // 非阻塞实现：立即检查所有键，如果有元素就弹出
+        // 真正的阻塞实现需要修改服务器架构
+        for (String key : keys) {
+            String value = lpop(database, key);
+            if (value != null) {
+                java.util.List<String> result = new java.util.ArrayList<>(2);
+                result.add(key);
+                result.add(value);
+                return result;
+            }
+        }
+        // 没有可用元素，返回 null（在非阻塞模式下）
+        return null;
+    }
+    
+    @Override
+    public java.util.List<String> brpop(int database, String[] keys, long timeout) {
+        // 非阻塞实现：立即检查所有键，如果有元素就弹出
+        for (String key : keys) {
+            String value = rpop(database, key);
+            if (value != null) {
+                java.util.List<String> result = new java.util.ArrayList<>(2);
+                result.add(key);
+                result.add(value);
+                return result;
+            }
+        }
+        // 没有可用元素，返回 null（在非阻塞模式下）
+        return null;
+    }
+    
     // ==================== Set 操作优化实现 ====================
     
     @Override
@@ -2317,6 +2403,70 @@ public class DefaultMemoryStore implements MemoryStore {
             result.removeAll(smembers(database, keys[i]));
         }
         
+        return result;
+    }
+    
+    @Override
+    public java.util.List<Object> sscan(int database, String key, long cursor, String pattern, int count) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        java.util.List<Object> result = new java.util.ArrayList<>();
+        
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        if (storeValue == null || storeValue.isExpired()) {
+            result.add(0L);
+            return result;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof java.util.concurrent.ConcurrentHashMap.KeySetView)) {
+            result.add(0L);
+            return result;
+        }
+        
+        @SuppressWarnings("unchecked")
+        java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> set = 
+                (java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>) val;
+        RuntimeConfig.incKeyspaceHits();
+        
+        // 转换模式为正则表达式
+        String regex = null;
+        if (pattern != null && !pattern.equals("*")) {
+            regex = pattern.replace(".", "\\.")
+                          .replace("*", ".*")
+                          .replace("?", ".");
+        }
+        
+        int processed = 0;
+        int added = 0;
+        long newCursor = 0;
+        
+        for (String member : set) {
+            // 如果有游标，跳过之前的元素
+            if (cursor > 0 && processed < cursor) {
+                processed++;
+                continue;
+            }
+            
+            // 检查模式匹配
+            if (regex != null && !member.matches(regex)) {
+                processed++;
+                continue;
+            }
+            
+            if (added < count) {
+                result.add(member);
+                added++;
+            }
+            processed++;
+            
+            if (added >= count) {
+                newCursor = processed;
+                break;
+            }
+        }
+        
+        // 如果已经遍历完所有元素，游标返回0
+        result.add(0, newCursor);
         return result;
     }
     
@@ -2597,6 +2747,466 @@ public class DefaultMemoryStore implements MemoryStore {
         
         RuntimeConfig.incKeyspaceHits();
         return null;
+    }
+    
+    @Override
+    public java.util.List<Object> zscan(int database, String key, long cursor, String pattern, int count) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        java.util.List<Object> result = new java.util.ArrayList<>();
+        
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        if (storeValue == null || storeValue.isExpired()) {
+            result.add(0L);
+            return result;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof ZSetStore)) {
+            result.add(0L);
+            return result;
+        }
+        
+        ZSetStore zset = (ZSetStore) val;
+        RuntimeConfig.incKeyspaceHits();
+        
+        // 转换模式为正则表达式
+        String regex = null;
+        if (pattern != null && !pattern.equals("*")) {
+            regex = pattern.replace(".", "\\.")
+                          .replace("*", ".*")
+                          .replace("?", ".");
+        }
+        
+        int processed = 0;
+        int added = 0;
+        long newCursor = 0;
+        
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : zset.scoreMembers.entrySet()) {
+            for (String member : entry.getValue()) {
+                // 如果有游标，跳过之前的元素
+                if (cursor > 0 && processed < cursor) {
+                    processed++;
+                    continue;
+                }
+                
+                // 检查模式匹配
+                if (regex != null && !member.matches(regex)) {
+                    processed++;
+                    continue;
+                }
+                
+                if (added < count) {
+                    result.add(member);
+                    result.add(entry.getKey().toString());
+                    added++;
+                }
+                processed++;
+                
+                if (added >= count) {
+                    newCursor = processed;
+                    break;
+                }
+            }
+            if (added >= count) {
+                break;
+            }
+        }
+        
+        // 如果已经遍历完所有元素，游标返回0
+        result.add(0, newCursor);
+        return result;
+    }
+    
+    @Override
+    public int zremrangeByScore(int database, String key, double min, double max) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return 0;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof ZSetStore)) {
+            return 0;
+        }
+        
+        ZSetStore zset = (ZSetStore) val;
+        
+        // 获取分数范围内的所有成员
+        java.util.NavigableMap<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> subMap = 
+                zset.scoreMembers.subMap(min, true, max, true);
+        
+        java.util.List<String> membersToRemove = new java.util.ArrayList<>();
+        for (java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> members : subMap.values()) {
+            membersToRemove.addAll(members);
+        }
+        
+        if (membersToRemove.isEmpty()) {
+            return 0;
+        }
+        
+        long[] result = zset.remove(membersToRemove.toArray(new String[0]));
+        int removed = (int) result[0];
+        
+        if (removed > 0) {
+            long delta = -result[1];
+            storeValue.updateEstimatedSize(delta);
+            updateMemory(delta);
+            bumpKeyVersion(database, key);
+        }
+        
+        return removed;
+    }
+    
+    @Override
+    public int zremrangeByRank(int database, String key, long start, long stop) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            return 0;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof ZSetStore)) {
+            return 0;
+        }
+        
+        ZSetStore zset = (ZSetStore) val;
+        int size = zset.size();
+        
+        // 处理负索引
+        if (start < 0) start = Math.max(0, size + start);
+        if (stop < 0) stop = Math.max(-1, size + stop);
+        
+        int startIdx = (int) Math.min(start, size);
+        int stopIdx = (int) Math.min(stop + 1, size);
+        
+        if (startIdx >= stopIdx || startIdx >= size) {
+            return 0;
+        }
+        
+        // 收集要删除的成员
+        java.util.List<String> membersToRemove = new java.util.ArrayList<>();
+        int idx = 0;
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : zset.scoreMembers.entrySet()) {
+            for (String member : entry.getValue()) {
+                if (idx >= startIdx && idx < stopIdx) {
+                    membersToRemove.add(member);
+                }
+                idx++;
+                if (idx >= stopIdx) break;
+            }
+            if (idx >= stopIdx) break;
+        }
+        
+        if (membersToRemove.isEmpty()) {
+            return 0;
+        }
+        
+        long[] result = zset.remove(membersToRemove.toArray(new String[0]));
+        int removed = (int) result[0];
+        
+        if (removed > 0) {
+            long delta = -result[1];
+            storeValue.updateEstimatedSize(delta);
+            updateMemory(delta);
+            bumpKeyVersion(database, key);
+        }
+        
+        return removed;
+    }
+    
+    @Override
+    public Long zrank(int database, String key, String member) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            RuntimeConfig.incKeyspaceMisses();
+            return null;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof ZSetStore)) {
+            RuntimeConfig.incKeyspaceHits();
+            return null;
+        }
+        
+        ZSetStore zset = (ZSetStore) val;
+        RuntimeConfig.incKeyspaceHits();
+        
+        Double score = zset.getScore(member);
+        if (score == null) {
+            return null;
+        }
+        
+        // 计算排名：遍历所有分数小于该成员分数的成员数量
+        long rank = 0;
+        java.util.NavigableMap<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> headMap = 
+                zset.scoreMembers.headMap(score, false);
+        for (java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> members : headMap.values()) {
+            rank += members.size();
+        }
+        
+        // 在相同分数的成员中找到该成员的位置
+        java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> sameScoreMembers = zset.scoreMembers.get(score);
+        if (sameScoreMembers != null) {
+            for (String m : sameScoreMembers) {
+                if (m.equals(member)) {
+                    break;
+                }
+                rank++;
+            }
+        }
+        
+        return rank;
+    }
+    
+    @Override
+    public Long zrevrank(int database, String key, String member) {
+        Long rank = zrank(database, key, member);
+        if (rank == null) {
+            return null;
+        }
+        
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        if (storeValue == null || storeValue.isExpired()) {
+            return null;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof ZSetStore)) {
+            return null;
+        }
+        
+        ZSetStore zset = (ZSetStore) val;
+        return (long) zset.size() - 1 - rank;
+    }
+    
+    @Override
+    public double zincrby(int database, String key, double increment, String member) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        ZSetStore zset;
+        boolean isNew = false;
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            zset = new ZSetStore();
+            isNew = true;
+        } else {
+            Object val = storeValue.value;
+            if (val instanceof ZSetStore) {
+                zset = (ZSetStore) val;
+            } else {
+                zset = new ZSetStore();
+                isNew = true;
+            }
+        }
+        
+        Double oldScore = zset.getScore(member);
+        double newScore = (oldScore != null) ? oldScore + increment : increment;
+        
+        zset.add(member, newScore);
+        
+        if (isNew) {
+            set(database, key, zset);
+        } else {
+            if (oldScore == null) {
+                long delta = 128 + member.length() * 2L;
+                storeValue.updateEstimatedSize(delta);
+                updateMemory(delta);
+            }
+            bumpKeyVersion(database, key);
+        }
+        
+        return newScore;
+    }
+    
+    @Override
+    public int zcount(int database, String key, double min, double max) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            RuntimeConfig.incKeyspaceMisses();
+            return 0;
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof ZSetStore)) {
+            RuntimeConfig.incKeyspaceHits();
+            return 0;
+        }
+        
+        ZSetStore zset = (ZSetStore) val;
+        RuntimeConfig.incKeyspaceHits();
+        
+        java.util.NavigableMap<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> subMap = 
+                zset.scoreMembers.subMap(min, true, max, true);
+        
+        int count = 0;
+        for (java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> members : subMap.values()) {
+            count += members.size();
+        }
+        
+        return count;
+    }
+    
+    @Override
+    public java.util.List<String> zpopmax(int database, String key, int count) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            RuntimeConfig.incKeyspaceMisses();
+            return java.util.Collections.emptyList();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof ZSetStore)) {
+            RuntimeConfig.incKeyspaceHits();
+            return java.util.Collections.emptyList();
+        }
+        
+        ZSetStore zset = (ZSetStore) val;
+        RuntimeConfig.incKeyspaceHits();
+        
+        java.util.List<String> result = new java.util.ArrayList<>();
+        int removed = 0;
+        
+        // 从最高分数开始遍历（降序）
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : 
+                zset.scoreMembers.descendingMap().entrySet()) {
+            for (String member : entry.getValue()) {
+                if (removed >= count) break;
+                result.add(member);
+                result.add(entry.getKey().toString());
+                removed++;
+            }
+            if (removed >= count) break;
+        }
+        
+        // 删除这些成员
+        if (!result.isEmpty()) {
+            java.util.List<String> membersToRemove = new java.util.ArrayList<>();
+            for (int i = 0; i < result.size(); i += 2) {
+                membersToRemove.add(result.get(i));
+            }
+            long[] removeResult = zset.remove(membersToRemove.toArray(new String[0]));
+            if (removeResult[0] > 0) {
+                long delta = -removeResult[1];
+                storeValue.updateEstimatedSize(delta);
+                updateMemory(delta);
+                bumpKeyVersion(database, key);
+            }
+        }
+        
+        return result;
+    }
+    
+    @Override
+    public java.util.List<String> zpopmin(int database, String key, int count) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            RuntimeConfig.incKeyspaceMisses();
+            return java.util.Collections.emptyList();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof ZSetStore)) {
+            RuntimeConfig.incKeyspaceHits();
+            return java.util.Collections.emptyList();
+        }
+        
+        ZSetStore zset = (ZSetStore) val;
+        RuntimeConfig.incKeyspaceHits();
+        
+        java.util.List<String> result = new java.util.ArrayList<>();
+        int removed = 0;
+        
+        // 从最低分数开始遍历（升序）
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : 
+                zset.scoreMembers.entrySet()) {
+            for (String member : entry.getValue()) {
+                if (removed >= count) break;
+                result.add(member);
+                result.add(entry.getKey().toString());
+                removed++;
+            }
+            if (removed >= count) break;
+        }
+        
+        // 删除这些成员
+        if (!result.isEmpty()) {
+            java.util.List<String> membersToRemove = new java.util.ArrayList<>();
+            for (int i = 0; i < result.size(); i += 2) {
+                membersToRemove.add(result.get(i));
+            }
+            long[] removeResult = zset.remove(membersToRemove.toArray(new String[0]));
+            if (removeResult[0] > 0) {
+                long delta = -removeResult[1];
+                storeValue.updateEstimatedSize(delta);
+                updateMemory(delta);
+                bumpKeyVersion(database, key);
+            }
+        }
+        
+        return result;
+    }
+    
+    @Override
+    public java.util.List<String> zrevrange(int database, String key, long start, long stop) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue storeValue = store.storage.getIfPresent(key);
+        
+        if (storeValue == null || storeValue.isExpired()) {
+            RuntimeConfig.incKeyspaceMisses();
+            return java.util.Collections.emptyList();
+        }
+        
+        Object val = storeValue.value;
+        if (!(val instanceof ZSetStore)) {
+            RuntimeConfig.incKeyspaceHits();
+            return java.util.Collections.emptyList();
+        }
+        
+        ZSetStore zset = (ZSetStore) val;
+        RuntimeConfig.incKeyspaceHits();
+        
+        int size = zset.size();
+        if (start < 0) start = Math.max(0, size + start);
+        if (stop < 0) stop = Math.max(-1, size + stop);
+        
+        int startIdx = (int) Math.min(start, size);
+        int stopIdx = (int) Math.min(stop + 1, size);
+        
+        if (startIdx >= stopIdx || startIdx >= size) {
+            return java.util.Collections.emptyList();
+        }
+        
+        java.util.List<String> result = new java.util.ArrayList<>(stopIdx - startIdx);
+        int idx = 0;
+        
+        // 降序遍历
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : 
+                zset.scoreMembers.descendingMap().entrySet()) {
+            for (String member : entry.getValue()) {
+                if (idx >= startIdx && idx < stopIdx) {
+                    result.add(member);
+                }
+                idx++;
+                if (idx >= stopIdx) break;
+            }
+            if (idx >= stopIdx) break;
+        }
+        
+        return result;
     }
 
     @Override

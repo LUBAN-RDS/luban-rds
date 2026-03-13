@@ -16,10 +16,12 @@ import java.util.Set;
  * <ul>
  *   <li>LPUSH/RPUSH - 列表头部/尾部插入操作</li>
  *   <li>LPOP/RPOP - 列表头部/尾部弹出操作</li>
+ *   <li>BLPOP/BRPOP - 阻塞式弹出操作</li>
  *   <li>LLEN - 列表长度获取</li>
  *   <li>LRANGE - 列表范围获取</li>
  *   <li>LREM - 列表元素删除</li>
  *   <li>LINDEX/LSET - 列表索引访问和设置</li>
+ *   <li>LTRIM - 列表裁剪</li>
  * </ul>
  * 
  * @author janeluo
@@ -35,7 +37,10 @@ public class ListCommandHandler implements CommandHandler {
         RdsCommandConstant.LRANGE,
         RdsCommandConstant.LREM,
         RdsCommandConstant.LINDEX,
-        RdsCommandConstant.LSET
+        RdsCommandConstant.LSET,
+        RdsCommandConstant.BLPOP,
+        RdsCommandConstant.BRPOP,
+        RdsCommandConstant.LTRIM
     );
     
     @Override
@@ -61,6 +66,12 @@ public class ListCommandHandler implements CommandHandler {
                 return handleLIndex(database, args, store);
             case RdsCommandConstant.LSET:
                 return handleLSet(database, args, store);
+            case RdsCommandConstant.BLPOP:
+                return handleBLPop(database, args, store);
+            case RdsCommandConstant.BRPOP:
+                return handleBRPop(database, args, store);
+            case RdsCommandConstant.LTRIM:
+                return handleLTrim(database, args, store);
             default:
                 return "-ERR unknown command\r\n";
         }
@@ -267,6 +278,97 @@ public class ListCommandHandler implements CommandHandler {
         }
         
         return result.toString();
+    }
+    
+    private Object handleBLPop(int database, String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return "-ERR wrong number of arguments for 'blpop' command\r\n";
+        }
+        
+        // 解析超时时间（最后一个参数）
+        long timeout;
+        try {
+            timeout = Long.parseLong(args[args.length - 1]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        // 收集所有键
+        String[] keys = new String[args.length - 2];
+        System.arraycopy(args, 1, keys, 0, keys.length);
+        
+        // 调用阻塞弹出方法
+        List<String> result = store.blpop(database, keys, timeout);
+        
+        if (result == null) {
+            // 超时返回 nil
+            return "$-1\r\n";
+        }
+        
+        // 返回 [key, value] 格式
+        StringBuilder sb = new StringBuilder();
+        sb.append("*2\r\n");
+        byte[] keyBytes = result.get(0).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        sb.append("$").append(keyBytes.length).append("\r\n").append(new String(keyBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        byte[] valueBytes = result.get(1).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        sb.append("$").append(valueBytes.length).append("\r\n").append(new String(valueBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        
+        return sb.toString();
+    }
+    
+    private Object handleBRPop(int database, String[] args, MemoryStore store) {
+        if (args.length < 3) {
+            return "-ERR wrong number of arguments for 'brpop' command\r\n";
+        }
+        
+        // 解析超时时间（最后一个参数）
+        long timeout;
+        try {
+            timeout = Long.parseLong(args[args.length - 1]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        // 收集所有键
+        String[] keys = new String[args.length - 2];
+        System.arraycopy(args, 1, keys, 0, keys.length);
+        
+        // 调用阻塞弹出方法
+        List<String> result = store.brpop(database, keys, timeout);
+        
+        if (result == null) {
+            // 超时返回 nil
+            return "$-1\r\n";
+        }
+        
+        // 返回 [key, value] 格式
+        StringBuilder sb = new StringBuilder();
+        sb.append("*2\r\n");
+        byte[] keyBytes = result.get(0).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        sb.append("$").append(keyBytes.length).append("\r\n").append(new String(keyBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        byte[] valueBytes = result.get(1).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        sb.append("$").append(valueBytes.length).append("\r\n").append(new String(valueBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        
+        return sb.toString();
+    }
+    
+    private Object handleLTrim(int database, String[] args, MemoryStore store) {
+        if (args.length < 4) {
+            return "-ERR wrong number of arguments for 'ltrim' command\r\n";
+        }
+        
+        String key = args[1];
+        long start, stop;
+        
+        try {
+            start = Long.parseLong(args[2]);
+            stop = Long.parseLong(args[3]);
+        } catch (NumberFormatException e) {
+            return "-ERR value is not an integer or out of range\r\n";
+        }
+        
+        store.ltrim(database, key, start, stop);
+        return "+OK\r\n";
     }
     
     private List<String> getList(int database, MemoryStore store, String key) {

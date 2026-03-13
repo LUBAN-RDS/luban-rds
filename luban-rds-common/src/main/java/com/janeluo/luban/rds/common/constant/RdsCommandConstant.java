@@ -54,6 +54,9 @@ public final class RdsCommandConstant {
     public static final String LREM = "LREM";
     public static final String LINDEX = "LINDEX";
     public static final String LSET = "LSET";
+    public static final String BLPOP = "BLPOP";
+    public static final String BRPOP = "BRPOP";
+    public static final String LTRIM = "LTRIM";
 
     // ==================== 集合命令 ====================
 
@@ -65,6 +68,7 @@ public final class RdsCommandConstant {
     public static final String SINTER = "SINTER";
     public static final String SUNION = "SUNION";
     public static final String SDIFF = "SDIFF";
+    public static final String SSCAN = "SSCAN";
 
     // ==================== 有序集合命令 ====================
 
@@ -74,6 +78,16 @@ public final class RdsCommandConstant {
     public static final String ZSCORE = "ZSCORE";
     public static final String ZREM = "ZREM";
     public static final String ZCARD = "ZCARD";
+    public static final String ZSCAN = "ZSCAN";
+    public static final String ZREMRANGEBYSCORE = "ZREMRANGEBYSCORE";
+    public static final String ZREMRANGEBYRANK = "ZREMRANGEBYRANK";
+    public static final String ZRANK = "ZRANK";
+    public static final String ZREVRANK = "ZREVRANK";
+    public static final String ZINCRBY = "ZINCRBY";
+    public static final String ZCOUNT = "ZCOUNT";
+    public static final String ZPOPMAX = "ZPOPMAX";
+    public static final String ZPOPMIN = "ZPOPMIN";
+    public static final String ZREVRANGE = "ZREVRANGE";
 
     // ==================== 通用命令 ====================
 
