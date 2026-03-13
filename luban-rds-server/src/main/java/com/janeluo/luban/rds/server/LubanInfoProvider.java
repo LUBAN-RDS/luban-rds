@@ -138,28 +138,50 @@ public class LubanInfoProvider implements InfoProvider {
     private Map<String, Object> getMemoryInfo() {
         Map<String, Object> info = new HashMap<>();
         Runtime runtime = Runtime.getRuntime();
-        long totalMemory = runtime.totalMemory();
-        long freeMemory = runtime.freeMemory();
-        long maxMemory = runtime.maxMemory();
-        long usedMemory = totalMemory - freeMemory;
+        long jvmTotalMemory = runtime.totalMemory();
+        long jvmFreeMemory = runtime.freeMemory();
+        long jvmMaxMemory = runtime.maxMemory();
+        long jvmUsedMemory = jvmTotalMemory - jvmFreeMemory;
         
-        info.put("used_memory", usedMemory);
-        info.put("used_memory_human", toHumanReadable(usedMemory));
-        info.put("used_memory_rss", totalMemory); // JVM heap size as RSS approximation
-        info.put("used_memory_rss_human", toHumanReadable(totalMemory));
-        info.put("used_memory_peak", usedMemory); // Simple approximation
-        info.put("used_memory_peak_human", toHumanReadable(usedMemory));
-        info.put("used_memory_peak_perc", "100%"); // Placeholder
+        long used = 0;
+        long peak = 0;
+        long maxMemConfig = 0;
+        String policy = "noeviction";
+        double fragmentationRatio = 0.0;
+        
+        MemoryStore store = server.getMemoryStore();
+        if (store instanceof DefaultMemoryStore) {
+            DefaultMemoryStore ds = (DefaultMemoryStore) store;
+            used = ds.getUsedMemory();
+            peak = ds.getPeakUsedMemory();
+            maxMemConfig = ds.getMaxMemory();
+            policy = ds.getMaxMemoryPolicy();
+            fragmentationRatio = ds.getMemoryFragmentationRatio();
+            info.put("softmaxmemory_threshold_percent", ds.getSoftLimitPercent());
+            info.put("softmaxmemory_warning", ds.isSoftLimitExceeded() ? 1 : 0);
+        } else {
+            info.put("softmaxmemory_threshold_percent", 0);
+            info.put("softmaxmemory_warning", 0);
+        }
+        
+        info.put("used_memory", used);
+        info.put("used_memory_human", toHumanReadable(used));
+        info.put("used_memory_rss", jvmTotalMemory);
+        info.put("used_memory_rss_human", toHumanReadable(jvmTotalMemory));
+        info.put("used_memory_peak", peak);
+        info.put("used_memory_peak_human", toHumanReadable(peak));
+        double peakPerc = peak > 0 ? (used * 100.0 / peak) : 0.0;
+        info.put("used_memory_peak_perc", String.format("%.2f%%", peakPerc));
         info.put("used_memory_overhead", 0);
         info.put("used_memory_startup", 0);
-        info.put("used_memory_dataset", usedMemory);
-        info.put("used_memory_dataset_perc", "100%");
-        info.put("allocator_allocated", usedMemory);
-        info.put("allocator_active", totalMemory);
-        info.put("allocator_resident", totalMemory);
-        info.put("total_system_memory", maxMemory);
-        info.put("total_system_memory_human", toHumanReadable(maxMemory));
-        info.put("used_memory_lua", 0); // TODO: Track Lua memory
+        info.put("used_memory_dataset", used);
+        info.put("used_memory_dataset_perc", used > 0 ? "100.00%" : "0.00%");
+        info.put("allocator_allocated", jvmUsedMemory);
+        info.put("allocator_active", jvmTotalMemory);
+        info.put("allocator_resident", jvmTotalMemory);
+        info.put("total_system_memory", jvmMaxMemory);
+        info.put("total_system_memory_human", toHumanReadable(jvmMaxMemory));
+        info.put("used_memory_lua", 0);
         info.put("used_memory_lua_human", "0B");
         
         long scriptsBytes = RuntimeConfig.getCachedScriptsBytes();
@@ -167,25 +189,26 @@ public class LubanInfoProvider implements InfoProvider {
         info.put("used_memory_scripts_human", toHumanReadable(scriptsBytes));
         info.put("number_of_cached_scripts", RuntimeConfig.getCachedScriptsCount());
         
-        long maxMemConfig = 0;
-        String policy = "noeviction";
-        MemoryStore store = server.getMemoryStore();
-        if (store instanceof DefaultMemoryStore) {
-            DefaultMemoryStore ds = (DefaultMemoryStore) store;
-            maxMemConfig = ds.getMaxMemory();
-            policy = ds.getMaxMemoryPolicy();
-            info.put("softmaxmemory_threshold_percent", ds.getSoftLimitPercent());
-            info.put("softmaxmemory_warning", ds.isSoftLimitExceeded() ? 1 : 0);
-        } else {
-            info.put("softmaxmemory_threshold_percent", 0);
-            info.put("softmaxmemory_warning", 0);
-        }
         info.put("maxmemory", maxMemConfig);
         info.put("maxmemory_human", toHumanReadable(maxMemConfig));
         info.put("maxmemory_policy", policy);
         
-        info.put("mem_fragmentation_ratio", 0.0);
+        info.put("allocator_frag_ratio", 0.00);
+        info.put("allocator_frag_bytes", 0);
+        info.put("allocator_rss_ratio", 0.00);
+        info.put("allocator_rss_bytes", 0);
+        info.put("rss_overhead_ratio", 0.00);
+        info.put("rss_overhead_bytes", 0);
+        info.put("mem_fragmentation_ratio", String.format("%.2f", fragmentationRatio));
+        info.put("mem_fragmentation_bytes", 0);
+        info.put("mem_not_counted_for_evict", 0);
+        info.put("mem_replication_backlog", 0);
+        info.put("mem_clients_slaves", 0);
+        info.put("mem_clients_normal", 0);
+        info.put("mem_aof_buffer", 0);
         info.put("mem_allocator", "jvm");
+        info.put("active_defrag_running", 0);
+        info.put("lazyfree_pending_objects", 0);
         return info;
     }
 
@@ -201,7 +224,7 @@ public class LubanInfoProvider implements InfoProvider {
         Map<String, Object> info = new HashMap<>();
         info.put("total_connections_received", RedisServerHandler.getTotalConnectionsReceived());
         info.put("total_commands_processed", RedisServerHandler.getTotalCommandsProcessed());
-        info.put("instantaneous_ops_per_sec", 0); // TODO: Calculate OPS
+        info.put("instantaneous_ops_per_sec", 0);
         info.put("total_net_input_bytes", 0);
         info.put("total_net_output_bytes", 0);
         info.put("instantaneous_input_kbps", 0.00);
@@ -210,16 +233,52 @@ public class LubanInfoProvider implements InfoProvider {
         info.put("sync_full", 0);
         info.put("sync_partial_ok", 0);
         info.put("sync_partial_err", 0);
-        info.put("expired_keys", 0); // TODO: Track expired keys
+        info.put("expired_keys", 0);
         info.put("expired_stale_perc", 0.00);
         info.put("expired_time_cap_reached_count", 0);
-        info.put("evicted_keys", 0); // TODO: Track evicted keys
+        info.put("evicted_keys", 0);
         info.put("keyspace_hits", RuntimeConfig.getKeyspaceHits());
         info.put("keyspace_misses", RuntimeConfig.getKeyspaceMisses());
-        info.put("pubsub_channels", 0); // TODO: Expose from PubSubManager
+        info.put("pubsub_channels", 0);
         info.put("pubsub_patterns", 0);
         info.put("latest_fork_usec", 0);
         info.put("total_forks", 0);
+        info.put("migrate_cached_sockets", 0);
+        info.put("slave_expires_tracked_keys", 0);
+        info.put("active_defrag_hits", 0);
+        info.put("active_defrag_misses", 0);
+        info.put("active_defrag_key_hits", 0);
+        info.put("active_defrag_key_misses", 0);
+        info.put("tracking_total_keys", 0);
+        info.put("tracking_total_items", 0);
+        info.put("tracking_total_prefixes", 0);
+        info.put("unexpected_error_replies", 0);
+        info.put("oom_error_replies", RuntimeConfig.getErrorRepliesOom());
+        info.put("total_error_replies", RuntimeConfig.getErrorRepliesTotal());
+        info.put("dump_payload_sanitizations", 0);
+        info.put("total_reads_processed", 0);
+        info.put("total_writes_processed", 0);
+        info.put("script_executions", RuntimeConfig.getScriptExecutions());
+        info.put("script_timeouts", RuntimeConfig.getScriptTimeouts());
+        info.put("script_kills", RuntimeConfig.getScriptKills());
+        long totalMs = RuntimeConfig.getScriptTotalTimeMs();
+        long executions = RuntimeConfig.getScriptExecutions();
+        long avgMs = executions > 0 ? (totalMs / executions) : 0;
+        long maxMs = RuntimeConfig.getScriptMaxTimeMs();
+        info.put("script_avg_time_ms", avgMs);
+        info.put("script_max_time_ms", maxMs);
+        info.put("lua_max_script_bytes", RuntimeConfig.getLuaMaxScriptBytes());
+        info.put("lua_max_return_bytes", RuntimeConfig.getLuaMaxReturnBytes());
+        info.put("lua_max_ops_per_script", RuntimeConfig.getLuaMaxOpsPerScript());
+        info.put("lua_yield_ms", RuntimeConfig.getLuaYieldMs());
+        info.put("metrics_enabled", RuntimeConfig.isMetricsEnabled() ? 1 : 0);
+        info.put("lua_sandbox_enabled", RuntimeConfig.isLuaSandboxEnabled() ? 1 : 0);
+        info.put("lua_allowed_modules", RuntimeConfig.getLuaAllowedModules());
+        info.put("lua_blocked_functions", RuntimeConfig.getLuaBlockedFunctions());
+        long lastResetMs = RuntimeConfig.getLastResetTimeMs();
+        info.put("stats_last_reset_time_ms", lastResetMs);
+        String iso = lastResetMs > 0 ? java.time.Instant.ofEpochMilli(lastResetMs).toString() : "-";
+        info.put("stats_last_reset_time_iso", iso);
         return info;
     }
 
