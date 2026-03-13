@@ -1,1 +1,0 @@
-org.springframework.boot.autoconfigure.EnableAutoConfiguration=com.janeluo.luban.rds.spring.boot.autoconfigure.RedisServerAutoConfiguration

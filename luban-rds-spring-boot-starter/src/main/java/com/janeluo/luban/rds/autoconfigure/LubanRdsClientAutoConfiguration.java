@@ -9,12 +9,15 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.DependsOn;
 
 /**
  * Luban RDS 客户端自动配置类
  * 
  * <p>仅配置客户端 Bean，不启动内嵌服务器。
  * 适用于连接远程 Luban RDS 服务器的场景。
+ * 
+ * <p>添加连接重试机制确保远程连接成功。
  * 
  * <p>配置示例：
  * <pre>
@@ -45,6 +48,8 @@ public class LubanRdsClientAutoConfiguration {
      * <p>仅当 {@code luban.rds.client.enabled=true} 时生效。
      * 客户端连接到配置的远程服务器。
      * 
+     * <p>添加重试机制确保连接成功。
+     * 
      * @return Redis 客户端实例
      */
     @Bean
@@ -56,9 +61,48 @@ public class LubanRdsClientAutoConfiguration {
         logger.info("Initializing remote Luban RDS client connecting to {}:{}", host, port);
         
         RedisClient client = new NettyRedisClient(host, port);
-        client.connect();
+        
+        // 带重试的连接
+        connectWithRetry(client, host, port);
         
         logger.info("Remote Luban RDS client connected successfully to {}:{}", host, port);
         return client;
+    }
+
+    /**
+     * 带重试的连接方法
+     * 
+     * @param client 客户端实例
+     * @param host 主机地址
+     * @param port 端口号
+     */
+    private void connectWithRetry(RedisClient client, String host, int port) {
+        int maxRetries = 5;
+        int retryDelay = 1000; // 毫秒
+        int retryCount = 0;
+        
+        while (retryCount < maxRetries) {
+            try {
+                client.connect();
+                // 简单的连接验证
+                if (!client.isConnected()) {
+                    throw new IllegalStateException("Client not connected after connect() call");
+                }
+                break;
+            } catch (Exception e) {
+                retryCount++;
+                if (retryCount >= maxRetries) {
+                    throw new IllegalStateException("Failed to connect to remote Luban RDS server after " + maxRetries + " attempts", e);
+                }
+                logger.warn("Connection attempt {} failed, retrying in {}ms... Error: {}", 
+                        retryCount, retryDelay, e.getMessage());
+                try {
+                    Thread.sleep(retryDelay);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted during connection retry", ie);
+                }
+            }
+        }
     }
 }
