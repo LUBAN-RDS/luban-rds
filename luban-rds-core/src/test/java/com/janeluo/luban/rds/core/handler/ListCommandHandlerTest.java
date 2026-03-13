@@ -7,6 +7,7 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.*;
 
 public class ListCommandHandlerTest {
@@ -308,7 +309,8 @@ public class ListCommandHandlerTest {
     @Test
     public void testBLPopNormal() {
         String[] args = {"BLPOP", "list1", "list2", "5"};
-        when(store.blpop(DATABASE, new String[]{"list1", "list2"}, 5L)).thenReturn(java.util.Arrays.asList("list1", "value1"));
+        // Mock lpop to return value for list1
+        when(store.lpop(DATABASE, "list1")).thenReturn("value1");
         
         Object result = handler.handle(DATABASE, args, store);
         assertEquals("*2\r\n$5\r\nlist1\r\n$6\r\nvalue1\r\n", result);
@@ -317,10 +319,14 @@ public class ListCommandHandlerTest {
     @Test
     public void testBLPopTimeout() {
         String[] args = {"BLPOP", "list1", "0"};
-        when(store.blpop(DATABASE, new String[]{"list1"}, 0L)).thenReturn(null);
+        // Mock lpop to return null (empty list)
+        when(store.lpop(DATABASE, "list1")).thenReturn(null);
         
         Object result = handler.handle(DATABASE, args, store);
-        assertEquals("$-1\r\n", result);
+        // When list is empty, should return BlockingResult for blocking
+        assertTrue("Should return BlockingResult for empty list", result instanceof com.janeluo.luban.rds.core.stream.BlockingResult);
+        com.janeluo.luban.rds.core.stream.BlockingResult br = (com.janeluo.luban.rds.core.stream.BlockingResult) result;
+        assertTrue("Should be BLPOP type", br.isBLPop());
     }
     
     @Test
@@ -342,7 +348,9 @@ public class ListCommandHandlerTest {
     @Test
     public void testBRPopNormal() {
         String[] args = {"BRPOP", "list1", "list2", "5"};
-        when(store.brpop(DATABASE, new String[]{"list1", "list2"}, 5L)).thenReturn(java.util.Arrays.asList("list2", "value2"));
+        // Mock rpop to return null for list1, value for list2
+        when(store.rpop(DATABASE, "list1")).thenReturn(null);
+        when(store.rpop(DATABASE, "list2")).thenReturn("value2");
         
         Object result = handler.handle(DATABASE, args, store);
         assertEquals("*2\r\n$5\r\nlist2\r\n$6\r\nvalue2\r\n", result);
@@ -351,10 +359,14 @@ public class ListCommandHandlerTest {
     @Test
     public void testBRPopTimeout() {
         String[] args = {"BRPOP", "list1", "0"};
-        when(store.brpop(DATABASE, new String[]{"list1"}, 0L)).thenReturn(null);
+        // Mock rpop to return null (empty list)
+        when(store.rpop(DATABASE, "list1")).thenReturn(null);
         
         Object result = handler.handle(DATABASE, args, store);
-        assertEquals("$-1\r\n", result);
+        // When list is empty, should return BlockingResult for blocking
+        assertTrue("Should return BlockingResult for empty list", result instanceof com.janeluo.luban.rds.core.stream.BlockingResult);
+        com.janeluo.luban.rds.core.stream.BlockingResult br = (com.janeluo.luban.rds.core.stream.BlockingResult) result;
+        assertTrue("Should be BRPOP type", br.isBRPop());
     }
     
     @Test

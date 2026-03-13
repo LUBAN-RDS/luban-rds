@@ -3,6 +3,7 @@ package com.janeluo.luban.rds.core.handler;
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.constant.RdsCommandConstant;
 import com.janeluo.luban.rds.core.store.MemoryStore;
+import com.janeluo.luban.rds.core.stream.BlockingResult;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 
@@ -293,27 +294,32 @@ public class ListCommandHandler implements CommandHandler {
             return "-ERR value is not an integer or out of range\r\n";
         }
         
+        if (timeout < 0) {
+            return "-ERR timeout is negative\r\n";
+        }
+        
         // 收集所有键
         String[] keys = new String[args.length - 2];
         System.arraycopy(args, 1, keys, 0, keys.length);
         
-        // 调用阻塞弹出方法
-        List<String> result = store.blpop(database, keys, timeout);
-        
-        if (result == null) {
-            // 超时返回 nil
-            return "$-1\r\n";
+        // 尝试立即弹出（非阻塞检查）
+        for (String key : keys) {
+            String value = store.lpop(database, key);
+            if (value != null) {
+                // 立即返回结果
+                StringBuilder sb = new StringBuilder();
+                sb.append("*2\r\n");
+                byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                sb.append("$").append(keyBytes.length).append("\r\n").append(new String(keyBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+                byte[] valueBytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                sb.append("$").append(valueBytes.length).append("\r\n").append(new String(valueBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+                return sb.toString();
+            }
         }
         
-        // 返回 [key, value] 格式
-        StringBuilder sb = new StringBuilder();
-        sb.append("*2\r\n");
-        byte[] keyBytes = result.get(0).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-        sb.append("$").append(keyBytes.length).append("\r\n").append(new String(keyBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
-        byte[] valueBytes = result.get(1).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-        sb.append("$").append(valueBytes.length).append("\r\n").append(new String(valueBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
-        
-        return sb.toString();
+        // 所有列表都为空，返回阻塞请求标记
+        // RedisServerHandler 会处理这个阻塞请求
+        return BlockingResult.forBLPop(database, keys, timeout);
     }
     
     private Object handleBRPop(int database, String[] args, MemoryStore store) {
@@ -329,27 +335,31 @@ public class ListCommandHandler implements CommandHandler {
             return "-ERR value is not an integer or out of range\r\n";
         }
         
+        if (timeout < 0) {
+            return "-ERR timeout is negative\r\n";
+        }
+        
         // 收集所有键
         String[] keys = new String[args.length - 2];
         System.arraycopy(args, 1, keys, 0, keys.length);
         
-        // 调用阻塞弹出方法
-        List<String> result = store.brpop(database, keys, timeout);
-        
-        if (result == null) {
-            // 超时返回 nil
-            return "$-1\r\n";
+        // 尝试立即弹出（非阻塞检查）
+        for (String key : keys) {
+            String value = store.rpop(database, key);
+            if (value != null) {
+                // 立即返回结果
+                StringBuilder sb = new StringBuilder();
+                sb.append("*2\r\n");
+                byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                sb.append("$").append(keyBytes.length).append("\r\n").append(new String(keyBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+                byte[] valueBytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+                sb.append("$").append(valueBytes.length).append("\r\n").append(new String(valueBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+                return sb.toString();
+            }
         }
         
-        // 返回 [key, value] 格式
-        StringBuilder sb = new StringBuilder();
-        sb.append("*2\r\n");
-        byte[] keyBytes = result.get(0).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-        sb.append("$").append(keyBytes.length).append("\r\n").append(new String(keyBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
-        byte[] valueBytes = result.get(1).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
-        sb.append("$").append(valueBytes.length).append("\r\n").append(new String(valueBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
-        
-        return sb.toString();
+        // 所有列表都为空，返回阻塞请求标记
+        return BlockingResult.forBRPop(database, keys, timeout);
     }
     
     private Object handleLTrim(int database, String[] args, MemoryStore store) {

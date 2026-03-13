@@ -27,7 +27,9 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import com.janeluo.luban.rds.common.context.TraceContext;
 
@@ -60,25 +62,27 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     private static final java.util.Set<String> KNOWN_COMMANDS = new HashSet<>();
     static {
         String[] names = new String[]{
-                "SET","GET","INCR","DECR","INCRBY","DECRBY","APPEND","STRLEN",
-                "MSET", "MGET",
-                "HSET","HSETNX","HMSET","HGET","HMGET","HGETALL","HDEL","HEXISTS","HLEN",
-                "HSCAN",
-                "LPUSH","RPUSH","LPOP","RPOP","LLEN","LRANGE",
-                "SADD","SREM","SMEMBERS","SISMEMBER","SCARD",
-                "ZADD","ZRANGE","ZSCORE","ZREM","ZCARD",
-                "EXISTS","DEL","EXPIRE","TTL","FLUSHALL","TYPE","PING","ECHO","SELECT","INFO","SCAN","DBSIZE","TIME",
-                "AUTH",
+                "PING","ECHO","SELECT","QUIT","AUTH",
+                "GET","SET","SETNX","GETSET","MGET","MSET","MSETNX","STRLEN","APPEND","INCR","DECR","INCRBY","DECRBY",
+                "LPUSH","RPUSH","LPOP","RPOP","LLEN","LRANGE","LINDEX","LSET","LREM","LTRIM","BLPOP","BRPOP",
+                "SADD","SREM","SISMEMBER","SMEMBERS","SCARD","SPOP","SRANDMEMBER","SMOVE","SUNION","SINTER","SDIFF","SSCAN",
+                "HSET","HGET","HMSET","HMGET","HGETALL","HKEYS","HVALS","HLEN","HEXISTS","HDEL","HINCRBY","HSCAN",
+                "ZADD","ZREM","ZSCORE","ZRANK","ZREVRANK","ZRANGE","ZREVRANGE","ZRANGEBYSCORE","ZCARD","ZCOUNT","ZINCRBY","ZPOPMAX","ZPOPMIN","ZSCAN",
+                "EXPIRE","PEXPIRE","TTL","PTTL","PERSIST","TYPE","KEYS","DEL","EXISTS","DBSIZE","FLUSHDB","FLUSHALL","SCAN",
                 "SUBSCRIBE","UNSUBSCRIBE","PUBLISH","PSUBSCRIBE","PUNSUBSCRIBE","SSUBSCRIBE","SUNSUBSCRIBE",
                 "EVAL","EVALSHA","SCRIPT","SCRIPT LOAD","SCRIPT EXISTS","SCRIPT FLUSH","SCRIPT KILL",
                 "MULTI","EXEC","DISCARD","WATCH","UNWATCH","QUIT",
-                "MEMORY", "MONITOR",
+                "INFO", "MONITOR", "CONFIG", "COMMAND", "TIME", "BGSAVE", "BGREWRITEAOF", "LASTSAVE",
+                "MEMORY", "MEMORY USAGE", "MEMORY STATS", "MEMORY PURGE", "MEMORY DOCTOR", "MEMORY MALLOC-STATS", "MEMORY HELP",
                 "SLOWLOG",
                 // Stream 命令
                 "XADD","XLEN","XRANGE","XREVRANGE","XDEL","XTRIM","XREAD","XINFO",
                 "XGROUP","XREADGROUP","XACK","XPENDING","XCLAIM","XAUTOCLAIM"
         };
         for (String n : names) KNOWN_COMMANDS.add(n);
+        
+        // Register PubSubService
+        com.janeluo.luban.rds.common.context.ServerContext.setPubSubService((channel, message) -> publishMessage(channel, message));
     }
     
     // 服务器状态管理
@@ -93,31 +97,6 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     // Pub/Sub 管理
     private static final PubSubManager PUB_SUB_MANAGER = new PubSubManager();
     private static final com.janeluo.luban.rds.protocol.RedisProtocolParser SHARED_PROTOCOL_PARSER = new com.janeluo.luban.rds.protocol.RedisProtocolParser();
-
-    static {
-        String[] names = new String[]{
-                "PING","ECHO","SELECT","QUIT","AUTH",
-                "GET","SET","SETNX","GETSET","MGET","MSET","MSETNX","STRLEN","APPEND","INCR","DECR","INCRBY","DECRBY",
-                "LPUSH","RPUSH","LPOP","RPOP","LLEN","LRANGE","LINDEX","LSET","LREM","LTRIM",
-                "SADD","SREM","SISMEMBER","SMEMBERS","SCARD","SPOP","SRANDMEMBER","SMOVE","SUNION","SINTER","SDIFF",
-                "HSET","HGET","HMSET","HMGET","HGETALL","HKEYS","HVALS","HLEN","HEXISTS","HDEL","HINCRBY",
-                "ZADD","ZREM","ZSCORE","ZRANK","ZREVRANK","ZRANGE","ZREVRANGE","ZRANGEBYSCORE","ZCARD","ZCOUNT","ZINCRBY",
-                "EXPIRE","PEXPIRE","TTL","PTTL","PERSIST","TYPE","KEYS","DEL","EXISTS","DBSIZE","FLUSHDB","FLUSHALL",
-                "SUBSCRIBE","UNSUBSCRIBE","PUBLISH","PSUBSCRIBE","PUNSUBSCRIBE","SSUBSCRIBE","SUNSUBSCRIBE",
-                "EVAL","EVALSHA","SCRIPT","SCRIPT LOAD","SCRIPT EXISTS","SCRIPT FLUSH","SCRIPT KILL",
-                "MULTI","EXEC","DISCARD","WATCH","UNWATCH","QUIT",
-                "INFO", "MONITOR",
-                "MEMORY", "MEMORY USAGE", "MEMORY STATS", "MEMORY PURGE", "MEMORY DOCTOR", "MEMORY MALLOC-STATS", "MEMORY HELP",
-                "HSCAN",
-                // Stream 命令
-                "XADD","XLEN","XRANGE","XREVRANGE","XDEL","XTRIM","XREAD","XINFO",
-                "XGROUP","XREADGROUP","XACK","XPENDING","XCLAIM","XAUTOCLAIM"
-        };
-        for (String n : names) KNOWN_COMMANDS.add(n);
-        
-        // Register PubSubService
-        com.janeluo.luban.rds.common.context.ServerContext.setPubSubService((channel, message) -> publishMessage(channel, message));
-    }
     
     public static int publishMessage(String channel, String message) {
         int receivers = 0;
@@ -501,6 +480,12 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             if (response instanceof BlockingResult) {
                 handleBlockingResult(ctx, clientInfo, (BlockingResult) response);
                 return;
+            }
+            
+            // 处理 LPUSH/RPUSH 后唤醒阻塞请求
+            String upperCommand = commandName.toUpperCase();
+            if (("LPUSH".equals(upperCommand) || "RPUSH".equals(upperCommand)) && args.length >= 3) {
+                handlePushWakeUp(currentDatabase, args[1]);
             }
             
             ByteBuf responseBuffer = protocolParser.serialize(response);
@@ -1461,12 +1446,142 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     // ==================== 阻塞命令处理 ====================
     
     /**
+     * 处理 LPUSH/RPUSH 后唤醒阻塞请求
+     */
+    private void handlePushWakeUp(int database, final String key) {
+        final int db = database;
+        final String k = key;
+        
+        BlockingRequestManager blockingMgr = BlockingRequestManager.getInstance();
+        BlockingRequestManager.BlockingRequest request = blockingMgr.tryWakeUpWithPop(
+            database, key,
+            () -> memoryStore.lpop(db, k),
+            () -> memoryStore.rpop(db, k)
+        );
+        
+        if (request != null) {
+            logger.debug("Woke up blocking request after push: key={}", key);
+        }
+    }
+    
+    /**
+     * 发送阻塞响应给客户端
+     */
+    private void sendBlockingResponse(Channel channel, String key, String value) {
+        if (!channel.isActive()) {
+            return;
+        }
+        
+        // 构建响应: *2\r\n$keyLen\r\nkey\r\n$valueLen\r\nvalue\r\n
+        StringBuilder sb = new StringBuilder();
+        sb.append("*2\r\n");
+        byte[] keyBytes = key.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        sb.append("$").append(keyBytes.length).append("\r\n");
+        sb.append(new String(keyBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        byte[] valueBytes = value.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        sb.append("$").append(valueBytes.length).append("\r\n");
+        sb.append(new String(valueBytes, java.nio.charset.StandardCharsets.ISO_8859_1)).append("\r\n");
+        
+        ByteBuf responseBuffer = io.netty.buffer.Unpooled.copiedBuffer(sb.toString(), java.nio.charset.StandardCharsets.UTF_8);
+        channel.writeAndFlush(responseBuffer);
+        
+        logger.debug("Sent blocking response: key={}, value={}", key, value);
+    }
+    
+    /**
      * 处理阻塞命令结果
+     * 
+     * <p>当 BLPOP/BRPOP/XREAD/XREADGROUP 返回 BlockingResult 时调用此方法。
+     */
+    private void handleBlockingResult(ChannelHandlerContext ctx, ClientInfo clientInfo, BlockingResult blockingResult) {
+        logger.debug("Handling blocking result: type={}, keys={}", blockingResult.getType(), blockingResult.getKeys());
+        
+        // 处理 List 类型的阻塞 (BLPOP/BRPOP)
+        if (blockingResult.isListBlocking()) {
+            handleListBlockingResult(ctx, clientInfo, blockingResult);
+            return;
+        }
+        
+        // 处理 Stream 类型的阻塞 (XREAD/XREADGROUP)
+        handleStreamBlockingResult(ctx, clientInfo, blockingResult);
+    }
+    
+    // 用于执行阻塞等待的线程池
+    private static final java.util.concurrent.ExecutorService blockingExecutor = 
+        java.util.concurrent.Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "blocking-wait-executor");
+            t.setDaemon(true);
+            return t;
+        });
+    
+    /**
+     * 处理 List 类型的阻塞 (BLPOP/BRPOP)
+     */
+    private void handleListBlockingResult(ChannelHandlerContext ctx, ClientInfo clientInfo, BlockingResult blockingResult) {
+        int database = blockingResult.getDatabase();
+        final String[] keys = blockingResult.getKeyArray();
+        long timeoutMs = blockingResult.getTimeout();
+        
+        // 转换阻塞类型
+        BlockingRequestManager.BlockingType type = 
+            blockingResult.isBLPop() 
+                ? BlockingRequestManager.BlockingType.BLPOP 
+                : BlockingRequestManager.BlockingType.BRPOP;
+        
+        // 添加阻塞请求
+        final BlockingRequestManager blockingMgr = BlockingRequestManager.getInstance();
+        final BlockingRequestManager.BlockingRequest request = blockingMgr.addRequest(ctx.channel(), database, keys, type, timeoutMs);
+        
+        logger.debug("Added list blocking request: database={}, keys={}, type={}, timeout={}ms", 
+            database, java.util.Arrays.toString(keys), type, timeoutMs);
+        
+        // 在单独的线程中阻塞等待结果
+        blockingExecutor.submit(() -> {
+            try {
+                // 计算等待超时
+                long waitTimeout = timeoutMs > 0 ? timeoutMs : Long.MAX_VALUE;
+                String[] result = request.future.get(waitTimeout, TimeUnit.MILLISECONDS);
+                
+                if (result != null) {
+                    // 成功获取元素，发送响应
+                    sendBlockingResponse(ctx.channel(), result[0], result[1]);
+                } else {
+                    // 超时或取消，发送 null 响应
+                    ByteBuf nullBuffer = protocolParser.serialize(null);
+                    if (nullBuffer != null && nullBuffer.isReadable()) {
+                        ctx.writeAndFlush(nullBuffer);
+                    } else if (nullBuffer != null) {
+                        nullBuffer.release();
+                    }
+                }
+            } catch (TimeoutException e) {
+                // 超时
+                request.completeTimeout();
+                ByteBuf nullBuffer = protocolParser.serialize(null);
+                if (nullBuffer != null && nullBuffer.isReadable()) {
+                    ctx.writeAndFlush(nullBuffer);
+                } else if (nullBuffer != null) {
+                    nullBuffer.release();
+                }
+            } catch (InterruptedException e) {
+                // 被中断
+                Thread.currentThread().interrupt();
+                request.cancel();
+            } catch (ExecutionException e) {
+                // 执行异常
+                logger.error("Error waiting for blocking result", e);
+                request.cancel();
+            }
+        });
+    }
+    
+    /**
+     * 处理 Stream 类型的阻塞 (XREAD/XREADGROUP)
      * 
      * <p>当 XREAD/XREADGROUP 返回 BlockingResult 时调用此方法。
      * 该方法会阻塞当前线程，直到有新消息到达或超时。
      */
-    private void handleBlockingResult(ChannelHandlerContext ctx, ClientInfo clientInfo, BlockingResult blockingResult) {
+    private void handleStreamBlockingResult(ChannelHandlerContext ctx, ClientInfo clientInfo, BlockingResult blockingResult) {
         logger.debug("Handling blocking result: {}", blockingResult);
         
         // 获取所有要监听的流
