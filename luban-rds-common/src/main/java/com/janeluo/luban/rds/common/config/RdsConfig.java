@@ -130,6 +130,11 @@ public class RdsConfig {
      */
     private int monitorMaxClients = 100;
 
+    /**
+     * 最大客户端连接数，默认 10000
+     */
+    private int maxclients = 10000;
+
     // ==================== 内存池配置 ====================
 
     /**
@@ -342,6 +347,14 @@ public class RdsConfig {
 
     public void setMonitorMaxClients(int monitorMaxClients) {
         this.monitorMaxClients = monitorMaxClients;
+    }
+
+    public int getMaxclients() {
+        return maxclients;
+    }
+
+    public void setMaxclients(int maxclients) {
+        this.maxclients = maxclients;
     }
 
     public int getIoThreads() {

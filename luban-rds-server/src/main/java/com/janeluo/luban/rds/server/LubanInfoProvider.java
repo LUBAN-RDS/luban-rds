@@ -86,33 +86,32 @@ public class LubanInfoProvider implements InfoProvider {
 
     private Map<String, Object> getServerInfo() {
         Map<String, Object> info = new HashMap<>();
-        info.put("redis_version", "1.0.0");
-        info.put("redis_git_sha1", "00000000");
+        info.put("redis_version", RuntimeConfig.VERSION);
+        info.put("redis_git_sha1", RuntimeConfig.GIT_SHA1);
         info.put("redis_git_dirty", 0);
-        info.put("redis_build_id", "00000000");
+        info.put("redis_build_id", RuntimeConfig.BUILD_ID);
         info.put("redis_mode", "standalone");
         info.put("os", System.getProperty("os.name") + " " + System.getProperty("os.arch") + " " + System.getProperty("os.version"));
         info.put("arch_bits", System.getProperty("os.arch").contains("64") ? "64" : "32");
         info.put("multiplexing_api", "netty");
         info.put("atomicvar_api", "java-atomic");
-        info.put("gcc_version", "0.0.0"); // N/A for Java
+        info.put("gcc_version", "0.0.0");
         
         String pid = runtimeMXBean.getName().split("@")[0];
         info.put("process_id", pid);
         info.put("process_supervised", "no");
-        info.put("run_id", "00000000000000000000000000000000"); // TODO: Generate unique run_id
+        info.put("run_id", RuntimeConfig.getRunId());
         info.put("tcp_port", server.getPort());
         info.put("server_time_usec", System.currentTimeMillis() * 1000);
         long uptime = runtimeMXBean.getUptime();
         info.put("uptime_in_seconds", uptime / 1000);
         info.put("uptime_in_days", uptime / (1000 * 60 * 60 * 24));
-        info.put("hz", 10); // Netty event loop hz is dynamic, use 10 as placeholder
+        info.put("hz", 10);
         info.put("configured_hz", 10);
         info.put("lru_clock", (System.currentTimeMillis() / 1000) & 0x00FFFFFF);
         info.put("executable", System.getProperty("java.home") + "/bin/java");
-        info.put("config_file", "luban-rds.conf"); // Placeholder
+        info.put("config_file", server.getConfig().getPersistMode().equals("none") ? "" : "luban-rds.conf");
         
-        // Java specific
         info.put("java_version", System.getProperty("java.version"));
         info.put("java_vendor", System.getProperty("java.vendor"));
         info.put("jvm_version", System.getProperty("java.vm.version"));
@@ -126,7 +125,7 @@ public class LubanInfoProvider implements InfoProvider {
         Map<String, Object> info = new HashMap<>();
         info.put("connected_clients", RedisServerHandler.getCurrentConnections());
         info.put("cluster_connections", 0);
-        info.put("maxclients", 10000); // TODO: Configurable
+        info.put("maxclients", server.getConfig().getMaxclients());
         info.put("client_recent_max_input_buffer", 0);
         info.put("client_recent_max_output_buffer", 0);
         info.put("blocked_clients", 0);
@@ -148,6 +147,8 @@ public class LubanInfoProvider implements InfoProvider {
         long maxMemConfig = 0;
         String policy = "noeviction";
         double fragmentationRatio = 0.0;
+        int totalKeys = 0;
+        int expiredKeysCount = 0;
         
         MemoryStore store = server.getMemoryStore();
         if (store instanceof DefaultMemoryStore) {
@@ -159,6 +160,11 @@ public class LubanInfoProvider implements InfoProvider {
             fragmentationRatio = ds.getMemoryFragmentationRatio();
             info.put("softmaxmemory_threshold_percent", ds.getSoftLimitPercent());
             info.put("softmaxmemory_warning", ds.isSoftLimitExceeded() ? 1 : 0);
+            MemoryStore.MemoryStats stats = ds.getMemoryStats();
+            if (stats != null) {
+                totalKeys = stats.getTotalKeys();
+                expiredKeysCount = stats.getExpiredKeys();
+            }
         } else {
             info.put("softmaxmemory_threshold_percent", 0);
             info.put("softmaxmemory_warning", 0);
@@ -172,7 +178,8 @@ public class LubanInfoProvider implements InfoProvider {
         info.put("used_memory_peak_human", toHumanReadable(peak));
         double peakPerc = peak > 0 ? (used * 100.0 / peak) : 0.0;
         info.put("used_memory_peak_perc", String.format("%.2f%%", peakPerc));
-        info.put("used_memory_overhead", 0);
+        long overhead = jvmUsedMemory - used;
+        info.put("used_memory_overhead", Math.max(0, overhead));
         info.put("used_memory_startup", 0);
         info.put("used_memory_dataset", used);
         info.put("used_memory_dataset_perc", used > 0 ? "100.00%" : "0.00%");
@@ -193,14 +200,15 @@ public class LubanInfoProvider implements InfoProvider {
         info.put("maxmemory_human", toHumanReadable(maxMemConfig));
         info.put("maxmemory_policy", policy);
         
-        info.put("allocator_frag_ratio", 0.00);
-        info.put("allocator_frag_bytes", 0);
+        double allocatorFragRatio = jvmTotalMemory > 0 ? (double)(jvmTotalMemory - jvmUsedMemory) / jvmTotalMemory : 0.0;
+        info.put("allocator_frag_ratio", String.format("%.2f", allocatorFragRatio));
+        info.put("allocator_frag_bytes", Math.max(0, jvmTotalMemory - jvmUsedMemory));
         info.put("allocator_rss_ratio", 0.00);
         info.put("allocator_rss_bytes", 0);
         info.put("rss_overhead_ratio", 0.00);
         info.put("rss_overhead_bytes", 0);
         info.put("mem_fragmentation_ratio", String.format("%.2f", fragmentationRatio));
-        info.put("mem_fragmentation_bytes", 0);
+        info.put("mem_fragmentation_bytes", Math.max(0, overhead));
         info.put("mem_not_counted_for_evict", 0);
         info.put("mem_replication_backlog", 0);
         info.put("mem_clients_slaves", 0);
@@ -209,6 +217,8 @@ public class LubanInfoProvider implements InfoProvider {
         info.put("mem_allocator", "jvm");
         info.put("active_defrag_running", 0);
         info.put("lazyfree_pending_objects", 0);
+        info.put("total_keys", totalKeys);
+        info.put("expired_keys_in_memory", expiredKeysCount);
         return info;
     }
 
@@ -225,22 +235,23 @@ public class LubanInfoProvider implements InfoProvider {
         info.put("total_connections_received", RedisServerHandler.getTotalConnectionsReceived());
         info.put("total_commands_processed", RedisServerHandler.getTotalCommandsProcessed());
         info.put("instantaneous_ops_per_sec", 0);
-        info.put("total_net_input_bytes", 0);
-        info.put("total_net_output_bytes", 0);
+        info.put("total_net_input_bytes", RuntimeConfig.getTotalNetInputBytes());
+        info.put("total_net_output_bytes", RuntimeConfig.getTotalNetOutputBytes());
         info.put("instantaneous_input_kbps", 0.00);
         info.put("instantaneous_output_kbps", 0.00);
-        info.put("rejected_connections", 0);
-        info.put("sync_full", 0);
-        info.put("sync_partial_ok", 0);
-        info.put("sync_partial_err", 0);
-        info.put("expired_keys", 0);
+        info.put("rejected_connections", RuntimeConfig.getRejectedConnections());
+        info.put("sync_full", RuntimeConfig.getSyncFull());
+        info.put("sync_partial_ok", RuntimeConfig.getSyncPartialOk());
+        info.put("sync_partial_err", RuntimeConfig.getSyncPartialErr());
+        info.put("expired_keys", RuntimeConfig.getExpiredKeys());
         info.put("expired_stale_perc", 0.00);
         info.put("expired_time_cap_reached_count", 0);
-        info.put("evicted_keys", 0);
+        info.put("evicted_keys", RuntimeConfig.getEvictedKeys());
         info.put("keyspace_hits", RuntimeConfig.getKeyspaceHits());
         info.put("keyspace_misses", RuntimeConfig.getKeyspaceMisses());
-        info.put("pubsub_channels", 0);
-        info.put("pubsub_patterns", 0);
+        PubSubManager pubSubManager = RedisServerHandler.getPubSubManager();
+        info.put("pubsub_channels", pubSubManager.getChannelCount());
+        info.put("pubsub_patterns", pubSubManager.getPatternCount());
         info.put("latest_fork_usec", 0);
         info.put("total_forks", 0);
         info.put("migrate_cached_sockets", 0);

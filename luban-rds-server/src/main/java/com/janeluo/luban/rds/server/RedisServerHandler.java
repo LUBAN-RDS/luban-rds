@@ -982,6 +982,10 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     public static int getCurrentConnections() {
         return (int) CURRENT_CONNECTIONS.get();
     }
+
+    public static PubSubManager getPubSubManager() {
+        return PUB_SUB_MANAGER;
+    }
     
     private boolean isKnownCommand(String name) {
         return KNOWN_COMMANDS.contains(name.toUpperCase());

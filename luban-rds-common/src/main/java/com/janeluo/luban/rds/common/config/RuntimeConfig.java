@@ -9,6 +9,31 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class RuntimeConfig {
 
+    /** 版本号 */
+    public static final String VERSION = "1.0.0";
+
+    /** Git SHA1 (构建时填充) */
+    public static final String GIT_SHA1 = "00000000";
+
+    /** 构建ID (构建时填充) */
+    public static final String BUILD_ID = "00000000";
+
+    /** 运行时唯一ID */
+    private static final String RUN_ID = generateRunId();
+
+    private static String generateRunId() {
+        StringBuilder sb = new StringBuilder(40);
+        java.security.SecureRandom random = new java.security.SecureRandom();
+        for (int i = 0; i < 40; i++) {
+            sb.append(Integer.toHexString(random.nextInt(16)));
+        }
+        return sb.toString();
+    }
+
+    public static String getRunId() {
+        return RUN_ID;
+    }
+
     /** Lua 脚本执行超时时间（毫秒） */
     private static volatile long luaScriptTimeoutMs = 5000L;
 
@@ -80,6 +105,30 @@ public final class RuntimeConfig {
 
     /** 监控最大客户端连接数，默认 100 */
     private static volatile int monitorMaxClients = 100;
+
+    /** 过期键数量 */
+    private static final AtomicLong expiredKeys = new AtomicLong(0);
+
+    /** 淘汰键数量 */
+    private static final AtomicLong evictedKeys = new AtomicLong(0);
+
+    /** 网络输入总字节数 */
+    private static final AtomicLong totalNetInputBytes = new AtomicLong(0);
+
+    /** 网络输出总字节数 */
+    private static final AtomicLong totalNetOutputBytes = new AtomicLong(0);
+
+    /** 拒绝连接数 */
+    private static final AtomicLong rejectedConnections = new AtomicLong(0);
+
+    /** 同步全量次数 */
+    private static final AtomicLong syncFull = new AtomicLong(0);
+
+    /** 同步部分成功次数 */
+    private static final AtomicLong syncPartialOk = new AtomicLong(0);
+
+    /** 同步部分失败次数 */
+    private static final AtomicLong syncPartialErr = new AtomicLong(0);
 
     private RuntimeConfig() {
     }
@@ -231,6 +280,14 @@ public final class RuntimeConfig {
         keyspaceMisses.set(0);
         errorRepliesTotal.set(0);
         errorRepliesOom.set(0);
+        expiredKeys.set(0);
+        evictedKeys.set(0);
+        totalNetInputBytes.set(0);
+        totalNetOutputBytes.set(0);
+        rejectedConnections.set(0);
+        syncFull.set(0);
+        syncPartialOk.set(0);
+        syncPartialErr.set(0);
         lastResetTimeMs.set(System.currentTimeMillis());
     }
 
@@ -366,5 +423,85 @@ public final class RuntimeConfig {
             value = 0;
         }
         monitorMaxClients = value;
+    }
+
+    public static void incExpiredKeys() {
+        if (metricsEnabled) {
+            expiredKeys.incrementAndGet();
+        }
+    }
+
+    public static long getExpiredKeys() {
+        return expiredKeys.get();
+    }
+
+    public static void incEvictedKeys() {
+        if (metricsEnabled) {
+            evictedKeys.incrementAndGet();
+        }
+    }
+
+    public static long getEvictedKeys() {
+        return evictedKeys.get();
+    }
+
+    public static void addNetInputBytes(long bytes) {
+        if (metricsEnabled && bytes > 0) {
+            totalNetInputBytes.addAndGet(bytes);
+        }
+    }
+
+    public static long getTotalNetInputBytes() {
+        return totalNetInputBytes.get();
+    }
+
+    public static void addNetOutputBytes(long bytes) {
+        if (metricsEnabled && bytes > 0) {
+            totalNetOutputBytes.addAndGet(bytes);
+        }
+    }
+
+    public static long getTotalNetOutputBytes() {
+        return totalNetOutputBytes.get();
+    }
+
+    public static void incRejectedConnections() {
+        if (metricsEnabled) {
+            rejectedConnections.incrementAndGet();
+        }
+    }
+
+    public static long getRejectedConnections() {
+        return rejectedConnections.get();
+    }
+
+    public static void incSyncFull() {
+        if (metricsEnabled) {
+            syncFull.incrementAndGet();
+        }
+    }
+
+    public static long getSyncFull() {
+        return syncFull.get();
+    }
+
+    public static void incSyncPartialOk() {
+        if (metricsEnabled) {
+            syncPartialOk.incrementAndGet();
+        }
+    }
+
+    public static long getSyncPartialOk() {
+        return syncPartialOk.get();
+    }
+
+    public static void incSyncPartialErr() {
+        if (metricsEnabled) {
+            syncPartialErr.incrementAndGet();
+        }
+    }
+
+    public static long getSyncPartialErr() {
+        return syncPartialErr.get();
     }
 }

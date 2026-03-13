@@ -247,6 +247,34 @@ public class PubSubManager {
         }
         return result;
     }
+
+    public int getChannelCount() {
+        return channelSubscribers.size();
+    }
+
+    public int getPatternCount() {
+        return patternSubscribers.size();
+    }
+
+    public int getStreamCount() {
+        return streamSubscribers.size();
+    }
+
+    public int getTotalSubscribers() {
+        int total = 0;
+        for (Set<Channel> subs : channelSubscribers.values()) {
+            total += subs.size();
+        }
+        return total;
+    }
+
+    public int getTotalPatternSubscribers() {
+        int total = 0;
+        for (Set<Channel> subs : patternSubscribers.values()) {
+            total += subs.size();
+        }
+        return total;
+    }
     
     // Simple glob matching: ? matches one char, * matches any sequence, [abc] matches one of chars, \ escapes
     private boolean match(String pattern, String string) {
