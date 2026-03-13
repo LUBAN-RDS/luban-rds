@@ -11,7 +11,7 @@
 
     <artifactId>luban-rds-spring-boot-starter</artifactId>
     <name>luban-rds-spring-boot-starter</name>
-    <description>Spring Boot集成模块</description>
+    <description>Luban RDS Spring Boot 3.4.11 Starter - Spring Boot 自动集成模块</description>
 
     <dependencies>
         <dependency>
@@ -22,6 +22,8 @@
             <groupId>com.janeluo</groupId>
             <artifactId>luban-rds-client</artifactId>
         </dependency>
+        
+        <!-- Spring Boot Starter 依赖 -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter</artifactId>
@@ -33,6 +35,13 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
+        
+        <!-- 可选依赖 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
             <optional>true</optional>
         </dependency>
     </dependencies>

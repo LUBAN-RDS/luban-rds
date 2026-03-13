@@ -1,0 +1,148 @@
+{
+  "properties": [
+    {
+      "name": "luban.rds.enabled",
+      "type": "java.lang.Boolean",
+      "defaultValue": true,
+      "description": "是否启用 Luban RDS 自动配置。设置为 false 将禁用所有自动配置。"
+    },
+    {
+      "name": "luban.rds.port",
+      "type": "java.lang.Integer",
+      "defaultValue": 9736,
+      "description": "服务器监听端口。设置为 0 表示随机分配端口（适用于测试环境）。"
+    },
+    {
+      "name": "luban.rds.host",
+      "type": "java.lang.String",
+      "defaultValue": "localhost",
+      "description": "服务器监听主机地址。客户端模式时用于指定远程服务器地址。"
+    },
+    {
+      "name": "luban.rds.boss-threads",
+      "type": "java.lang.Integer",
+      "defaultValue": 1,
+      "description": "Boss 线程数（连接接受线程）。建议保持默认值。"
+    },
+    {
+      "name": "luban.rds.worker-threads",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "Worker 线程数（I/O 处理线程）。设置为 0 表示使用 CPU 核心数 * 2。"
+    },
+    {
+      "name": "luban.rds.business-threads",
+      "type": "java.lang.Integer",
+      "defaultValue": 0,
+      "description": "业务线程数（命令处理线程）。设置为 0 表示使用 CPU 核心数。"
+    },
+    {
+      "name": "luban.rds.max-connections",
+      "type": "java.lang.Integer",
+      "defaultValue": 10000,
+      "description": "最大允许连接数。超过此限制的新连接将被拒绝。"
+    },
+    {
+      "name": "luban.rds.idle-timeout",
+      "type": "java.lang.Integer",
+      "defaultValue": 300,
+      "description": "连接空闲超时时间（秒）。超时后空闲连接将被关闭。"
+    },
+    {
+      "name": "luban.rds.max-monitor-clients",
+      "type": "java.lang.Integer",
+      "defaultValue": 100,
+      "description": "最大 MONITOR 客户端数。限制同时使用 MONITOR 命令的客户端数量。"
+    },
+    {
+      "name": "luban.rds.password",
+      "type": "java.lang.String",
+      "description": "Redis 风格的 AUTH 命令密码。设置后客户端需要通过 AUTH 命令认证。"
+    },
+    {
+      "name": "luban.rds.statistics-enabled",
+      "type": "java.lang.Boolean",
+      "defaultValue": true,
+      "description": "是否启用统计信息。统计信息可用于性能分析和监控。"
+    },
+    {
+      "name": "luban.rds.databases",
+      "type": "java.lang.Integer",
+      "defaultValue": 16,
+      "description": "数据库数量。支持使用 SELECT 命令在不同数据库间切换。"
+    },
+    {
+      "name": "luban.rds.rdb-enabled",
+      "type": "java.lang.Boolean",
+      "defaultValue": false,
+      "description": "是否启用 RDB 持久化。RDB 是一种快照式持久化机制。"
+    },
+    {
+      "name": "luban.rds.rdb-file-path",
+      "type": "java.lang.String",
+      "defaultValue": "dump.rdb",
+      "description": "RDB 文件路径。支持相对路径和绝对路径。"
+    },
+    {
+      "name": "luban.rds.rdb-interval-seconds",
+      "type": "java.lang.Integer",
+      "defaultValue": 60,
+      "description": "RDB 持久化间隔时间（秒）。每隔指定时间自动创建数据快照。"
+    },
+    {
+      "name": "luban.rds.aof-enabled",
+      "type": "java.lang.Boolean",
+      "defaultValue": false,
+      "description": "是否启用 AOF 持久化。AOF 是一种追加式日志持久化机制。"
+    },
+    {
+      "name": "luban.rds.aof-file-path",
+      "type": "java.lang.String",
+      "defaultValue": "appendonly.aof",
+      "description": "AOF 文件路径。支持相对路径和绝对路径。"
+    },
+    {
+      "name": "luban.rds.aof-sync-strategy",
+      "type": "com.janeluo.luban.rds.autoconfigure.LubanRdsProperties$AofSyncStrategy",
+      "defaultValue": "everysec",
+      "description": "AOF 同步策略。可选值：always（每次写入同步）、everysec（每秒同步）、no（不同步）。"
+    },
+    {
+      "name": "luban.rds.lua-script-timeout",
+      "type": "java.lang.Long",
+      "defaultValue": 5000,
+      "description": "Lua 脚本最大执行时间（毫秒）。超过此时间的脚本将被中断。"
+    },
+    {
+      "name": "luban.rds.lua-script-max-size",
+      "type": "java.lang.Integer",
+      "defaultValue": 1048576,
+      "description": "Lua 脚本最大大小（字节）。默认 1MB。"
+    },
+    {
+      "name": "luban.rds.lua-sandbox-enabled",
+      "type": "java.lang.Boolean",
+      "defaultValue": true,
+      "description": "是否启用 Lua 沙箱模式。沙箱模式限制 Lua 脚本的访问权限。"
+    }
+  ],
+  "hints": [
+    {
+      "name": "luban.rds.aof-sync-strategy",
+      "values": [
+        {
+          "value": "always",
+          "description": "每次写入都同步到磁盘，最安全但性能最低。"
+        },
+        {
+          "value": "everysec",
+          "description": "每秒同步一次，平衡性能和安全性。"
+        },
+        {
+          "value": "no",
+          "description": "由操作系统决定何时同步，性能最高但安全性最低。"
+        }
+      ]
+    }
+  ]
+}

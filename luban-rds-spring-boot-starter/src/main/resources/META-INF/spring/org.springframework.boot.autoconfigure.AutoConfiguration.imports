@@ -1,0 +1,2 @@
+com.janeluo.luban.rds.autoconfigure.LubanRdsAutoConfiguration
+com.janeluo.luban.rds.autoconfigure.LubanRdsClientAutoConfiguration
