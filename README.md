@@ -37,6 +37,7 @@ Luban-RDS 是一个完全兼容 Redis 协议的轻量级内存数据库，使用
 - **实时监控**: 支持 MONITOR 命令，采用 MPSC 无锁环形缓冲区实现高性能命令监控（<40ns 开销）
 - **慢查询日志**: 支持 SLOWLOG 命令记录慢查询
 - **内存分析**: 支持 MEMORY 命令族进行内存诊断
+- **分布式追踪**: 支持 TraceId 全链路追踪，自动注入日志，多线程环境下自动传递
 - **Stream 数据类型**: 完整支持 Stream 相关命令（XADD、XLEN、XRANGE、XREVRANGE、XREAD、XGROUP、XREADGROUP 等）
 
 ## 🚀 快速开始
@@ -168,6 +169,7 @@ luban-rds/
 │   ├── src/main/java/com/janeluo/luban/rds/common/
 │   │   ├── config/             # 配置类
 │   │   ├── constant/           # 常量定义（含 RedisResponseConstant 性能优化）
+│   │   ├── context/            # 上下文管理（含 TraceContext 分布式追踪）
 │   │   ├── exception/          # 异常类
 │   │   └── util/               # 工具类
 ├── luban-rds-core/             # 核心模块
@@ -343,6 +345,54 @@ Luban-RDS 支持两种持久化方式：
 - **INFO 命令**：查看服务器状态信息
 - **MEMORY 命令**：内存使用分析和诊断
 
+## 🔍 分布式追踪
+
+Luban-RDS 内置分布式追踪支持，每个请求自动生成唯一的 TraceId，贯穿整个请求处理链路。
+
+### TraceId 格式
+
+```
+{时间戳}-{机器标识}-{进程ID}-{序列号}
+示例：1704067200000-a1b2c3d4-1234-000001
+```
+
+### 日志输出示例
+
+```
+14:30:45.123 [nioEventLoopGroup-3-1] [traceId:1704067200000-a1b2c3d4-1234-000001] DEBUG c.j.l.r.server.RedisServerHandler - Processing command: SET
+```
+
+### 手动使用
+
+```java
+// 获取当前 TraceId
+String traceId = TraceContext.getTraceId();
+
+// 设置自定义 TraceId
+TraceContext.setTraceId("custom-trace-id");
+
+// 手动生成 TraceId
+String newTraceId = TraceContext.generateTraceId();
+```
+
+### 异步场景传递
+
+```java
+// 包装 Runnable
+executor.submit(TraceableRunnable.wrap(() -> {
+    // TraceId 自动传递到子线程
+    String traceId = TraceContext.getTraceId();
+}));
+
+// 包装 Callable
+Future<String> future = executor.submit(TraceableCallable.wrap(() -> {
+    return TraceContext.getTraceId();
+}));
+
+// 包装 Executor
+Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
+```
+
 ## 🌐 部署指南
 
 ### 独立部署
@@ -503,6 +553,7 @@ mvn test
 - [x] Stream 数据类型（XADD、XLEN、XRANGE、XREVRANGE、XREAD、XGROUP 等）
 - [x] Docker 部署支持
 - [x] Kubernetes 部署支持
+- [x] 分布式追踪（TraceId 全链路追踪，自动日志注入，多线程传递）
 
 ### 正在开发
 

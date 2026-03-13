@@ -34,6 +34,7 @@ title: 监控维护
 | **Lua** | used_memory_lua | Lua 脚本使用内存 | bytes | - |
 | **Lua** | lua_scripts | Lua 脚本数量 | count | - |
 | **CPU** | os_cpu_load_average | 系统 CPU 负载 | load | < CPU 核心数 |
+| **追踪** | traceId | 当前请求追踪ID | string | - |
 
 ### 1.2 关键指标说明
 
@@ -722,7 +723,130 @@ groups:
 - 尝试使用备份文件恢复数据
 - 重启服务并监控运行状态
 
-## 8. 下一步
+## 8. 分布式追踪
+
+### 8.1 概述
+
+Luban-RDS 内置分布式追踪支持，每个请求自动生成唯一的 TraceId，贯穿整个请求处理链路，便于日志关联和问题排查。
+
+### 8.2 TraceId 格式
+
+```
+{时间戳}-{机器标识}-{进程ID}-{序列号}
+示例：1704067200000-a1b2c3d4-1234-000001
+```
+
+**组成部分**：
+- **时间戳**：毫秒级时间戳，便于定位请求时间
+- **机器标识**：8位十六进制，基于主机名哈希生成
+- **进程ID**：JVM 进程 ID
+- **序列号**：6位递增序列号
+
+### 8.3 日志格式
+
+所有日志自动包含 traceId 字段，格式固定：
+
+```
+%d{HH:mm:ss.SSS} [%thread] [traceId:%X{traceId:-N/A}] %-5level %logger{36} - %msg%n
+```
+
+**示例输出**：
+```
+14:30:45.123 [nioEventLoopGroup-3-1] [traceId:1704067200000-a1b2c3d4-1234-000001] DEBUG c.j.l.r.server.RedisServerHandler - Processing command: SET
+14:30:45.125 [nioEventLoopGroup-3-1] [traceId:1704067200000-a1b2c3d4-1234-000001] DEBUG c.j.l.r.core.handler.StringCommandHandler - SET key=test value="Hello"
+14:30:45.126 [nioEventLoopGroup-3-1] [traceId:1704067200000-a1b2c3d4-1234-000001] DEBUG c.j.l.r.server.RedisServerHandler - Response: +OK
+```
+
+### 8.4 使用方式
+
+#### 自动追踪
+
+请求入口自动生成 TraceId，处理完成自动清理，无需手动干预：
+
+```java
+// 在 RedisServerHandler.channelRead() 中
+try {
+    TraceContext.startTrace();
+    processCommand(ctx, clientInfo, command);
+} finally {
+    TraceContext.endTrace();
+}
+```
+
+#### 手动获取
+
+```java
+import com.janeluo.luban.rds.common.context.TraceContext;
+
+// 获取当前 TraceId
+String traceId = TraceContext.getTraceId();
+
+// 设置自定义 TraceId
+TraceContext.setTraceId("custom-trace-id");
+
+// 生成新 TraceId
+String newTraceId = TraceContext.generateTraceId();
+
+// 检查是否存在 TraceId
+boolean hasTraceId = TraceContext.hasTraceId();
+```
+
+### 8.5 异步场景传递
+
+在异步处理场景下，需要使用包装类传递 TraceId：
+
+```java
+import com.janeluo.luban.rds.common.context.TraceableRunnable;
+import com.janeluo.luban.rds.common.context.TraceableCallable;
+import com.janeluo.luban.rds.common.context.TraceableExecutor;
+
+// 包装 Runnable
+executor.submit(TraceableRunnable.wrap(() -> {
+    // TraceId 自动传递到子线程
+    String traceId = TraceContext.getTraceId();
+    logger.info("Processing in async thread");
+}));
+
+// 包装 Callable
+Future<String> future = executor.submit(TraceableCallable.wrap(() -> {
+    return TraceContext.getTraceId();
+}));
+
+// 包装 Executor
+Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
+traceableExecutor.execute(() -> {
+    // TraceId 自动传递
+});
+```
+
+### 8.6 日志分析
+
+#### 按 TraceId 查询日志
+
+```bash
+# 查询特定 TraceId 的所有日志
+grep "traceId:1704067200000-a1b2c3d4-1234-000001" logs/luban-rds.log
+
+# 使用 awk 提取 TraceId 和日志内容
+awk -F'\\[traceId:' '{print $2}' logs/luban-rds.log | awk -F'\\]' '{print $1, $2}'
+```
+
+#### 日志关联分析
+
+通过 TraceId 可以：
+- 追踪单个请求的完整处理链路
+- 分析请求在各组件的耗时
+- 快速定位问题所在位置
+- 实现分布式系统的请求关联
+
+### 8.7 最佳实践
+
+1. **日志集中收集**：将日志发送到 ELK、Splunk 等日志平台，便于按 TraceId 搜索
+2. **告警关联**：在告警信息中包含 TraceId，便于快速定位问题
+3. **性能分析**：通过 TraceId 统计请求处理时间，识别慢请求
+4. **异常追踪**：异常日志自动包含 TraceId，便于问题复现
+
+## 9. 下一步
 
 - **[故障排查](./troubleshooting.md)**：掌握常见问题的排查和解决方法
 - **[配置指南](./configuration.md)**：了解详细的配置选项和优化建议

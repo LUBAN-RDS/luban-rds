@@ -52,6 +52,7 @@
 - [x] **多线程 I/O**: 实现三层线程模型（Boss Group → Worker Group → Business Group），支持配置化线程数，显著提升高并发场景下的网络吞吐量。
 - [x] **内存碎片整理**: 实现内存碎片率监控、自动/手动碎片整理机制，优化 StoreValue 内存占用（每条记录节省约 36-52 字节）。
 - [x] **内存池集成**: 集成 Netty PooledByteBufAllocator，减少网络缓冲区 GC 压力，支持内存泄漏检测。
+- [x] **分布式追踪**: 实现基于 TraceId 的全链路追踪，自动注入日志 MDC，支持多线程环境下的 TraceId 传递。
 
 #### 云原生与运维
 - [x] **Docker 容器化**: 提供官方 Dockerfile，支持多阶段构建、非 root 用户、健康检查。

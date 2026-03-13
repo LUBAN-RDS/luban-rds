@@ -304,9 +304,66 @@ title: 功能架构
 - 支持获取、清空慢查询日志
 - 记录命令参数、执行时间、客户端地址等信息
 
-## 15. 事务支持
+## 15. 分布式追踪
 
-### 15.1 事务命令
+### 15.1 TraceContext
+
+**核心功能**：管理请求链路的 TraceId，支持分布式追踪
+
+**特性**：
+- **全局唯一 TraceId 生成**：格式为 `{时间戳}-{机器标识}-{进程ID}-{序列号}`
+- **自动注入日志**：通过 SLF4J MDC 自动在所有日志中添加 traceId 字段
+- **多线程传递**：提供 TraceableRunnable、TraceableCallable、TraceableExecutor 支持异步场景
+
+### 15.2 TraceId 格式
+
+```
+{时间戳(毫秒)}-{机器标识(8位)}-{进程ID}-{序列号(6位)}
+示例：1704067200000-a1b2c3d4-1234-000001
+```
+
+### 15.3 日志格式
+
+所有日志自动包含 traceId 字段：
+```
+14:30:45.123 [nioEventLoopGroup-3-1] [traceId:1704067200000-a1b2c3d4-1234-000001] DEBUG c.j.l.r.server.RedisServerHandler - Processing command: SET
+```
+
+### 15.4 使用方式
+
+**自动模式**：请求入口自动生成，处理完成自动清理
+
+**手动模式**：
+```java
+// 获取当前 TraceId
+String traceId = TraceContext.getTraceId();
+
+// 设置自定义 TraceId
+TraceContext.setTraceId("custom-trace-id");
+
+// 生成新 TraceId
+String newTraceId = TraceContext.generateTraceId();
+```
+
+**异步场景**：
+```java
+// 包装 Runnable
+executor.submit(TraceableRunnable.wrap(() -> {
+    // TraceId 自动传递到子线程
+}));
+
+// 包装 Callable
+Future<String> future = executor.submit(TraceableCallable.wrap(() -> {
+    return TraceContext.getTraceId();
+}));
+
+// 包装 Executor
+Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
+```
+
+## 16. 事务支持
+
+### 16.1 事务命令
 
 **核心功能**：提供完整的事务支持
 
@@ -317,13 +374,13 @@ title: 功能架构
 - `WATCH` - 监视键
 - `UNWATCH` - 取消监视
 
-### 15.2 事务行为
+### 16.2 事务行为
 
 - 使用 WATCH 监视的键在 EXEC 前如果发生变更，EXEC 返回 Null Array
 - 事务入队阶段若存在参数错误，EXEC 返回 EXECABORT
 - 事务内 SELECT 更新客户端数据库状态
 
-## 16. 总结
+## 17. 总结
 
 Luban-RDS 的功能架构设计具有以下特点：
 
@@ -332,10 +389,11 @@ Luban-RDS 的功能架构设计具有以下特点：
 - 兼容性：完全兼容 Redis 协议，可直接使用 Redis 客户端
 - 可靠性：支持持久化、备份和恢复机制
 - 安全性：Lua 脚本沙箱，超时控制，操作计数
+- 可观测性：分布式追踪支持，全链路 TraceId 追踪
 - 扩展性：支持命令扩展、存储扩展和插件系统
 - 易用性：提供 Spring Boot 集成，便于在 Spring 应用中使用
 
-## 17. 下一步
+## 18. 下一步
 
 - [设计决策](./design.md)：了解重要设计选择的理由和权衡
 - [部署指南](../deployment/)：学习如何部署和配置 Luban-RDS

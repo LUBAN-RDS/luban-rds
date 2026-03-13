@@ -28,6 +28,7 @@ version: 1.0.0-SNAPSHOT
 - Stream 数据类型支持：完整实现 Stream 相关命令（XADD, XLEN, XRANGE, XREVRANGE, XREAD, XGROUP, XREADGROUP 等）
 - Lua struct 库增强：支持 Lc0、Ic0、ic0 等组合格式说明符，变长字符串打包和解包
 - MONITOR 命令重构：采用 MPSC 无锁环形缓冲区实现高性能命令监控（<40ns 开销）
+- 分布式追踪支持：基于 TraceId 的全链路追踪，自动注入日志 MDC，支持多线程环境下的 TraceId 传递
 
 ### Changed
 

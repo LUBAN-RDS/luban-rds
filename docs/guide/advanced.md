@@ -437,7 +437,70 @@ timeout 300
 
 （通过 logback.xml 配置）调整日志级别和输出方式。
 
-## 10. 下一步
+## 10. 分布式追踪
+
+### 10.1 概述
+
+Luban-RDS 内置分布式追踪支持，每个请求自动生成唯一的 TraceId，便于日志关联和问题排查。
+
+### 10.2 TraceId 格式
+
+```
+{时间戳}-{机器标识}-{进程ID}-{序列号}
+示例：1704067200000-a1b2c3d4-1234-000001
+```
+
+### 10.3 日志输出
+
+所有日志自动包含 `traceId` 字段：
+
+```
+14:30:45.123 [nioEventLoopGroup-3-1] [traceId:1704067200000-a1b2c3d4-1234-000001] DEBUG c.j.l.r.server.RedisServerHandler - Processing command: SET
+```
+
+### 10.4 手动使用
+
+```java
+import com.janeluo.luban.rds.common.context.TraceContext;
+
+// 获取当前 TraceId
+String traceId = TraceContext.getTraceId();
+
+// 设置自定义 TraceId
+TraceContext.setTraceId("custom-trace-id");
+
+// 生成新 TraceId
+String newTraceId = TraceContext.generateTraceId();
+```
+
+### 10.5 异步场景
+
+在异步处理时使用包装类传递 TraceId：
+
+```java
+import com.janeluo.luban.rds.common.context.TraceableRunnable;
+import com.janeluo.luban.rds.common.context.TraceableCallable;
+
+// 包装 Runnable
+executor.submit(TraceableRunnable.wrap(() -> {
+    // TraceId 自动传递到子线程
+    logger.info("Processing in async thread");
+}));
+
+// 包装 Callable
+Future<String> future = executor.submit(TraceableCallable.wrap(() -> {
+    return TraceContext.getTraceId();
+}));
+```
+
+### 10.6 日志查询
+
+```bash
+# 查询特定请求的所有日志
+grep "traceId:1704067200000-a1b2c3d4-1234-000001" logs/luban-rds.log
+```
+
+## 11. 下一步
 
 - **[使用示例](./examples.md)**：查看常见场景的代码示例
 - **[API 文档](../api/)**：深入了解 API 接口
