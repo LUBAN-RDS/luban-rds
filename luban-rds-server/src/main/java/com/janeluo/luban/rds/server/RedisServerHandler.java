@@ -20,6 +20,7 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.util.AttributeKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import com.janeluo.luban.rds.common.context.TraceContext;
 
 /**
  * Redis服务器命令处理器
@@ -204,20 +206,16 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         if (msg instanceof ByteBuf) {
             ByteBuf buffer = (ByteBuf) msg;
             try {
-                // Use Channel.attr() for thread-safe ClientInfo storage
                 ClientInfo clientInfo = ctx.channel().attr(CLIENT_INFO_KEY).get();
                 if (clientInfo == null) {
                     clientInfo = new ClientInfo(null);
-                    // Initialize inbound buffer using channel allocator for pooled memory support
                     clientInfo.initInboundBuf(ctx.alloc());
                     ctx.channel().attr(CLIENT_INFO_KEY).set(clientInfo);
                 }
                 clientInfo.updateLastActiveTime();
                 clientInfo.getInboundBuf().writeBytes(buffer);
                 while (true) {
-                    // Check if protocol version detection is needed
                     if (clientInfo.getProtocolVersion() == ProtocolVersion.RESP2) {
-                        // Detect if this is a RESP3 HELLO command
                         if (detectResp3Hello(clientInfo.getInboundBuf(), ctx, clientInfo)) {
                             continue;
                         }
@@ -226,7 +224,12 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                     if (command == null) {
                         break;
                     }
-                    processCommand(ctx, clientInfo, command);
+                    try {
+                        TraceContext.startTrace();
+                        processCommand(ctx, clientInfo, command);
+                    } finally {
+                        TraceContext.endTrace();
+                    }
                 }
             } finally {
                 buffer.release();

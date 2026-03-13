@@ -1,7 +1,7 @@
 <configuration>
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] [traceId:%X{traceId:-N/A}] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
     
@@ -14,7 +14,7 @@
             <totalSizeCap>1GB</totalSizeCap>
         </rollingPolicy>
         <encoder>
-            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] [traceId:%X{traceId:-N/A}] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
     
