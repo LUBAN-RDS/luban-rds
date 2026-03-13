@@ -4,6 +4,17 @@ export default defineConfig({
   title: 'Luban-RDS 文档',
   description: '轻量级、高性能的内存键值存储，兼容 Redis 协议',
   base: '/luban-rds/',
+  vite: {
+    optimizeDeps: {
+      include: ['@vueuse/core']
+    },
+    build: {
+      minify: 'esbuild',
+      chunkSizeWarningLimit: 1000,
+      cssCodeSplit: true,
+      sourcemap: false
+    }
+  },
   themeConfig: {
     nav: [
       {
@@ -11,47 +22,45 @@ export default defineConfig({
         link: '/'
       },
       {
-        text: '指南',
-        link: '/guide/'
+        text: '使用指南',
+        items: [
+          { text: '快速开始', link: '/guide/quickstart' },
+          { text: '基础操作', link: '/guide/basic-usage' },
+          { text: '高级功能', link: '/guide/advanced' },
+          { text: '使用示例', link: '/guide/examples' }
+        ]
       },
       {
-        text: 'API',
-        link: '/api/'
+        text: '技术文档',
+        items: [
+          { text: 'API 参考', link: '/api/' },
+          { text: 'Lua 脚本', link: '/lua/' },
+          { text: '架构设计', link: '/architecture/' }
+        ]
       },
       {
-        text: 'Lua',
-        link: '/lua/'
-      },
-      {
-        text: '架构',
-        link: '/architecture/'
-      },
-      {
-        text: '部署',
+        text: '部署运维',
         link: '/deployment/'
       },
       {
-        text: '开发',
+        text: '开发指南',
         link: '/development/'
       },
       {
-        text: '资源',
-        link: '/resources/'
-      },
-      {
-        text: '法律',
-        link: '/legal/'
-      },{
-        text: '更新日志',
-        link: '/changelog'
+        text: '更多',
+        items: [
+          { text: '资源中心', link: '/resources/' },
+          { text: '法律信息', link: '/legal/' },
+          { text: '更新日志', link: '/changelog' }
+        ]
       }
     ],
     sidebar: {
       '/guide/': [
         {
           text: '使用指南',
+          collapsible: true,
           items: [
-            { text: '简介', link: '/' },
             { text: '快速开始', link: '/guide/quickstart' },
             { text: '基础操作', link: '/guide/basic-usage' },
             { text: '高级功能', link: '/guide/advanced' },
@@ -61,9 +70,9 @@ export default defineConfig({
       ],
       '/api/': [
         {
-          text: 'API 文档',
+          text: 'API 参考',
+          collapsible: true,
           items: [
-            { text: '介绍', link: '/api/' },
             { text: '核心接口', link: '/api/core' },
             { text: '命令列表', link: '/api/commands' },
             { text: '协议说明', link: '/api/protocol' }
@@ -73,8 +82,8 @@ export default defineConfig({
       '/lua/': [
         {
           text: 'Lua 脚本',
+          collapsible: true,
           items: [
-            { text: '介绍', link: '/lua/' },
             { text: '使用指南', link: '/lua/usage' },
             { text: 'API 参考', link: '/lua/api' }
           ]
@@ -83,8 +92,8 @@ export default defineConfig({
       '/architecture/': [
         {
           text: '架构设计',
+          collapsible: true,
           items: [
-            { text: '介绍', link: '/architecture/' },
             { text: '系统架构', link: '/architecture/system' },
             { text: '功能架构', link: '/architecture/features' },
             { text: '设计决策', link: '/architecture/design' }
@@ -94,8 +103,8 @@ export default defineConfig({
       '/deployment/': [
         {
           text: '部署运维',
+          collapsible: true,
           items: [
-            { text: '介绍', link: '/deployment/' },
             { text: '安装部署', link: '/deployment/installation' },
             { text: '配置指南', link: '/deployment/configuration' },
             { text: '监控维护', link: '/deployment/monitoring' },
@@ -106,8 +115,8 @@ export default defineConfig({
       '/development/': [
         {
           text: '开发指南',
+          collapsible: true,
           items: [
-            { text: '介绍', link: '/development/' },
             { text: '环境搭建', link: '/development/setup' },
             { text: '开发流程', link: '/development/process' },
             { text: '代码规范', link: '/development/standards' },
@@ -120,8 +129,8 @@ export default defineConfig({
       '/resources/': [
         {
           text: '资源中心',
+          collapsible: true,
           items: [
-            { text: '介绍', link: '/resources/' },
             { text: '常见问题', link: '/resources/faq' },
             { text: '相关资源', link: '/resources/related' }
           ]
@@ -130,8 +139,8 @@ export default defineConfig({
       '/legal/': [
         {
           text: '法律信息',
+          collapsible: true,
           items: [
-            { text: '介绍', link: '/legal/' },
             { text: '许可证', link: '/legal/license' },
             { text: '隐私政策', link: '/legal/privacy' },
             { text: '服务条款', link: '/legal/terms' }
