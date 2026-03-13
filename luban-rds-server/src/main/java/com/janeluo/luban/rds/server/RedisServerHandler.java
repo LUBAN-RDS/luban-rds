@@ -1140,22 +1140,20 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     // 处理 EXEC 命令
     private void handleExecCommand(ChannelHandlerContext ctx, ClientInfo clientInfo) {
         long execStartTime = System.nanoTime();
-        logger.info("[EXEC] 入口 - 时间戳: {}, 客户端: {}, 数据库: {}", 
-            execStartTime, ctx.channel().remoteAddress(), clientInfo.getCurrentDatabase());
+        logger.debug("[EXEC] 处理中: client={}, db={}", 
+            ctx.channel().remoteAddress(), clientInfo.getCurrentDatabase());
         
         try {
-            // 检查是否在事务中
             if (!clientInfo.isInTransaction()) {
-                logger.warn("[EXEC] 分支判断 - 不在事务中，返回错误");
+                logger.debug("[EXEC] 不在事务中，返回错误");
                 ByteBuf b = protocolParser.serialize("-ERR EXEC without MULTI");
                 if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                 else if (b != null) b.release();
                 return;
             }
             
-            // 检查事务队列是否有错误
             if (clientInfo.isTxQueueError()) {
-                logger.warn("[EXEC] 分支判断 - 事务队列有错误，返回EXECABORT");
+                logger.debug("[EXEC] 事务队列有错误，返回EXECABORT");
                 ByteBuf b = protocolParser.serialize("-EXECABORT Transaction discarded because of previous errors.");
                 if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                 else if (b != null) b.release();
@@ -1163,10 +1161,9 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 return;
             }
             
-            // 检查监视的键是否被修改
             boolean watchedChanged = false;
             java.util.Map<String, Long> watchedVersions = clientInfo.getWatchedVersions();
-            logger.debug("[EXEC] 分支判断 - 监视键数量: {}", watchedVersions.size());
+            logger.debug("[EXEC] 监视键数量: {}", watchedVersions.size());
             
             if (!watchedVersions.isEmpty()) {
                 for (Map.Entry<String, Long> entry : watchedVersions.entrySet()) {
@@ -1179,23 +1176,20 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                         String key = keyWithDb.substring(sepIndex + 1);
                         long currentVersion = memoryStore.getKeyVersion(db, key);
                         long watchedVersion = entry.getValue();
-                        logger.debug("[EXEC] 监视键检查 - key: {}, db: {}, 当前版本: {}, 监视版本: {}", 
-                            key, db, currentVersion, watchedVersion);
                         if (currentVersion != watchedVersion) {
                             watchedChanged = true;
-                            logger.info("[EXEC] 分支判断 - 监视键被修改: {}", key);
+                            logger.debug("[EXEC] 监视键被修改: key={}", key);
                             break;
                         }
                     } catch (NumberFormatException ex) {
-                        logger.warn("[EXEC] 异常捕获 - 键格式错误: {}", keyWithDb);
+                        logger.debug("[EXEC] 键格式无效: {}", keyWithDb);
                         continue;
                     }
                 }
             }
             
-            // 如果监视的键被修改，放弃事务（返回 RESP Null Array）
             if (watchedChanged) {
-                logger.info("[EXEC] 分支判断 - 监视键被修改，返回Null Array");
+                logger.debug("[EXEC] 监视键被修改，返回Null Array");
                 ByteBuf b = protocolParser.serialize("*-1\r\n");
                 if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                 else if (b != null) b.release();
@@ -1203,14 +1197,12 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 return;
             }
             
-            // 执行事务队列中的命令
             java.util.List<Command> txQueue = clientInfo.getTxQueue();
             int txQueueSize = txQueue.size();
-            logger.info("[EXEC] 数据处理 - 事务队列大小: {}", txQueueSize);
+            logger.debug("[EXEC] 事务队列大小: {}", txQueueSize);
             
-            // 限制事务队列大小，防止内存溢出
             if (txQueueSize > 1000) {
-                logger.error("[EXEC] 分支判断 - 事务队列过大: {}", txQueueSize);
+                logger.warn("[EXEC] 事务队列过大: size={}", txQueueSize);
                 ByteBuf b = protocolParser.serialize("-ERR transaction queue too large");
                 if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                 else if (b != null) b.release();
@@ -1218,14 +1210,12 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 return;
             }
             
-            // 收集事务执行结果
             java.util.List<Object> results = new ArrayList<>(txQueueSize);
             long startTime = System.currentTimeMillis();
             
             for (Command cmd : txQueue) {
-                // 检查执行时间，防止死循环
-                if (System.currentTimeMillis() - startTime > 5000) { // 5秒超时
-                    logger.error("[EXEC] 分支判断 - 事务执行超时");
+                if (System.currentTimeMillis() - startTime > 5000) {
+                    logger.warn("[EXEC] 事务执行超时");
                     ByteBuf b = protocolParser.serialize("-ERR transaction execution timed out");
                     if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                     else if (b != null) b.release();
@@ -1235,7 +1225,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 
                 String commandName = cmd.getName();
                 String[] args = cmd.getArgs();
-                logger.debug("[EXEC] 数据处理 - 执行命令: {}, 参数: {}", commandName, java.util.Arrays.toString(args));
+                logger.debug("[EXEC] 执行命令: {}", commandName);
                 
                 // 传递完整参数数组（包含命令名）
                 long cmdStartTime = System.nanoTime();
@@ -1290,27 +1280,20 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 SlowLogManager.getInstance().push(cmdDuration, java.util.Arrays.asList(args), ctx.channel().remoteAddress().toString(), clientInfo.getName());
                 
                 results.add(result);
-                logger.debug("[EXEC] 数据处理 - 添加结果到列表, 当前结果数量: {}", results.size());
+                logger.debug("[EXEC] 结果已添加, 数量: {}", results.size());
                 
-                // 特殊处理SELECT命令，更新客户端数据库状态
                 if ("SELECT".equals(commandName) && args.length >= 2) {
                     try {
                         int database = Integer.parseInt(args[1]);
                         clientInfo.setCurrentDatabase(database);
-                        logger.info("[EXEC] 数据处理 - 切换数据库: {}", database);
+                        logger.debug("[EXEC] 数据库已切换: {}", database);
                     } catch (NumberFormatException ignored) {}
                 }
             }
             
-            // 返回执行结果 - 直接构建RESP响应字符串
-            logger.info("[EXEC] 数据处理 - 准备序列化结果, 结果数量: {}", results.size());
-            for (int i = 0; i < results.size(); i++) {
-                Object r = results.get(i);
-                logger.info("[EXEC] 数据处理 - 结果[{}]: 类型={}, 值={}", 
-                    i, r != null ? r.getClass().getName() : "null", r);
-            }
+            logger.debug("[EXEC] 序列化结果, 数量: {}", results.size());
             
-// 直接构建RESP响应字符串
+            // 直接构建RESP响应字符串
             StringBuilder respBuilder = new StringBuilder();
             respBuilder.append("*").append(results.size()).append("\r\n");
             
@@ -1348,18 +1331,17 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             }
             
             String respStr = respBuilder.toString();
-            logger.info("[EXEC] 出口 - 发送响应 (str): {}", respStr.replace("\r\n", "\\r\\n"));
+            logger.debug("[EXEC] 响应已发送, 长度={} bytes", respStr.length());
             
             ByteBuf b = Unpooled.directBuffer(respStr.length());
             b.writeBytes(respStr.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             ctx.writeAndFlush(b);
             
-            // 重置事务状态
             clientInfo.resetTransaction();
             long execEndTime = System.nanoTime();
-            logger.info("[EXEC] 出口 - 事务完成, 耗时: {} ns", (execEndTime - execStartTime));
+            logger.debug("[EXEC] 事务完成, 耗时={} us", (execEndTime - execStartTime) / 1000);
         } catch (Exception e) {
-            logger.error("Error handling EXEC command", e);
+            logger.error("Error handling EXEC command: {}", e.getMessage(), e);
             ByteBuf b = protocolParser.serialize("-ERR Error handling EXEC command");
             if (b != null && b.isReadable()) ctx.writeAndFlush(b);
             else if (b != null) b.release();

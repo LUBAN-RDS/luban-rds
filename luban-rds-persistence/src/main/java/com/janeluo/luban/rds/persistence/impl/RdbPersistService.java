@@ -76,14 +76,12 @@ public class RdbPersistService implements PersistService {
         this.rdbFilePath = dataDir + File.separator + RDB_FILE_NAME;
         this.tempRdbFilePath = dataDir + File.separator + RDB_TEMP_FILE_NAME;
         
-        // 创建单线程执行器，用于异步持久化
         this.persistExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "rdb-persist-thread");
             t.setDaemon(true);
             return t;
         });
         
-        // 确保数据目录存在
         File dataDirectory = new File(dataDir);
         if (!dataDirectory.exists()) {
             logger.info("Creating data directory: {}", dataDirectory.getAbsolutePath());
@@ -94,9 +92,9 @@ public class RdbPersistService implements PersistService {
                 logger.error("Failed to create data directory: {}", dataDirectory.getAbsolutePath());
             }
         } else {
-            logger.info("Data directory already exists: {}", dataDirectory.getAbsolutePath());
+            logger.debug("数据目录已存在: {}", dataDirectory.getAbsolutePath());
         }
-        logger.info("RDB file path: {}", rdbFilePath);
+        logger.info("RDB持久化已初始化: file={}", rdbFilePath);
     }
     
     @Override

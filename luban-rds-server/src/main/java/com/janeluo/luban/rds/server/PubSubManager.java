@@ -1,6 +1,8 @@
 package com.janeluo.luban.rds.server;
 
 import io.netty.channel.Channel;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -24,44 +26,30 @@ import java.util.concurrent.CopyOnWriteArraySet;
  */
 public class PubSubManager {
     
-    /**
-     * 频道到订阅者集合的映射
-     */
+    private static final Logger logger = LoggerFactory.getLogger(PubSubManager.class);
+    
     private final Map<String, Set<Channel>> channelSubscribers = new ConcurrentHashMap<>();
     
-    /**
-     * 客户端到订阅频道集合的映射
-     */
     private final Map<Channel, Set<String>> clientChannels = new ConcurrentHashMap<>();
     
-    /**
-     * 模式到订阅者集合的映射
-     */
     private final Map<String, Set<Channel>> patternSubscribers = new ConcurrentHashMap<>();
     
-    /**
-     * 客户端到订阅模式集合的映射
-     */
     private final Map<Channel, Set<String>> clientPatterns = new ConcurrentHashMap<>();
     
-    /**
-     * 流到订阅者集合的映射
-     */
     private final Map<String, Set<Channel>> streamSubscribers = new ConcurrentHashMap<>();
     
-    /**
-     * 客户端到订阅流集合的映射
-     */
     private final Map<Channel, Set<String>> clientStreams = new ConcurrentHashMap<>();
 
     public void subscribe(Channel channel, String topic) {
         channelSubscribers.computeIfAbsent(topic, k -> new CopyOnWriteArraySet<>()).add(channel);
         clientChannels.computeIfAbsent(channel, k -> new CopyOnWriteArraySet<>()).add(topic);
+        logger.debug("客户端 {} 订阅频道: {}", channel.remoteAddress(), topic);
     }
 
     public void psubscribe(Channel channel, String pattern) {
         patternSubscribers.computeIfAbsent(pattern, k -> new CopyOnWriteArraySet<>()).add(channel);
         clientPatterns.computeIfAbsent(channel, k -> new CopyOnWriteArraySet<>()).add(pattern);
+        logger.debug("客户端 {} 订阅模式: {}", channel.remoteAddress(), pattern);
     }
 
     public void unsubscribe(Channel channel, String topic) {
@@ -79,6 +67,7 @@ public class PubSubManager {
                 clientChannels.remove(channel);
             }
         }
+        logger.debug("客户端 {} 取消订阅频道: {}", channel.remoteAddress(), topic);
     }
 
     public void punsubscribe(Channel channel, String pattern) {
@@ -96,11 +85,13 @@ public class PubSubManager {
                 clientPatterns.remove(channel);
             }
         }
+        logger.debug("客户端 {} 取消订阅模式: {}", channel.remoteAddress(), pattern);
     }
 
     public void ssubscribe(Channel channel, String stream) {
         streamSubscribers.computeIfAbsent(stream, k -> new CopyOnWriteArraySet<>()).add(channel);
         clientStreams.computeIfAbsent(channel, k -> new CopyOnWriteArraySet<>()).add(stream);
+        logger.debug("客户端 {} 订阅流: {}", channel.remoteAddress(), stream);
     }
 
     public void sunsubscribe(Channel channel, String stream) {
@@ -118,6 +109,7 @@ public class PubSubManager {
                 clientStreams.remove(channel);
             }
         }
+        logger.debug("客户端 {} 取消订阅流: {}", channel.remoteAddress(), stream);
     }
 
     public int unsubscribeAll(Channel channel) {
@@ -162,6 +154,15 @@ public class PubSubManager {
                 }
             }
         }
+        
+        if (count > 0 || (patterns != null && !patterns.isEmpty())) {
+            logger.debug("客户端 {} 取消所有订阅: 频道={}, 模式={}, 流={}", 
+                channel.remoteAddress(), 
+                topics != null ? topics.size() : 0, 
+                patterns != null ? patterns.size() : 0,
+                streams != null ? streams.size() : 0);
+        }
+        
         return count;
     }
     

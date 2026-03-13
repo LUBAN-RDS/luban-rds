@@ -60,10 +60,11 @@ public class AofPersistService implements PersistService {
 
         // 初始化AOF文件写入器
         try {
-            this.aofOutputStream = new FileOutputStream(aofFilePath, true); // 追加模式
+            this.aofOutputStream = new FileOutputStream(aofFilePath, true);
             this.aofWriter = new OutputStreamWriter(aofOutputStream);
+            logger.info("AOF写入器已初始化: file={}", aofFilePath);
         } catch (IOException e) {
-            logger.error("Error initializing AOF writer", e);
+            logger.error("初始化AOF写入器失败: file={}", aofFilePath, e);
         }
 
         // 创建线程池用于异步fsync
@@ -113,8 +114,9 @@ public class AofPersistService implements PersistService {
 
     @Override
     public void load(MemoryStore memoryStore) {
-        logger.info("Loading AOF data...");
+        logger.info("正在加载AOF数据: file={}", aofFilePath);
         long startTime = System.currentTimeMillis();
+        int commandCount = 0;
 
         File aofFile = new File(aofFilePath);
         if (!aofFile.exists()) {
@@ -125,15 +127,15 @@ public class AofPersistService implements PersistService {
         try (BufferedReader br = new BufferedReader(new FileReader(aofFile))) {
             String line;
             while ((line = br.readLine()) != null) {
-                // 解析AOF文件中的命令
                 parseAndExecuteCommand(line, memoryStore);
+                commandCount++;
             }
 
             long endTime = System.currentTimeMillis();
-            logger.info("AOF load completed in {} ms", endTime - startTime);
+            logger.info("AOF加载完成: {} 条命令已加载, 耗时 {} ms", commandCount, endTime - startTime);
 
         } catch (Exception e) {
-            logger.error("Error loading AOF data", e);
+            logger.error("加载AOF数据失败: file={}, 已加载命令数={}", aofFilePath, commandCount, e);
         }
     }
 

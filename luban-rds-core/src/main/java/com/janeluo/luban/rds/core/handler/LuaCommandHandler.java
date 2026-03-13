@@ -13,6 +13,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.UnsupportedEncodingException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -32,7 +35,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * 以模拟 Redis 原生 Lua 脚本行为。
  */
 public class LuaCommandHandler implements CommandHandler {
-    /** 支持的 Lua 相关命令集合。 */
+    private static final Logger logger = LoggerFactory.getLogger(LuaCommandHandler.class);
+
     private final Set<String> supportedCommands = Sets.newHashSet(
             "EVAL", "EVALSHA", "SCRIPT"
     );
@@ -190,6 +194,7 @@ public class LuaCommandHandler implements CommandHandler {
             int sbytes = script.getBytes("UTF-8").length;
             long max = RuntimeConfig.getLuaMaxScriptBytes();
             if (sbytes > max) {
+                logger.warn("脚本加载被拒绝: size={} 超过最大值 {}", sbytes, max);
                 return "-ERR Script exceeds max size\r\n";
             }
         } catch (UnsupportedEncodingException ignored) {}
@@ -201,8 +206,10 @@ public class LuaCommandHandler implements CommandHandler {
                 int bytes = script.getBytes("UTF-8").length;
                 RuntimeConfig.addCachedScriptsBytes(bytes);
             } catch (UnsupportedEncodingException ignored) {}
+            logger.debug("脚本已加载: sha1={}, size={}bytes", sha1, script.length());
         } else {
             scriptCache.put(sha1, script);
+            logger.debug("脚本缓存已更新: sha1={}", sha1);
         }
         
         return "$" + sha1.length() + "\r\n" + sha1 + "\r\n";
@@ -237,9 +244,11 @@ public class LuaCommandHandler implements CommandHandler {
      * 处理 SCRIPT FLUSH 子命令，清空脚本缓存。
      */
     private Object handleScriptFlush(int database, String[] args, MemoryStore store) {
+        int count = scriptCache.size();
         scriptCache.clear();
         RuntimeConfig.resetCachedScriptsCount();
         RuntimeConfig.resetCachedScriptsBytes();
+        logger.info("脚本缓存已清空: {} 个脚本被清除", count);
         return "+OK\r\n";
     }
     
@@ -252,6 +261,7 @@ public class LuaCommandHandler implements CommandHandler {
         if (t != null) {
             try {
                 if (t.isAlive()) {
+                    logger.info("正在终止Lua脚本执行: thread={}", t.getName());
                     t.interrupt();
                 }
             } finally {
@@ -261,6 +271,7 @@ public class LuaCommandHandler implements CommandHandler {
             RuntimeConfig.incScriptKills();
             return "+OK\r\n";
         }
+        logger.debug("SCRIPT KILL调用但无脚本在执行");
         return "-NOTBUSY No scripts in execution right now.\r\n";
     }
     
@@ -268,8 +279,12 @@ public class LuaCommandHandler implements CommandHandler {
      * 执行 Lua 脚本。
      * <p>构造 Lua 环境，注入 KEYS / ARGV 以及 redis 库，然后执行脚本并返回 RESP 编码结果。</p>
      */
-    private Object executeScript(int database, String script, String[] keys, String[] argv, MemoryStore store) {
-this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
+private Object executeScript(int database, String script, String[] keys, String[] argv, MemoryStore store) {
+        this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
+        
+        logger.debug("执行Lua脚本: db={}, keys={}, argv={}, timeout={}ms", 
+            database, keys.length, argv.length, scriptTimeoutMs);
+        
         final AtomicReference<Object> resp = new AtomicReference<>();
         Runnable task = () -> {
             try {
@@ -281,6 +296,7 @@ this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
                 
                 org.luaj.vm2.Globals globals = JsePlatform.standardGlobals();
                 if (RuntimeConfig.isLuaSandboxEnabled()) {
+                    logger.debug("Lua沙箱模式已启用，正在配置模块限制");
                     if (!RuntimeConfig.isModuleAllowed("os")) {
                         globals.set("os", LuaValue.NIL);
                     }
@@ -394,7 +410,7 @@ this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
                 LuaValue result = chunk.call();
                 resp.set(convertLuaValueToRedisResponse(result));
             } catch (Exception e) {
-                // 捕获所有异常，避免线程崩溃
+                logger.error("Lua脚本执行失败: {}", e.getMessage(), e);
                 resp.set("-ERR Error executing script: " + e.getMessage() + "\r\n");
             } finally {
                 // 确保线程状态正确清理
@@ -417,15 +433,18 @@ this.scriptTimeoutMs = RuntimeConfig.getLuaScriptTimeoutMs();
                     t.interrupt();
                 }
                 RuntimeConfig.incScriptTimeouts();
+                logger.warn("Lua脚本执行被中断: keys={}, timeout={}ms", keys.length, scriptTimeoutMs);
                 return "-ERR Script timed out\r\n";
             }
             if (t.isAlive()) {
                 t.interrupt();
                 RuntimeConfig.incScriptTimeouts();
+                logger.warn("Lua脚本执行超时: keys={}, timeout={}ms", keys.length, scriptTimeoutMs);
                 return "-ERR Script timed out\r\n";
             }
             long duration = System.currentTimeMillis() - start;
             RuntimeConfig.recordScriptDuration(duration);
+            logger.debug("Lua脚本执行完成: keys={}, duration={}ms", keys.length, duration);
             Object r = resp.get();
             if (r != null) {
                 try {

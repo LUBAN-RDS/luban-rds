@@ -227,6 +227,7 @@ public class MonitorManager {
      */
     public void addMonitor(Channel channel, int db, String pattern) {
         if (monitorClients.size() >= RuntimeConfig.getMonitorMaxClients()) {
+            logger.warn("Monitor客户端被拒绝: 已达最大客户端数, 当前={}", monitorClients.size());
             channel.writeAndFlush(Unpooled.copiedBuffer("-ERR max number of monitoring clients reached\r\n", StandardCharsets.UTF_8));
             return;
         }
@@ -234,6 +235,8 @@ public class MonitorManager {
         MonitorContext context = new MonitorContext(channel, db == -1 ? null : db, pattern);
         monitorClients.put(channel, context);
         channel.writeAndFlush(Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+        logger.debug("Monitor客户端已添加: channel={}, db={}, pattern={}, 总数={}", 
+            channel.remoteAddress(), db, pattern, monitorClients.size());
         dumpHistory(channel, context);
     }
 
@@ -243,7 +246,11 @@ public class MonitorManager {
      * @param channel 客户端通道
      */
     public void removeMonitor(Channel channel) {
-        monitorClients.remove(channel);
+        MonitorContext removed = monitorClients.remove(channel);
+        if (removed != null) {
+            logger.debug("Monitor客户端已移除: channel={}, 剩余={}", 
+                channel.remoteAddress(), monitorClients.size());
+        }
     }
     
     /**

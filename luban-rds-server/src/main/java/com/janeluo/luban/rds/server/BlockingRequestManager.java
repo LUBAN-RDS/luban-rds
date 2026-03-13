@@ -305,7 +305,7 @@ public class BlockingRequestManager {
             BlockingRequest request = iterator.next();
             
             if (request.isTimedOut() && !request.completed && !request.cancelled) {
-                logger.info("Request timed out: requestId={}, timeoutMs={}, elapsed={}ms", 
+                logger.debug("请求超时: requestId={}, timeoutMs={}, elapsed={}ms", 
                     request.requestId, request.timeoutMs, System.currentTimeMillis() - request.createTime);
                 
                 // 从所有等待队列中移除

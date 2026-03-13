@@ -619,7 +619,8 @@ public class DefaultMemoryStore implements MemoryStore {
             }
             
             if (bestEntry == null) {
-                logger.warn("LRU淘汰失败：没有可淘汰的键");
+                logger.debug("LRU淘汰失败: 无可淘汰键, 已用内存={}bytes, 最大内存={}bytes", 
+                    usedMemory.get(), maxMemory);
                 return false;
             }
             
@@ -763,7 +764,8 @@ public class DefaultMemoryStore implements MemoryStore {
             }
             
             if (candidates.isEmpty()) {
-                logger.warn("随机淘汰失败：没有可淘汰的键");
+                logger.debug("随机淘汰失败: 无可淘汰键, 已用内存={}bytes, 最大内存={}bytes", 
+                    usedMemory.get(), maxMemory);
                 return false;
             }
             
@@ -816,7 +818,8 @@ public class DefaultMemoryStore implements MemoryStore {
             }
             
             if (keyToEvict == null) {
-                logger.warn("TTL淘汰失败：没有设置过期时间的键");
+                logger.debug("TTL淘汰失败: 无设置过期时间的键, 已用内存={}bytes, 最大内存={}bytes", 
+                    usedMemory.get(), maxMemory);
                 return false;
             }
             
@@ -1146,13 +1149,12 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.getIfPresent(key);
         if (storeValue == null) {
-            logger.warn("pexpire failed: key={} not found", key);
+            logger.debug("pexpire failed: key={} not found", key);
             return false;
         }
         
-        // 更新过期时间
         long expireTime = System.currentTimeMillis() + milliseconds;
-        logger.info("pexpire: key={} ms={} expireTime={}", key, milliseconds, expireTime);
+        logger.debug("pexpire: key={} ms={} expireTime={}", key, milliseconds, expireTime);
         StoreValue newStoreValue = new StoreValue(storeValue.value, storeValue.getType(), expireTime);
         store.storage.put(key, newStoreValue);
         bumpKeyVersion(database, key);
@@ -1618,22 +1620,22 @@ public class DefaultMemoryStore implements MemoryStore {
         StoreValue storeValue = store.storage.getIfPresent(key);
         
         if (storeValue == null) {
-            logger.info("hexists: key={} not found", key);
+            logger.debug("hexists: key={} not found", key);
             return false;
         }
         if (storeValue.isExpired()) {
-            logger.info("hexists: key={} expired", key);
+            logger.debug("hexists: key={} expired", key);
             return false;
         }
         
         Object val = storeValue.value;
         if (val instanceof java.util.Map) {
             boolean exists = ((java.util.Map<?, ?>) val).containsKey(field);
-            logger.info("hexists: key={} field={} exists={}", key, field, exists);
+            logger.debug("hexists: key={} field={} exists={}", key, field, exists);
             return exists;
         }
         
-        logger.warn("hexists: key={} wrong type", key);
+        logger.debug("hexists: key={} wrong type", key);
         return false;
     }
 
@@ -3401,7 +3403,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 
                 return generatedId;
             } catch (IllegalArgumentException e) {
-                logger.warn("XADD failed: {}", e.getMessage());
+                logger.debug("XADD failed: {}", e.getMessage());
                 return null;
             }
         }
@@ -3595,7 +3597,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 
                 return true;
             } catch (IllegalStateException e) {
-                logger.warn("XGROUP CREATE failed: {}", e.getMessage());
+                logger.debug("XGROUP CREATE failed: {}", e.getMessage());
                 return false;
             }
         }
