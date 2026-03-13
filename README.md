@@ -32,11 +32,12 @@ Luban-RDS 是一个完全兼容 Redis 协议的轻量级内存数据库，使用
 - **性能优化**：协议解析优化、响应缓存、数据结构直接操作、原子性批量操作
 - **易于扩展**：模块化设计，支持命令和数据结构扩展
 - **发布/订阅**：支持 SUBSCRIBE、UNSUBSCRIBE、PUBLISH、PSUBSCRIBE、PUNSUBSCRIBE
-- **Lua 脚本**：支持 EVAL、EVALSHA、SCRIPT 命令族，完全兼容 Redis Lua 脚本
-- **事务支持**：支持 MULTI、EXEC、DISCARD、WATCH、UNWATCH
-- **实时监控**：支持 MONITOR 命令实时监控命令执行
-- **慢查询日志**：支持 SLOWLOG 命令记录慢查询
-- **内存分析**：支持 MEMORY 命令族进行内存诊断
+- **Lua 脚本**: 支持 EVAL、EVALSHA、SCRIPT 命令族，完全兼容 Redis Lua 脚本，新增 struct 库支持 Lc0/Ic0/ic0 格式
+- **事务支持**: 支持 MULTI、EXEC、DISCARD、WATCH、UNWATCH
+- **实时监控**: 支持 MONITOR 命令，采用 MPSC 无锁环形缓冲区实现高性能命令监控（<40ns 开销）
+- **慢查询日志**: 支持 SLOWLOG 命令记录慢查询
+- **内存分析**: 支持 MEMORY 命令族进行内存诊断
+- **Stream 数据类型**: 完整支持 Stream 相关命令（XADD、XLEN、XRANGE、XREVRANGE、XREAD、XGROUP、XREADGROUP 等）
 
 ## 🚀 快速开始
 
@@ -238,8 +239,8 @@ luban-rds/
 - XADD, XLEN, XRANGE, XREVRANGE, XDEL, XTRIM, XREAD, XINFO
 - XGROUP, XREADGROUP, XACK, XPENDING, XCLAIM, XAUTOCLAIM
 
-### 通用命令
-- PING, ECHO, DEL, EXISTS, EXPIRE, PEXPIRE, TTL, PTTL, PERSIST, TYPE, FLUSHALL, FLUSHDB, DBSIZE, SCAN, SELECT, INFO, TIME, LASTSAVE, BGREWRITEAOF, BGSAVE, KEYS, QUIT
+### 监控命令
+- MONITOR [DB dbid] [MATCH pattern] - 实时命令监控，支持数据库和模式过滤，采用 MPSC 无锁环形缓冲区实现
 
 ### 认证命令
 - AUTH
@@ -263,8 +264,8 @@ luban-rds/
 - 使用 WATCH 监视的键在 EXEC 前如果发生变更，EXEC 返回 Null Array（RESP: `*-1\r\n`），事务不执行
 - 事务入队阶段若存在参数错误，EXEC 返回 EXECABORT 并丢弃整个事务
 
-### 监控命令
-- MONITOR [DB dbid] [MATCH pattern] - 实时监控命令执行
+### 通用命令
+- PING, ECHO, DEL, EXISTS, EXPIRE, PEXPIRE, TTL, PTTL, PERSIST, TYPE, FLUSHALL, FLUSHDB, DBSIZE, SCAN, SELECT, INFO, TIME, LASTSAVE, BGREWRITEAOF, BGSAVE, KEYS, QUIT
 
 ### 慢查询日志命令
 - SLOWLOG GET [count], SLOWLOG LEN, SLOWLOG RESET
@@ -486,10 +487,10 @@ mvn test
 - [x] 支持内存淘汰策略（LRU、Random、TTL）
 - [x] 支持密码认证
 - [x] 支持多数据库
-- [x] 支持 Lua 脚本（含沙箱模式）
+- [x] 支持 Lua 脚本（含沙箱模式，struct 库支持 Lc0/Ic0/ic0 格式）
 - [x] 支持事务（MULTI/EXEC/DISCARD/WATCH）
 - [x] 支持发布/订阅（含模式订阅、流订阅）
-- [x] 支持实时监控（MONITOR）
+- [x] 支持实时监控（MONITOR，采用 MPSC 无锁环形缓冲区）
 - [x] 支持慢查询日志（SLOWLOG）
 - [x] 支持内存分析（MEMORY）
 - [x] 支持客户端管理（CLIENT 命令族）
@@ -499,6 +500,7 @@ mvn test
 - [x] 内存池集成（Netty PooledByteBufAllocator）
 - [x] 内存碎片整理（自动/手动）
 - [x] StoreValue 内存优化（每条记录节省 36-52 字节）
+- [x] Stream 数据类型（XADD、XLEN、XRANGE、XREVRANGE、XREAD、XGROUP 等）
 - [x] Docker 部署支持
 - [x] Kubernetes 部署支持
 

@@ -78,7 +78,7 @@ version: 1.0.0-SNAPSHOT
 ### v1.0.0-SNAPSHOT (当前版本)
 
 #### 🎨 核心功能
-- ✅ **数据结构**: 完整支持 String、List、Hash、Set、ZSet 五大核心数据结构
+- ✅ **数据结构**: 完整支持 String、List、Hash、Set、ZSet、Stream 六大核心数据结构
 - ✅ **过期机制**: 支持 Key 级别的 TTL 过期策略
 - ✅ **事务支持**: MULTI/EXEC/DISCARD/WATCH 事务命令
 
@@ -95,9 +95,10 @@ version: 1.0.0-SNAPSHOT
 - ✅ **Lua 脚本**: 集成 LuaJ 引擎，支持 EVAL/EVALSHA
 - ✅ **沙箱模式**: 可配置的安全脚本执行环境
 - ✅ **Redis API**: 完整的 `redis.call()` / `redis.pcall()` / `redis.sha1hex()` 支持
+- ✅ **struct 库增强**: 支持 Lc0、Ic0、ic0 等组合格式说明符，变长字符串打包和解包
 
 #### 📊 监控与性能
-- ✅ **MONITOR**: 实时命令监控（<40ns 开销）
+- ✅ **MONITOR**: 实时命令监控（采用 MPSC 无锁环形缓冲区，<40ns 开销）
 - ✅ **SLOWLOG**: 慢查询日志记录
 - ✅ **MEMORY**: 内存使用分析和诊断
 - ✅ **INFO**: 服务器状态信息聚合

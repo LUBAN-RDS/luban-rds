@@ -172,6 +172,7 @@ Luban-RDS 采用三层线程模型，基于 Netty 实现高性能的并发处理
 | **ListCommandHandler** | LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LREM, LINDEX, LSET |
 | **SetCommandHandler** | SADD, SREM, SMEMBERS, SISMEMBER, SCARD, SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF |
 | **ZSetCommandHandler** | ZADD, ZREM, ZRANGE, ZREVRANGE, ZRANGEBYSCORE, ZSCORE, ZCARD, ZRANK, ZREVRANK, ZCOUNT, ZINCRBY |
+| **StreamCommandHandler** | XADD, XLEN, XRANGE, XREVRANGE, XDEL, XTRIM, XREAD, XINFO, XGROUP, XREADGROUP, XACK, XPENDING, XCLAIM |
 | **CommonCommandHandler** | EXISTS, DEL, EXPIRE, PEXPIRE, TTL, PTTL, PERSIST, TYPE, FLUSHALL, FLUSHDB, ECHO, SELECT, INFO, SCAN, DBSIZE, TIME, LASTSAVE, BGREWRITEAOF, BGSAVE, KEYS |
 | **AuthCommandHandler** | AUTH |
 | **ClientCommandHandler** | CLIENT KILL, CLIENT LIST, CLIENT GETNAME, CLIENT PAUSE, CLIENT SETNAME |
@@ -193,6 +194,7 @@ Luban-RDS 采用三层线程模型，基于 Netty 实现高性能的并发处理
 - **沙箱模式**：支持 Lua 脚本沙箱
 - **超时控制**：支持脚本执行超时设置
 - **Redis API**：支持 `redis.call()`, `redis.pcall()`, `redis.error_reply()`, `redis.status_reply()`, `redis.sha1hex()`
+- **struct 库增强**：支持 Lc0、Ic0、ic0 等组合格式说明符，变长字符串打包和解包功能
 
 ## 6. 存储层
 
@@ -214,6 +216,7 @@ Luban-RDS 采用三层线程模型，基于 Netty 实现高性能的并发处理
   - Set：使用 HashSet
   - Hash：使用 HashMap
   - ZSet：使用跳表结构（ZSetStore），保存成员与分数的映射
+  - Stream：使用 StreamEntry、StreamId、ConsumerGroup、Consumer、PendingMessage 等核心类实现
 - **过期时间管理**：维护过期键的集合，定期清理
 
 ### 6.3 并发安全
@@ -293,7 +296,8 @@ Luban-RDS 提供内存碎片监控和整理机制：
 - **保存策略**：支持定时保存和手动保存
 - **压缩存储**：使用 Kryo 序列化框架进行高效存储
 - **ZSet 分数保留**：完整保存和恢复 ZSet 成员的分数值
-- **数据类型支持**：完整支持 String、List、Set、ZSet、Hash 五种数据类型
+- **数据类型支持**：完整支持 String、List、Set、ZSet、Hash、Stream 六种数据类型
+- **长度编码修复**：修复 RDB 长度编码错误，添加边界检查
 
 ### 7.3 AofPersistService
 
@@ -316,9 +320,40 @@ Luban-RDS 提供内存碎片监控和整理机制：
 4. **写入磁盘**：将数据写入磁盘文件
 5. **文件同步**：根据同步策略同步到磁盘
 
-## 8. 发布订阅
+## 8. Stream 数据类型
 
-### 8.1 PubSubManager
+### 8.1 Stream 核心类
+
+- **StreamEntry**：Stream 条目，包含 ID 和字段数据
+- **StreamId**：Stream 条目 ID，格式为 `timestamp-sequence`
+- **ConsumerGroup**：消费者组，管理多个消费者的读取进度
+- **Consumer**：消费者，记录最后一条读取的消息
+- **PendingMessage**：待确认消息，跟踪已投递但未确认的消息
+
+### 8.2 Stream 相关命令
+
+- **XADD**：向 Stream 添加新条目
+- **XLEN**：获取 Stream 长度
+- **XRANGE**：按时间范围查询条目（正向）
+- **XREVRANGE**：按时间范围查询条目（反向）
+- **XDEL**：删除指定条目
+- **XTRIM**：修剪 Stream
+- **XREAD**：读取 Stream 数据
+- **XINFO**：查看 Stream 信息
+- **XGROUP CREATE/DESTROY/CREATECONSUMER/DELCONSUMER**：消费者组管理
+- **XREADGROUP**：消费者组读取
+- **XACK**：确认已处理的消息
+- **XPENDING**：查看待确认消息
+- **XCLAIM**：认领待处理消息
+
+### 8.3 持久化支持
+
+- **RDB 持久化**：完整保存 Stream 数据结构及消费者组状态
+- **AOF 持久化**：记录所有 Stream 相关写操作命令
+
+## 9. 发布订阅
+
+### 9.1 PubSubManager
 
 - **频道管理**：管理频道和订阅关系
 - **双向映射**：
@@ -328,7 +363,7 @@ Luban-RDS 提供内存碎片监控和整理机制：
 - **流订阅**：支持流订阅（SSUBSCRIBE）
 - **消息广播**：支持向频道的所有订阅者广播消息
 
-### 8.2 订阅流程
+### 9.2 订阅流程
 
 1. **订阅频道**：客户端发送 SUBSCRIBE 命令
 2. **添加订阅**：`PubSubManager` 添加订阅关系
@@ -338,7 +373,7 @@ Luban-RDS 提供内存碎片监控和整理机制：
 6. **取消订阅**：客户端发送 UNSUBSCRIBE 命令
 7. **移除订阅**：`PubSubManager` 移除订阅关系
 
-### 8.3 消息格式
+### 9.3 消息格式
 
 - **订阅确认**：`["subscribe", "channel", count]`
 - **取消订阅确认**：`["unsubscribe", "channel", count]`
@@ -346,38 +381,40 @@ Luban-RDS 提供内存碎片监控和整理机制：
 - **模式订阅确认**：`["psubscribe", "pattern", count]`
 - **模式消息推送**：`["pmessage", "pattern", "channel", "message"]`
 
-## 9. 监控系统
+## 10. 监控系统
 
-### 9.1 MonitorManager
+### 10.1 MonitorManager
 
 - **实时监控**：提供 MONITOR 命令实现
-- **MPSC Ring Buffer**：采用无锁环形缓冲区处理监控事件
+- **MPSC Ring Buffer**：采用无锁环形缓冲区处理监控事件（多生产者单消费者模型）
 - **零内存分配**：预分配事件对象与 StringBuilder 内存池
 - **异步 Worker**：独立的 Worker 线程负责日志格式化与网络广播
 - **历史快照**：新连接的监控客户端可立即获取最近的命令历史
 - **服务端过滤**：支持按数据库 ID 或命令模式在服务端过滤
+- **微秒级时间戳**：实现微秒级时间戳格式的日志输出
+- **特殊字符处理**：支持特殊字符和多字节字符的正确处理
 
-### 9.2 SlowLogManager
+### 10.2 SlowLogManager
 
 - **慢查询记录**：记录执行时间超过阈值的命令
 - **日志管理**：支持获取、清空慢查询日志
 - **性能分析**：帮助识别性能瓶颈
 
-## 10. 客户端连接管理
+## 11. 客户端连接管理
 
 ### QUIT 响应与关闭流程
 - QUIT 写回 `+OK\r\n` 后主动关闭连接。
 - 参考代码：[RedisServerHandler.java:L752-L761](file:///d:/workspaces_idea/igbp-luban-rds/luban-rds-server/src/main/java/com/igbp/luban/rds/server/RedisServerHandler.java#L752-L761)
 
-## 11. 配置系统
+## 12. 配置系统
 
-### 11.1 RuntimeConfig
+### 12.1 RuntimeConfig
 
 - **配置管理**：管理运行时配置
 - **配置加载**：从配置文件或命令行参数加载配置
 - **动态调整**：部分配置支持运行时调整
 
-### 11.2 配置项
+### 12.2 配置项
 
 - **服务器配置**：端口、主机、数据库数量等
 - **内存配置**：最大内存限制、过期策略等
@@ -385,23 +422,23 @@ Luban-RDS 提供内存碎片监控和整理机制：
 - **持久化配置**：RDB 和 AOF 相关设置
 - **网络配置**：TCP 保活、超时设置等
 
-## 12. 监控和统计
+## 13. 监控和统计
 
-### 12.1 性能指标
+### 13.1 性能指标
 
 - **命令执行次数**：统计各命令的执行次数
 - **执行时间**：监控命令执行时间分布
 - **内存使用**：跟踪内存使用情况
 - **连接数**：监控活跃连接数
 
-### 12.2 脚本统计
+### 13.2 脚本统计
 
 - **脚本执行次数**：统计脚本执行次数
 - **执行时长**：监控脚本执行时间
 - **错误计数**：统计脚本执行错误
 - **缓存统计**：跟踪脚本缓存使用情况
 
-### 12.3 INFO 命令
+### 13.3 INFO 命令
 
 INFO 命令经过全面增强，采用 `InfoProvider` 架构聚合多源数据，提供更丰富、一致的系统状态：
 
@@ -413,67 +450,67 @@ INFO 命令经过全面增强，采用 `InfoProvider` 架构聚合多源数据�
 - **CPU**: 系统负载、CPU 使用率等
 - **Keyspace**: 各数据库键数量、过期键数量等
 
-## 13. 安全机制
+## 14. 安全机制
 
-### 13.1 Lua 沙箱
+### 14.1 Lua 沙箱
 
 - **模块限制**：可配置允许使用的 Lua 模块
 - **函数限制**：可配置禁止使用的危险函数
 - **内存限制**：限制脚本大小和返回值大小
 - **执行时间限制**：防止脚本长时间运行
 
-### 13.2 访问控制
+### 14.2 访问控制
 
 - **认证机制**：支持密码认证
 - **命令限制**：可配置禁用危险命令
 - **网络限制**：可配置绑定地址和端口
 
-### 13.3 输入验证
+### 14.3 输入验证
 
 - **参数验证**：验证命令参数的数量和类型
 - **脚本验证**：验证脚本大小和内容
 - **键名验证**：验证键名的长度和格式
 
-## 14. 扩展性
+## 15. 扩展性
 
-### 14.1 命令扩展
+### 15.1 命令扩展
 
 - **CommandHandler 接口**：通过实现该接口添加新命令
 - **命令注册**：在 `DefaultCommandHandler` 中注册新命令
 
-### 14.2 存储扩展
+### 15.2 存储扩展
 
 - **MemoryStore 接口**：可实现自定义存储后端
 - **数据结构扩展**：支持添加新的数据类型
 
-### 14.3 插件系统
+### 15.3 插件系统
 
 - **Spring Boot 集成**：通过 starter 模块集成到 Spring Boot 应用
 - **自定义配置**：支持通过配置文件扩展功能
 
-## 15. 性能优化
+## 16. 性能优化
 
-### 15.1 内存优化
+### 16.1 内存优化
 
 - **紧凑数据结构**：使用高效的数据结构存储数据
 - **内存回收**：及时回收过期键占用的内存
 - **内存限制**：支持设置最大内存使用限制
 
-### 15.2 网络优化
+### 16.2 网络优化
 
 - **Netty 优化**：配置 Netty 线程池和缓冲区大小
 - **连接复用**：支持连接池，减少连接建立开销
 - **批量操作**：支持 pipeline 批量执行命令
 
-### 15.3 执行优化
+### 16.3 执行优化
 
 - **直接修改**：集合操作的直接修改，避免数据复制
 - **脚本缓存**：缓存 Lua 脚本，提高执行效率
 - **并发控制**：细粒度的并发控制，减少锁竞争
 
-## 16. 高可用
+## 17. 高可用
 
-### 16.1 主从复制
+### 17.1 主从复制
 
 （计划支持）通过主从复制提高系统可用性：
 
@@ -481,7 +518,7 @@ INFO 命令经过全面增强，采用 `InfoProvider` 架构聚合多源数据�
 - **从节点**：处理读操作，从主节点复制数据
 - **故障转移**：主节点故障时，从节点提升为主节点
 
-### 16.2 哨兵模式
+### 17.2 哨兵模式
 
 （计划支持）通过哨兵实现自动故障转移：
 
@@ -489,14 +526,14 @@ INFO 命令经过全面增强，采用 `InfoProvider` 架构聚合多源数据�
 - **故障检测**：检测主节点是否故障
 - **故障转移**：当主节点故障时，自动选择从节点提升为主节点
 
-## 17. 部署架构
+## 18. 部署架构
 
-### 17.1 单机部署
+### 18.1 单机部署
 
 - **独立服务**：作为独立的 Redis 兼容服务运行
 - **嵌入式部署**：通过 `EmbeddedRedisServer` 嵌入到应用中
 
-### 17.2 集群部署
+### 18.2 集群部署
 
 （计划支持）通过集群模式提高系统容量和可用性：
 
@@ -504,7 +541,7 @@ INFO 命令经过全面增强，采用 `InfoProvider` 架构聚合多源数据�
 - **负载均衡**：请求自动分发到不同节点
 - **故障容错**：部分节点故障不影响整个系统
 
-## 18. 总结
+## 19. 总结
 
 Luban-RDS 采用分层架构设计，具有以下特点：
 
@@ -517,7 +554,7 @@ Luban-RDS 采用分层架构设计，具有以下特点：
 
 这种架构设计使得 Luban-RDS 既适合作为独立的 Redis 兼容服务，也适合嵌入到应用中使用，为用户提供了灵活的部署选择。
 
-## 19. 下一步
+## 20. 下一步
 
 - **[功能架构](./features.md)**：深入了解各功能模块的详细设计
 - **[设计决策](./design.md)**：了解重要设计选择的理由和权衡
