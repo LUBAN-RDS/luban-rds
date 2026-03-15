@@ -234,7 +234,9 @@ public class TraceContextTest {
         assertTrue(latch.await(10, TimeUnit.SECONDS));
         assertEquals(threadCount, traceIds.size());
         for (int i = 0; i < threadCount; i++) {
-            assertEquals("thread-" + i + "-trace", traceIds.get(i));
+            String expectedTraceId = "thread-" + i + "-trace";
+            assertTrue("Should contain " + expectedTraceId + ", but got: " + traceIds, 
+                traceIds.contains(expectedTraceId));
         }
         executor.shutdown();
     }

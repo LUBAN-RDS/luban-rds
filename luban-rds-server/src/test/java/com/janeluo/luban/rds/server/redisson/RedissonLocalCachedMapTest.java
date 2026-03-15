@@ -72,14 +72,13 @@ public class RedissonLocalCachedMapTest extends RedissonTestBase {
     // added,
     // but invalidation message processing by Redisson seems to fail or be delayed.
     void testCacheSynchronization() throws InterruptedException {
-        // Create a second Redisson client to simulate another node
         Config config = new Config();
         config.useSingleServer()
                 .setAddress("redis://127.0.0.1:" + port)
                 .setRetryAttempts(3)
                 .setRetryInterval(100)
                 .setTimeout(3000);
-        config.setCodec(new StringCodec());
+        config.setCodec(new org.redisson.codec.JsonJacksonCodec());
         RedissonClient redisson2 = Redisson.create(config);
 
         try {

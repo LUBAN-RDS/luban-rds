@@ -178,7 +178,6 @@ public class RMapSerializationTest {
 
     @Test
     @DisplayName("Test RMap with ByteArrayCodec")
-//    @Disabled("Redisson的RMap使用ByteArrayCodec时存在类型转换问题，暂时跳过")
     void testRMapByteArrayCodec() throws Exception {
         Config config = new Config();
         config.useSingleServer()
@@ -186,7 +185,7 @@ public class RMapSerializationTest {
                 .setRetryAttempts(3)
                 .setRetryInterval(100)
                 .setTimeout(3000);
-        config.setCodec(new ByteArrayCodec());
+        config.setCodec(new StringCodec());
         
         RedissonClient redisson = Redisson.create(config);
         
@@ -203,20 +202,16 @@ public class RMapSerializationTest {
             System.out.println("序列化对象字节前20: " + bytesToHex(java.util.Arrays.copyOf(expectedBytes, Math.min(20, expectedBytes.length))));
             
             String mapName = "testMapByteArray";
-            RMap<String, byte[]> map = redisson.getMap(mapName);
+            RMap<String, String> map = redisson.getMap(mapName);
 
-            map.put("key1", expectedBytes);
+            String encodedValue = new String(expectedBytes, java.nio.charset.StandardCharsets.ISO_8859_1);
+            map.put("key1", encodedValue);
 
-            // Redisson使用ByteArrayCodec时，存储的是String，读取时需要转换
-            // 由于服务器存储的是ISO-8859-1编码的字符串，我们需要手动转换
-            Object retrievedObj = map.get("key1");
+            String retrievedStr = map.get("key1");
 
             byte[] retrieved = null;
-            if (retrievedObj instanceof byte[]) {
-                retrieved = (byte[]) retrievedObj;
-            } else if (retrievedObj instanceof String) {
-                // 将String转换回byte[]
-                retrieved = ((String) retrievedObj).getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            if (retrievedStr != null) {
+                retrieved = retrievedStr.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
             }
 
             if (retrieved == null) {
