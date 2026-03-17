@@ -112,12 +112,6 @@
             <version>2.13.5</version>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>com.deliverik</groupId>
-            <artifactId>ig-core</artifactId>
-            <version>8.1.0.0-SNAPSHOT</version>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 
     <build>
