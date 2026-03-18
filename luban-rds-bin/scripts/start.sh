@@ -25,9 +25,9 @@ if [ -f "$JAR_FILE" ]; then
     
     # 支持命令行参数指定端口
     if [ "$1" != "" ]; then
-        java -jar "$JAR_FILE" "$1"
+        java --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED -jar "$JAR_FILE" "$1"
     else
-        java -jar "$JAR_FILE"
+        java --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED -jar "$JAR_FILE"
     fi
 else
     echo "错误: 未找到 $JAR_FILE"

@@ -27,9 +27,9 @@ if exist "%JAR_FILE%" (
     
     REM 支持命令行参数指定端口
     if "%1" neq "" (
-        java -jar "%JAR_FILE%" %1
+        java --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED -jar "%JAR_FILE%" %1
     ) else (
-        java -jar "%JAR_FILE%"
+        java --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.nio=ALL-UNNAMED -jar "%JAR_FILE%"
     )
 ) else (
     echo 错误: 未找到 %JAR_FILE%

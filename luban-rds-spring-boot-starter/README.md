@@ -12,7 +12,7 @@ Luban RDS 的 Spring Boot 3.4.11 自动配置集成模块，提供开箱即用�
 <dependency>
     <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.1-SNAPSHOT</version>
 </dependency>
 ```
 
