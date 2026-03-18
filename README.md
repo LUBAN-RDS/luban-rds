@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Java](https://img.shields.io/badge/Java-17+-green.svg)](https://www.oracle.com/java/)
 [![Maven](https://img.shields.io/badge/Maven-3.6+-blue.svg)](https://maven.apache.org/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.18-green.svg)](https://spring.io/projects/spring-boot)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.11-green.svg)](https://spring.io/projects/spring-boot)
 [![Netty](https://img.shields.io/badge/Netty-4.2.10.Final-orange.svg)](https://netty.io/)
 [![Redis Compatible](https://img.shields.io/badge/Redis-Protocol%20Compatible-red.svg)](https://redis.io/)
 [![GitHub Stars](https://img.shields.io/github/stars/LUBAN-RDS/luban-rds?style=social)](https://github.com/LUBAN-RDS/luban-rds)
@@ -156,7 +156,7 @@ public class RedisController {
 - **Java**：JDK 17+
 - **Maven**：项目构建工具
 - **Netty**：4.2.10.Final，高性能网络服务器
-- **Spring Boot**：2.7.18，自动配置和集成
+- **Spring Boot**：3.4.11，自动配置和集成
 - **Caffeine**：3.2.3，高性能缓存库
 - **Guava**：33.5.0-jre，工具库
 - **SLF4J**：1.7.36，日志框架
@@ -225,6 +225,10 @@ luban-rds/
 │   │   ├── ReplicationBacklog.java  # 复制积压缓冲区
 │   │   └── handler/            # 复制命令处理器
 │   └── src/test/java/          # 复制测试
+├── luban-rds-sentinel/         # 哨兵模块
+│   └── src/main/java/com/janeluo/luban/rds/sentinel/
+│       ├── SentinelManager.java  # 哨兵管理器
+│       └── handler/            # 哨兵命令处理器
 ├── docker/                     # Docker 部署配置
 │   ├── entrypoint.sh           # 容器入口脚本
 │   ├── healthcheck.sh          # 健康检查脚本

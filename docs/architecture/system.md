@@ -65,6 +65,9 @@ title: 系统架构
 | **luban-rds-bin** | 启动和基准测试 | `RedisServerMain`, `PerformanceBenchmark` |
 | **luban-rds-spring-boot-starter** | Spring Boot 集成 | 自动配置类 |
 | **luban-rds-benchmark** | 性能测试 | 性能测试工具 |
+| **luban-rds-cluster** | 集群支持 | `ClusterNode`, `SlotManager`, `ClusterBusServer`, `GossipProtocol` |
+| **luban-rds-replication** | 主从复制 | `MasterReplicationManager`, `SlaveReplicationService`, `ReplicationBacklog` |
+| **luban-rds-sentinel** | 哨兵模式 | `SentinelManager`, `SentinelCommandHandler` |
 
 ## 2. 数据流
 
@@ -512,15 +515,17 @@ INFO 命令经过全面增强，采用 `InfoProvider` 架构聚合多源数据�
 
 ### 17.1 主从复制
 
-（计划支持）通过主从复制提高系统可用性：
+Luban-RDS 支持完整的主从复制功能，实现数据的实时同步和高可用性：
 
 - **主节点**：处理写操作，复制数据到从节点
 - **从节点**：处理读操作，从主节点复制数据
-- **故障转移**：主节点故障时，从节点提升为主节点
+- **全量同步**：支持 RDB 快照传输
+- **增量同步**：基于复制积压缓冲区实现部分同步
+- **故障转移**：主节点故障时，从节点可提升为主节点
 
 ### 17.2 哨兵模式
 
-（计划支持）通过哨兵实现自动故障转移：
+Luban-RDS 提供哨兵模式实现自动故障转移：
 
 - **哨兵节点**：监控主从节点的健康状态
 - **故障检测**：检测主节点是否故障
@@ -535,11 +540,12 @@ INFO 命令经过全面增强，采用 `InfoProvider` 架构聚合多源数据�
 
 ### 18.2 集群部署
 
-（计划支持）通过集群模式提高系统容量和可用性：
+Luban-RDS 支持 Redis Cluster 集群模式：
 
-- **数据分片**：将数据分散到多个节点
+- **数据分片**：将数据分散到多个节点（16384 槽位）
 - **负载均衡**：请求自动分发到不同节点
 - **故障容错**：部分节点故障不影响整个系统
+- **MOVED/ASK 重定向**：支持客户端重定向机制
 
 ## 19. 总结
 

@@ -1,7 +1,7 @@
 ---
 title: 更新日志
-last_updated: 2026-03-14
-version: 1.0.0-SNAPSHOT
+last_updated: 2026-03-18
+version: 1.0.1-SNAPSHOT
 ---
 # Changelog
 
@@ -35,7 +35,7 @@ version: 1.0.0-SNAPSHOT
 ### Changed
 
 - 升级 Netty 版本至 4.2.10.Final
-- 升级 Spring Boot 版本至 2.7.18
+- 升级 Spring Boot 版本至 3.4.11
 - 升级 Caffeine 版本至 3.2.3
 - 升级 Guava 版本至 33.5.0-jre
 - 升级 Kryo 版本至 5.6.0

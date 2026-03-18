@@ -82,10 +82,9 @@
 - [ ] **地理空间索引 (Geo)**: 支持 `GEOADD`, `GEODIST`, `GEORADIUS` 等。
 - [ ] **位图 (Bitmap)**: 支持 `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`。
 - [ ] **超日志 (HyperLogLog)**: 支持 `PFADD`, `PFCOUNT`, `PFMERGE`。
-- [ ] **流 (Stream)**: 支持完整的 Redis 5.0 Stream 数据结构。
 
 #### 高可用性
-- [ ] **主从复制**: 实现全量复制与增量复制机制。
+- [x] **主从复制**: 实现全量复制与增量复制机制。
 - [ ] **哨兵模式 (Sentinel)**: 监控主从拓扑，实现自动故障转移。
 
 #### 云原生与运维
@@ -418,7 +417,7 @@
 - **构建工具**: Maven 3.6+
 - **核心框架**:
     - Netty 4.2.10.Final (网络层)
-    - Spring Boot 2.7.18 (集成支持)
+    - Spring Boot 3.4.11 (集成支持)
     - Guava 33.5.0-jre (工具库)
     - Caffeine 3.2.3 (高性能缓存)
     - LuaJ 3.0.1 (Lua 脚本引擎)

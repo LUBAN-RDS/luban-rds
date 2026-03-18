@@ -1,7 +1,7 @@
 ---
 title: Luban-RDS 文档
-last_updated: 2026-03-13
-version: 1.0.0-SNAPSHOT
+last_updated: 2026-03-18
+version: 1.0.1-SNAPSHOT
 ---
 
 <div align="center">
@@ -14,7 +14,7 @@ version: 1.0.0-SNAPSHOT
   <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License">
   <img src="https://img.shields.io/badge/Java-17+-green.svg" alt="Java">
   <img src="https://img.shields.io/badge/Maven-3.6+-blue.svg" alt="Maven">
-  <img src="https://img.shields.io/badge/Spring%20Boot-2.7.18-green.svg" alt="Spring Boot">
+  <img src="https://img.shields.io/badge/Spring%20Boot-3.4.11-green.svg" alt="Spring Boot">
   <img src="https://img.shields.io/badge/Netty-4.2.10.Final-orange.svg" alt="Netty">
   <img src="https://img.shields.io/badge/Redis-Protocol%20Compatible-red.svg" alt="Redis Compatible">
 </p>
