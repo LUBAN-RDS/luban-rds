@@ -1,5 +1,7 @@
 package com.janeluo.luban.rds.common.context;
 
+import com.janeluo.luban.rds.common.config.RdsConfig;
+
 /**
  * 服务器上下文
  * 用于在各模块间共享信息提供者等全局组件
@@ -8,6 +10,7 @@ public final class ServerContext {
 
     private static volatile InfoProvider infoProvider;
     private static volatile PubSubService pubSubService;
+    private static volatile RdsConfig config;
 
     private ServerContext() {
     }
@@ -46,5 +49,23 @@ public final class ServerContext {
      */
     public static PubSubService getPubSubService() {
         return pubSubService;
+    }
+    
+    /**
+     * 设置配置
+     *
+     * @param rdsConfig 配置实例
+     */
+    public static void setConfig(RdsConfig rdsConfig) {
+        config = rdsConfig;
+    }
+    
+    /**
+     * 获取配置
+     *
+     * @return 配置实例
+     */
+    public static RdsConfig getConfig() {
+        return config;
     }
 }

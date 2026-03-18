@@ -58,6 +58,7 @@
         <module>luban-rds-server</module>
         <module>luban-rds-client</module>
         <module>luban-rds-cluster</module>
+        <module>luban-rds-replication</module>
         <module>luban-rds-spring-boot-starter</module>
         <module>luban-rds-persistence</module>
         <module>luban-rds-bin</module>
@@ -72,6 +73,12 @@
                 <artifactId>netty-all</artifactId>
                 <version>${netty.version}</version>
             </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec-redis</artifactId>
+                <version>${netty.version}</version>
+            </dependency>
+
 
             <!-- Spring Boot -->
             <dependency>

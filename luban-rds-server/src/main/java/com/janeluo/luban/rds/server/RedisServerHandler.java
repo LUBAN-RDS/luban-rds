@@ -83,7 +83,9 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 "XADD","XLEN","XRANGE","XREVRANGE","XDEL","XTRIM","XREAD","XINFO",
                 "XGROUP","XREADGROUP","XACK","XPENDING","XCLAIM","XAUTOCLAIM",
                 // 集群命令
-                "ASKING","READONLY","READWRITE","CLUSTER"
+                "ASKING","READONLY","READWRITE","CLUSTER",
+                // 复制命令
+                "SLAVEOF","REPLICAOF","PSYNC","SYNC","REPLCONF","WAIT"
         };
         for (String n : names) KNOWN_COMMANDS.add(n);
         
@@ -180,6 +182,9 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     private final ClusterConfig clusterConfig;
     private final SlotManager slotManager;
     
+    // 复制模式相关字段
+    private com.janeluo.luban.rds.replication.handler.ReplicationCommandHandler replicationCommandHandler;
+    
     public RedisServerHandler(MemoryStore memoryStore, DefaultCommandHandler commandHandler, RedisProtocolParser protocolParser) {
         this(memoryStore, commandHandler, protocolParser, 0, false, null, null);
     }
@@ -209,6 +214,22 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         this.clusterEnabled = clusterEnabled;
         this.clusterConfig = clusterConfig;
         this.slotManager = slotManager;
+        
+        // 初始化复制管理器（主节点模式）
+        com.janeluo.luban.rds.common.config.RdsConfig config = 
+            com.janeluo.luban.rds.common.context.ServerContext.getConfig();
+        if (config != null) {
+            com.janeluo.luban.rds.replication.MasterReplicationManager.initialize(
+                (int) config.getReplBacklogSize());
+        }
+    }
+    
+    /**
+     * 设置复制命令处理器
+     */
+    public void setReplicationCommandHandler(
+            com.janeluo.luban.rds.replication.handler.ReplicationCommandHandler handler) {
+        this.replicationCommandHandler = handler;
     }
     
     @Override
@@ -400,6 +421,85 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             } else if ("MONITOR".equals(commandName)) {
                 logger.debug("Handling MONITOR command");
                 handleMonitorCommand(ctx, clientInfo, args);
+                return;
+            }
+            
+            // ==================== 复制命令处理 ====================
+            if ("SLAVEOF".equals(commandName) || "REPLICAOF".equals(commandName)) {
+                logger.debug("Handling {} command", commandName);
+                if (replicationCommandHandler != null) {
+                    String response = replicationCommandHandler.handleWithChannel(ctx, args);
+                    if (response != null) {
+                        ByteBuf responseBuffer = protocolParser.serialize(response);
+                        if (responseBuffer != null && responseBuffer.isReadable()) {
+                            ctx.writeAndFlush(responseBuffer);
+                        } else if (responseBuffer != null) {
+                            responseBuffer.release();
+                        }
+                    }
+                } else {
+                    ByteBuf errorBuffer = protocolParser.serialize("-ERR replication not configured\r\n");
+                    if (errorBuffer != null && errorBuffer.isReadable()) {
+                        ctx.writeAndFlush(errorBuffer);
+                    } else if (errorBuffer != null) {
+                        errorBuffer.release();
+                    }
+                }
+                return;
+            } else if ("PSYNC".equals(commandName) || "SYNC".equals(commandName)) {
+                logger.debug("Handling {} command", commandName);
+                if (replicationCommandHandler != null) {
+                    replicationCommandHandler.handleWithChannel(ctx, args);
+                } else {
+                    ByteBuf errorBuffer = protocolParser.serialize("-ERR replication not configured\r\n");
+                    if (errorBuffer != null && errorBuffer.isReadable()) {
+                        ctx.writeAndFlush(errorBuffer);
+                    } else if (errorBuffer != null) {
+                        errorBuffer.release();
+                    }
+                }
+                return;
+            } else if ("REPLCONF".equals(commandName)) {
+                logger.debug("Handling REPLCONF command");
+                if (replicationCommandHandler != null) {
+                    String response = replicationCommandHandler.handleWithChannel(ctx, args);
+                    if (response != null) {
+                        ByteBuf responseBuffer = protocolParser.serialize(response);
+                        if (responseBuffer != null && responseBuffer.isReadable()) {
+                            ctx.writeAndFlush(responseBuffer);
+                        } else if (responseBuffer != null) {
+                            responseBuffer.release();
+                        }
+                    }
+                } else {
+                    ByteBuf errorBuffer = protocolParser.serialize("-ERR replication not configured\r\n");
+                    if (errorBuffer != null && errorBuffer.isReadable()) {
+                        ctx.writeAndFlush(errorBuffer);
+                    } else if (errorBuffer != null) {
+                        errorBuffer.release();
+                    }
+                }
+                return;
+            } else if ("WAIT".equals(commandName)) {
+                logger.debug("Handling WAIT command");
+                if (replicationCommandHandler != null) {
+                    String response = replicationCommandHandler.handleWithChannel(ctx, args);
+                    if (response != null) {
+                        ByteBuf responseBuffer = protocolParser.serialize(response);
+                        if (responseBuffer != null && responseBuffer.isReadable()) {
+                            ctx.writeAndFlush(responseBuffer);
+                        } else if (responseBuffer != null) {
+                            responseBuffer.release();
+                        }
+                    }
+                } else {
+                    ByteBuf errorBuffer = protocolParser.serialize(":0\r\n");
+                    if (errorBuffer != null && errorBuffer.isReadable()) {
+                        ctx.writeAndFlush(errorBuffer);
+                    } else if (errorBuffer != null) {
+                        errorBuffer.release();
+                    }
+                }
                 return;
             } else if ("ASKING".equals(commandName)) {
                 // 处理 ASKING 命令

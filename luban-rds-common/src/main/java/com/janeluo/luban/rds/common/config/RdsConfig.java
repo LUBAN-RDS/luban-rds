@@ -260,6 +260,59 @@ public class RdsConfig {
      */
     private boolean clusterRequireFullCoverage = true;
 
+    // ==================== 主从复制配置 ====================
+
+    /**
+     * 主节点地址（格式：host:port），空表示当前节点是主节点
+     * 对应 Redis 的 slaveof/replicaof 配置
+     */
+    private String replicaof = "";
+
+    /**
+     * 主节点认证密码
+     */
+    private String masterauth = "";
+
+    /**
+     * 从节点只读模式，默认 true
+     */
+    private boolean slaveReadOnly = true;
+
+    /**
+     * 复制超时时间（秒），默认 60
+     */
+    private int replTimeout = 60;
+
+    /**
+     * 复制积压缓冲区大小（字节），默认 1MB
+     */
+    private long replBacklogSize = 1024 * 1024;
+
+    /**
+     * 复制积压缓冲区存活时间（秒），默认 3600
+     */
+    private int replBacklogTtl = 3600;
+
+    /**
+     * 从节点发送心跳间隔（秒），默认 10
+     */
+    private int replPingSlavePeriod = 10;
+
+    /**
+     * 复制连接断开后重连间隔（毫秒），默认 5000
+     */
+    private long replReconnectInterval = 5000;
+
+    /**
+     * 复制连接 TCP keepalive（秒），默认 60
+     */
+    private int replTcpKeepalive = 60;
+
+    /**
+     * 是否禁用 TCP_NODELAY，默认 false
+     */
+    private boolean replDisableTcpNodelay = false;
+
     // ==================== Getter 和 Setter ====================
 
     public String getBind() {
@@ -628,6 +681,86 @@ public class RdsConfig {
 
     public void setClusterRequireFullCoverage(boolean clusterRequireFullCoverage) {
         this.clusterRequireFullCoverage = clusterRequireFullCoverage;
+    }
+
+    public String getReplicaof() {
+        return replicaof;
+    }
+
+    public void setReplicaof(String replicaof) {
+        this.replicaof = replicaof;
+    }
+
+    public String getMasterauth() {
+        return masterauth;
+    }
+
+    public void setMasterauth(String masterauth) {
+        this.masterauth = masterauth;
+    }
+
+    public boolean isSlaveReadOnly() {
+        return slaveReadOnly;
+    }
+
+    public void setSlaveReadOnly(boolean slaveReadOnly) {
+        this.slaveReadOnly = slaveReadOnly;
+    }
+
+    public int getReplTimeout() {
+        return replTimeout;
+    }
+
+    public void setReplTimeout(int replTimeout) {
+        this.replTimeout = replTimeout;
+    }
+
+    public long getReplBacklogSize() {
+        return replBacklogSize;
+    }
+
+    public void setReplBacklogSize(long replBacklogSize) {
+        this.replBacklogSize = replBacklogSize;
+    }
+
+    public int getReplBacklogTtl() {
+        return replBacklogTtl;
+    }
+
+    public void setReplBacklogTtl(int replBacklogTtl) {
+        this.replBacklogTtl = replBacklogTtl;
+    }
+
+    public int getReplPingSlavePeriod() {
+        return replPingSlavePeriod;
+    }
+
+    public void setReplPingSlavePeriod(int replPingSlavePeriod) {
+        this.replPingSlavePeriod = replPingSlavePeriod;
+    }
+
+    public long getReplReconnectInterval() {
+        return replReconnectInterval;
+    }
+
+    public void setReplReconnectInterval(long replReconnectInterval) {
+        this.replReconnectInterval = replReconnectInterval;
+    }
+
+    public int getReplTcpKeepalive() {
+        return replTcpKeepalive;
+    }
+
+    public void setReplTcpKeepalive(int replTcpKeepalive) {
+        this.replTcpKeepalive = replTcpKeepalive;
+    }
+
+    public boolean isReplDisableTcpNodelay() {
+        return replDisableTcpNodelay;
+    }
+
+    public void setReplDisableTcpNodelay(boolean replDisableTcpNodelay) {
+        this.replDisableTcpNodelay = replDisableTcpNodelay;
     }
 
     @Override
