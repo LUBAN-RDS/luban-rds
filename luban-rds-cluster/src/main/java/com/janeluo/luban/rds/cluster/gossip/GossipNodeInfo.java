@@ -3,7 +3,7 @@ package com.janeluo.luban.rds.cluster.gossip;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 
 import java.io.Serializable;
-import java.util.HashSet;
+import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Set;
 
@@ -11,6 +11,7 @@ import java.util.Set;
  * Gossip 节点信息
  * <p>
  * 用于在心跳消息中携带节点状态信息，实现集群状态的传播
+ * 使用 EnumSet 存储节点状态，比 HashSet 更高效
  * </p>
  */
 public class GossipNodeInfo implements Serializable {
@@ -48,7 +49,7 @@ public class GossipNodeInfo implements Serializable {
     private long configEpoch;
 
     /**
-     * 节点状态标志集合
+     * 节点状态标志集合（使用 EnumSet 提高性能）
      */
     private Set<ClusterNodeState> flags;
 
@@ -56,7 +57,7 @@ public class GossipNodeInfo implements Serializable {
      * 默认构造方法
      */
     public GossipNodeInfo() {
-        this.flags = new HashSet<>();
+        this.flags = EnumSet.noneOf(ClusterNodeState.class);
     }
 
     /**
@@ -86,7 +87,7 @@ public class GossipNodeInfo implements Serializable {
         this.port = port;
         this.busPort = busPort;
         this.configEpoch = configEpoch;
-        this.flags = flags != null ? new HashSet<>(flags) : new HashSet<>();
+        this.flags = flags != null ? EnumSet.copyOf(flags) : EnumSet.noneOf(ClusterNodeState.class);
     }
 
     // ==================== Getter/Setter 方法 ====================
@@ -155,7 +156,7 @@ public class GossipNodeInfo implements Serializable {
     }
 
     public void setFlags(Set<ClusterNodeState> flags) {
-        this.flags = flags != null ? new HashSet<>(flags) : new HashSet<>();
+        this.flags = flags != null ? EnumSet.copyOf(flags) : EnumSet.noneOf(ClusterNodeState.class);
     }
 
     // ==================== 状态管理方法 ====================

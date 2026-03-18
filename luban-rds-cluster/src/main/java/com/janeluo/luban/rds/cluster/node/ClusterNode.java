@@ -2,7 +2,7 @@ package com.janeluo.luban.rds.cluster.node;
 
 import java.io.Serializable;
 import java.util.BitSet;
-import java.util.HashSet;
+import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Set;
 
@@ -10,6 +10,7 @@ import java.util.Set;
  * 集群节点数据模型
  * <p>
  * 表示Redis集群中的一个节点，包含节点的所有状态信息和配置
+ * 使用 EnumSet 存储节点状态，比 HashSet 更高效
  * </p>
  */
 public class ClusterNode implements Serializable {
@@ -47,7 +48,7 @@ public class ClusterNode implements Serializable {
     private int busPort;
 
     /**
-     * 节点状态标志集合
+     * 节点状态标志集合（使用 EnumSet 提高性能）
      */
     private Set<ClusterNodeState> state;
 
@@ -85,7 +86,7 @@ public class ClusterNode implements Serializable {
      * 默认构造方法
      */
     public ClusterNode() {
-        this.state = new HashSet<>();
+        this.state = EnumSet.noneOf(ClusterNodeState.class);
         this.slots = new BitSet(CLUSTER_SLOTS);
         this.configEpoch = 0;
         this.lastPingTime = 0;
@@ -176,7 +177,13 @@ public class ClusterNode implements Serializable {
     }
 
     public void setState(Set<ClusterNodeState> state) {
-        this.state = state != null ? state : new HashSet<>();
+        if (state == null) {
+            this.state = EnumSet.noneOf(ClusterNodeState.class);
+        } else if (state instanceof EnumSet) {
+            this.state = EnumSet.copyOf(state);
+        } else {
+            this.state = EnumSet.copyOf(state);
+        }
     }
 
     public String getMasterNodeId() {

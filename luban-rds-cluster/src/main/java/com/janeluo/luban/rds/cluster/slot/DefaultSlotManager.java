@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 默认槽位管理器实现
@@ -17,6 +18,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * - BitSet 存储本节点的槽位（16384位 = 2KB）
  * - String[] 存储每个槽位的所属节点ID
  * - ReadWriteLock 保证线程安全
+ * - AtomicInteger 缓存已分配槽位数量，避免遍历计算
  * </p>
  */
 public class DefaultSlotManager implements SlotManager {
@@ -54,6 +56,11 @@ public class DefaultSlotManager implements SlotManager {
     private final Map<Integer, String> importingSlots;
 
     /**
+     * 已分配槽位数量缓存（原子操作保证线程安全）
+     */
+    private final AtomicInteger assignedSlotCount;
+
+    /**
      * 默认构造方法
      */
     public DefaultSlotManager() {
@@ -62,6 +69,7 @@ public class DefaultSlotManager implements SlotManager {
         this.lock = new ReentrantReadWriteLock();
         this.migratingSlots = new ConcurrentHashMap<>();
         this.importingSlots = new ConcurrentHashMap<>();
+        this.assignedSlotCount = new AtomicInteger(0);
     }
 
     /**
@@ -82,6 +90,7 @@ public class DefaultSlotManager implements SlotManager {
 
         lock.writeLock().lock();
         try {
+            int newAssigned = 0;
             for (int slot : slots) {
                 SlotUtils.validateSlot(slot);
                 if (slotOwners[slot] != null && !myNodeId.equals(slotOwners[slot])) {
@@ -89,8 +98,16 @@ public class DefaultSlotManager implements SlotManager {
                     throw new IllegalStateException(
                             "槽位 " + slot + " 已分配给节点 " + slotOwners[slot]);
                 }
+                // 只有未分配的槽位才计数
+                if (slotOwners[slot] == null) {
+                    newAssigned++;
+                }
                 mySlots.set(slot);
                 slotOwners[slot] = myNodeId;
+            }
+            // 更新已分配槽位计数
+            if (newAssigned > 0) {
+                assignedSlotCount.addAndGet(newAssigned);
             }
             logger.debug("节点 {} 添加槽位: {}", myNodeId, Arrays.toString(slots));
         } finally {
@@ -108,6 +125,7 @@ public class DefaultSlotManager implements SlotManager {
 
         lock.writeLock().lock();
         try {
+            int newAssigned = 0;
             // 先检查是否有冲突
             for (int slot = start; slot <= end; slot++) {
                 if (slotOwners[slot] != null && !myNodeId.equals(slotOwners[slot])) {
@@ -119,7 +137,15 @@ public class DefaultSlotManager implements SlotManager {
             // 批量设置
             mySlots.set(start, end + 1);
             for (int slot = start; slot <= end; slot++) {
+                // 只有未分配的槽位才计数
+                if (slotOwners[slot] == null) {
+                    newAssigned++;
+                }
                 slotOwners[slot] = myNodeId;
+            }
+            // 更新已分配槽位计数
+            if (newAssigned > 0) {
+                assignedSlotCount.addAndGet(newAssigned);
             }
             logger.debug("节点 {} 添加槽位范围: {}-{}", myNodeId, start, end);
         } finally {
@@ -135,10 +161,18 @@ public class DefaultSlotManager implements SlotManager {
 
         lock.writeLock().lock();
         try {
+            int removedCount = 0;
             for (int slot : slots) {
                 SlotUtils.validateSlot(slot);
+                if (slotOwners[slot] != null) {
+                    removedCount++;
+                }
                 mySlots.clear(slot);
                 slotOwners[slot] = null;
+            }
+            // 更新已分配槽位计数
+            if (removedCount > 0) {
+                assignedSlotCount.addAndGet(-removedCount);
             }
             logger.debug("节点 {} 移除槽位: {}", myNodeId, Arrays.toString(slots));
         } finally {
@@ -156,9 +190,17 @@ public class DefaultSlotManager implements SlotManager {
 
         lock.writeLock().lock();
         try {
+            int removedCount = 0;
             mySlots.clear(start, end + 1);
             for (int slot = start; slot <= end; slot++) {
+                if (slotOwners[slot] != null) {
+                    removedCount++;
+                }
                 slotOwners[slot] = null;
+            }
+            // 更新已分配槽位计数
+            if (removedCount > 0) {
+                assignedSlotCount.addAndGet(-removedCount);
             }
             logger.debug("节点 {} 移除槽位范围: {}-{}", myNodeId, start, end);
         } finally {
@@ -206,18 +248,28 @@ public class DefaultSlotManager implements SlotManager {
 
         lock.writeLock().lock();
         try {
+            String oldOwner = slotOwners[slot];
             if (nodeId == null) {
                 // 取消分配
                 mySlots.clear(slot);
                 slotOwners[slot] = null;
+                if (oldOwner != null) {
+                    assignedSlotCount.decrementAndGet();
+                }
             } else if (nodeId.equals(myNodeId)) {
                 // 分配给当前节点
                 mySlots.set(slot);
                 slotOwners[slot] = nodeId;
+                if (oldOwner == null) {
+                    assignedSlotCount.incrementAndGet();
+                }
             } else {
                 // 分配给其他节点
                 mySlots.clear(slot);
                 slotOwners[slot] = nodeId;
+                if (oldOwner == null) {
+                    assignedSlotCount.incrementAndGet();
+                }
             }
             logger.debug("槽位 {} 设置为节点 {}", slot, nodeId);
         } finally {
@@ -239,11 +291,19 @@ public class DefaultSlotManager implements SlotManager {
     public void clearMySlots() {
         lock.writeLock().lock();
         try {
+            int removedCount = 0;
             // 清除本节点的槽位
             for (int i = mySlots.nextSetBit(0); i >= 0; i = mySlots.nextSetBit(i + 1)) {
+                if (slotOwners[i] != null) {
+                    removedCount++;
+                }
                 slotOwners[i] = null;
             }
             mySlots.clear();
+            // 更新已分配槽位计数
+            if (removedCount > 0) {
+                assignedSlotCount.addAndGet(-removedCount);
+            }
             logger.debug("节点 {} 清空所有槽位", myNodeId);
         } finally {
             lock.writeLock().unlock();
@@ -274,33 +334,14 @@ public class DefaultSlotManager implements SlotManager {
 
     @Override
     public int getUnassignedSlotCount() {
-        lock.readLock().lock();
-        try {
-            int count = 0;
-            for (int i = 0; i < SlotUtils.CLUSTER_SLOTS; i++) {
-                if (slotOwners[i] == null) {
-                    count++;
-                }
-            }
-            return count;
-        } finally {
-            lock.readLock().unlock();
-        }
+        // 使用缓存的已分配槽位计数，避免遍历
+        return SlotUtils.CLUSTER_SLOTS - assignedSlotCount.get();
     }
 
     @Override
     public boolean isAllSlotsAssigned() {
-        lock.readLock().lock();
-        try {
-            for (int i = 0; i < SlotUtils.CLUSTER_SLOTS; i++) {
-                if (slotOwners[i] == null) {
-                    return false;
-                }
-            }
-            return true;
-        } finally {
-            lock.readLock().unlock();
-        }
+        // 使用缓存的已分配槽位计数，避免遍历
+        return assignedSlotCount.get() == SlotUtils.CLUSTER_SLOTS;
     }
 
     // ==================== 槽位迁移相关方法实现 ====================
@@ -389,26 +430,13 @@ public class DefaultSlotManager implements SlotManager {
      * @return 统计信息字符串
      */
     public String getStatistics() {
-        lock.readLock().lock();
-        try {
-            int myCount = mySlots.cardinality();
-            int assignedCount = 0;
-            int unassignedCount = 0;
+        int myCount = mySlots.cardinality();
+        int assignedCount = assignedSlotCount.get();
+        int unassignedCount = SlotUtils.CLUSTER_SLOTS - assignedCount;
 
-            for (int i = 0; i < SlotUtils.CLUSTER_SLOTS; i++) {
-                if (slotOwners[i] != null) {
-                    assignedCount++;
-                } else {
-                    unassignedCount++;
-                }
-            }
-
-            return String.format(
-                    "SlotManager统计: 总槽位=%d, 本节点槽位=%d, 已分配=%d, 未分配=%d",
-                    SlotUtils.CLUSTER_SLOTS, myCount, assignedCount, unassignedCount);
-        } finally {
-            lock.readLock().unlock();
-        }
+        return String.format(
+                "SlotManager统计: 总槽位=%d, 本节点槽位=%d, 已分配=%d, 未分配=%d",
+                SlotUtils.CLUSTER_SLOTS, myCount, assignedCount, unassignedCount);
     }
 
     @Override

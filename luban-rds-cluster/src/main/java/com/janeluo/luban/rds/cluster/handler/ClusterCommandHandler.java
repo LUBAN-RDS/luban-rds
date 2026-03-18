@@ -540,6 +540,8 @@ public class ClusterCommandHandler {
             if (myNode != null) {
                 for (int slot : slots) {
                     myNode.addSlot(slot);
+                    // 同步更新 ClusterConfig 的槽位分配表
+                    clusterConfig.setSlotOwner(slot, myNode.getNodeId());
                 }
                 // 设置为主节点
                 myNode.removeState(ClusterNodeState.SLAVE);

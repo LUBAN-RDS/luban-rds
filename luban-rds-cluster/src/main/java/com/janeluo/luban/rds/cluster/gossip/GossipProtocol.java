@@ -11,7 +11,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Gossip 协议实现
  * <p>
  * 负责节点间信息交换和故障检测，实现 Redis 集群的 Gossip 协议
+ * 性能优化：使用 EnumSet、减少对象创建、批量处理消息
  * </p>
  */
 public class GossipProtocol {
@@ -72,9 +73,9 @@ public class GossipProtocol {
     private final FailureDetector failureDetector;
 
     /**
-     * 随机数生成器
+     * 随机数生成器（ThreadLocal 避免竞争）
      */
-    private final Random random;
+    private final ThreadLocal<Random> randomProvider;
 
     /**
      * 是否已启动
@@ -85,6 +86,11 @@ public class GossipProtocol {
      * 节点最后通信时间记录
      */
     private final ConcurrentHashMap<String, Long> lastInteractionTimes;
+
+    /**
+     * 可复用的 GossipNodeInfo 列表（减少对象创建）
+     */
+    private final ThreadLocal<List<GossipNodeInfo>> reusableGossipList;
 
     /**
      * 构造方法
@@ -117,9 +123,10 @@ public class GossipProtocol {
             return t;
         });
         this.failureDetector = new FailureDetector(clusterConfig, nodeTimeout);
-        this.random = new Random();
+        this.randomProvider = ThreadLocal.withInitial(Random::new);
         this.started = new AtomicBoolean(false);
         this.lastInteractionTimes = new ConcurrentHashMap<>();
+        this.reusableGossipList = ThreadLocal.withInitial(() -> new ArrayList<>(GOSSIP_NODE_COUNT));
     }
 
     /**
@@ -375,9 +382,23 @@ public class GossipProtocol {
      */
     public List<GossipNodeInfo> selectGossipNodes() {
         Collection<ClusterNode> allNodes = clusterConfig.getAllNodes();
-        List<ClusterNode> candidateNodes = new ArrayList<>();
+        
+        // 使用可复用的列表
+        List<GossipNodeInfo> result = reusableGossipList.get();
+        result.clear();
+        
+        // 快速过滤：如果节点数少于等于 GOSSIP_NODE_COUNT，直接处理
+        if (allNodes.size() <= GOSSIP_NODE_COUNT) {
+            for (ClusterNode node : allNodes) {
+                if (!node.isMyself() && !node.isFail()) {
+                    result.add(convertToGossipNodeInfo(node));
+                }
+            }
+            return result;
+        }
 
-        // 过滤掉本节点和 FAIL 状态的节点
+        // 使用数组避免多次遍历
+        List<ClusterNode> candidateNodes = new ArrayList<>(allNodes.size());
         for (ClusterNode node : allNodes) {
             if (!node.isMyself() && !node.isFail()) {
                 candidateNodes.add(node);
@@ -385,14 +406,13 @@ public class GossipProtocol {
         }
 
         // 随机选择节点
+        Random random = randomProvider.get();
         Collections.shuffle(candidateNodes, random);
         int count = Math.min(GOSSIP_NODE_COUNT, candidateNodes.size());
 
-        List<GossipNodeInfo> result = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             ClusterNode node = candidateNodes.get(i);
-            GossipNodeInfo nodeInfo = convertToGossipNodeInfo(node);
-            result.add(nodeInfo);
+            result.add(convertToGossipNodeInfo(node));
         }
 
         return result;
@@ -540,8 +560,8 @@ public class GossipProtocol {
         info.setBusPort(node.getBusPort());
         info.setConfigEpoch(node.getConfigEpoch());
 
-        // 构建状态标志集合
-        Set<ClusterNodeState> flags = new HashSet<>();
+        // 构建状态标志集合（使用 EnumSet 提高性能）
+        Set<ClusterNodeState> flags = EnumSet.noneOf(ClusterNodeState.class);
         if (node.isMaster()) {
             flags.add(ClusterNodeState.MASTER);
         }

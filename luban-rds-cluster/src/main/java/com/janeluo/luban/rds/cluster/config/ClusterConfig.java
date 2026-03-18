@@ -4,9 +4,11 @@ import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 
 import java.io.Serializable;
+import java.util.BitSet;
 import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 集群配置
@@ -45,6 +47,16 @@ public class ClusterConfig implements Serializable {
     private String[] slotAssignment;
 
     /**
+     * 已分配槽位的 BitSet（用于快速判断槽位是否已分配）
+     */
+    private transient BitSet assignedSlotsBitSet;
+
+    /**
+     * 已分配槽位数量缓存（原子操作保证线程安全）
+     */
+    private transient AtomicInteger assignedSlotCount;
+
+    /**
      * 集群状态：ok/fail
      */
     private String state;
@@ -55,6 +67,8 @@ public class ClusterConfig implements Serializable {
     public ClusterConfig() {
         this.nodes = new ConcurrentHashMap<>();
         this.slotAssignment = new String[ClusterNode.CLUSTER_SLOTS];
+        this.assignedSlotsBitSet = new BitSet(ClusterNode.CLUSTER_SLOTS);
+        this.assignedSlotCount = new AtomicInteger(0);
         this.state = "fail";
         this.currentEpoch = 0;
         this.configEpoch = 0;
@@ -152,10 +166,17 @@ public class ClusterConfig implements Serializable {
         ClusterNode removed = nodes.remove(nodeId);
         if (removed != null) {
             // 清除该节点负责的所有槽位
+            int clearedCount = 0;
             for (int i = 0; i < slotAssignment.length; i++) {
                 if (nodeId.equals(slotAssignment[i])) {
                     slotAssignment[i] = null;
+                    assignedSlotsBitSet.clear(i);
+                    clearedCount++;
                 }
+            }
+            // 更新已分配槽位计数
+            if (clearedCount > 0) {
+                assignedSlotCount.addAndGet(-clearedCount);
             }
         }
     }
@@ -217,7 +238,19 @@ public class ClusterConfig implements Serializable {
      */
     public void setSlotOwner(int slot, String nodeId) {
         validateSlot(slot);
+        String oldNodeId = slotAssignment[slot];
         slotAssignment[slot] = nodeId;
+
+        // 更新 BitSet 和计数器
+        if (nodeId != null && oldNodeId == null) {
+            // 新分配
+            assignedSlotsBitSet.set(slot);
+            assignedSlotCount.incrementAndGet();
+        } else if (nodeId == null && oldNodeId != null) {
+            // 取消分配
+            assignedSlotsBitSet.clear(slot);
+            assignedSlotCount.decrementAndGet();
+        }
         
         // 同时更新节点的槽位信息
         if (nodeId != null) {
@@ -259,6 +292,12 @@ public class ClusterConfig implements Serializable {
         validateSlot(slot);
         String oldNodeId = slotAssignment[slot];
         slotAssignment[slot] = null;
+
+        // 更新 BitSet 和计数器
+        if (oldNodeId != null) {
+            assignedSlotsBitSet.clear(slot);
+            assignedSlotCount.decrementAndGet();
+        }
         
         // 同时更新节点的槽位信息
         if (oldNodeId != null) {
@@ -275,13 +314,7 @@ public class ClusterConfig implements Serializable {
      * @return 已分配的槽位数量
      */
     public int getAssignedSlotCount() {
-        int count = 0;
-        for (String nodeId : slotAssignment) {
-            if (nodeId != null) {
-                count++;
-            }
-        }
-        return count;
+        return assignedSlotCount.get();
     }
 
     /**
@@ -290,7 +323,7 @@ public class ClusterConfig implements Serializable {
      * @return 所有槽位是否都已分配
      */
     public boolean areAllSlotsAssigned() {
-        return getAssignedSlotCount() == ClusterNode.CLUSTER_SLOTS;
+        return assignedSlotCount.get() == ClusterNode.CLUSTER_SLOTS;
     }
 
     /**
@@ -378,6 +411,8 @@ public class ClusterConfig implements Serializable {
     public void reset() {
         this.nodes.clear();
         this.slotAssignment = new String[ClusterNode.CLUSTER_SLOTS];
+        this.assignedSlotsBitSet = new BitSet(ClusterNode.CLUSTER_SLOTS);
+        this.assignedSlotCount = new AtomicInteger(0);
         this.state = "fail";
         this.currentEpoch = 0;
         this.configEpoch = 0;
