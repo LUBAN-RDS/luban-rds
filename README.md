@@ -577,9 +577,9 @@ mvn test
 - 设置合适的保存间隔：配置 `luban.rds.server.rdb-save-interval=60`
 - 确保数据目录可写：配置 `luban.rds.server.data-dir=./data`
 
-## 📍 未来规划
+## 📍 版本规划
 
-### 已完成功能 (v1.0.1-SNAPSHOT)
+### v1.0.0 已发布功能
 
 - [x] 支持持久化（RDB、AOF）
 - [x] 支持内存淘汰策略（LRU、Random、TTL）
@@ -605,6 +605,9 @@ mvn test
 - [x] **阻塞列表命令（BLPOP/BRPOP）**：完整实现 Redis 规范，支持多键等待、超时设置、LPUSH/RPUSH 唤醒
 - [x] **Lua 嵌套数组支持**：修复 HSCAN/SSCAN/ZSCAN 在 Lua 脚本中的嵌套数组解析问题
 - [x] **配置文件 Lua 支持**：支持 lua-timeout、lua-sandbox-enabled 等配置项
+
+### v1.0.1-SNAPSHOT 新增功能
+
 - [x] **Redis Cluster 集群模式**：完整实现 Redis Cluster 协议兼容
   - 16384 槽位分配与管理（BitSet 优化，查询 < 1ms）
   - MOVED/ASK 重定向机制
@@ -619,6 +622,7 @@ mvn test
   - 增量同步（基于复制积压缓冲区）
   - 复制状态管理
   - 从节点只读模式
+- [x] **哨兵模式（Sentinel）**：实现哨兵模式核心功能
 
 ### 正在开发
 
@@ -627,7 +631,6 @@ mvn test
 
 ### 计划中
 
-- [ ] 支持哨兵模式（Sentinel）
 - [ ] 支持高级数据类型（Geo、Bitmap、HyperLogLog）
 - [ ] Kubernetes Operator
 - [ ] Prometheus Exporter

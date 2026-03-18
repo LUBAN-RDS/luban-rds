@@ -75,13 +75,25 @@ version: 1.0.1-SNAPSHOT
 
 ## ✨ 版本特性
 
-### v1.0.0-SNAPSHOT (当前版本)
+### v1.0.1-SNAPSHOT (当前开发版本)
+
+#### 🚀 新增功能
+- ✅ **Redis Cluster 集群模式**: 完整实现 Redis Cluster 协议兼容
+  - 16384 槽位分配与管理
+  - MOVED/ASK 重定向机制
+  - Gossip 协议心跳检测
+  - 集群总线协议
+- ✅ **主从复制**: 支持完整的 Redis 主从复制协议
+  - 全量同步（RDB 传输）
+  - 增量同步（基于复制积压缓冲区）
+- ✅ **哨兵模式**: 实现哨兵模式核心功能
+
+### v1.0.0 (已发布)
 
 #### 🎨 核心功能
 - ✅ **数据结构**: 完整支持 String、List、Hash、Set、ZSet、Stream 六大核心数据结构
 - ✅ **过期机制**: 支持 Key 级别的 TTL 过期策略
 - ✅ **事务支持**: MULTI/EXEC/DISCARD/WATCH 事务命令
-- ✅ **主从复制**: 支持完整的 Redis 主从复制协议，包括全量同步和增量同步
 
 #### 📡 协议与网络
 - ✅ **RESP 协议**: 完整实现 Redis Serialization Protocol，支持 RESP2 和 RESP3

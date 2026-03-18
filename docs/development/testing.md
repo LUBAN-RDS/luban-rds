@@ -408,12 +408,12 @@ Luban-RDS 提供了多层次的性能测试方案：
 mvn clean package -pl luban-rds-benchmark -am
 ```
 
-构建完成后，可以在 `luban-rds-benchmark/target` 目录下找到可执行的 JAR 包（通常名为 `luban-rds-benchmark-1.0.0-SNAPSHOT-jar-with-dependencies.jar`）。
+构建完成后，可以在 `luban-rds-benchmark/target` 目录下找到可执行的 JAR 包（通常名为 `luban-rds-benchmark-1.0.1-SNAPSHOT-jar-with-dependencies.jar`）。
 
 运行示例：
 
 ```bash
-java -jar luban-rds-benchmark/target/luban-rds-benchmark-1.0.0-SNAPSHOT-jar-with-dependencies.jar \
+java -jar luban-rds-benchmark/target/luban-rds-benchmark-1.0.1-SNAPSHOT-jar-with-dependencies.jar \
     -h 127.0.0.1 -p 9736 -t 20 -n 100000 -c set,get
 ```
 

@@ -8,15 +8,49 @@ version: 1.0.1-SNAPSHOT
 一个轻量、高性能、兼容 RESP 的 Java 内存键值库，易嵌入与扩展。
 
 
-## [Unreleased]
+## [1.0.1-SNAPSHOT] - 开发中
 
 ### Added
 
+- **Redis Cluster 集群模式**：完整实现 Redis Cluster 协议兼容
+  - 16384 槽位分配与管理（BitSet 优化）
+  - MOVED/ASK 重定向机制
+  - Gossip 协议心跳检测
+  - PFAIL/FAIL 故障检测
+  - 槽位迁移（IMPORTING/MIGRATING 状态）
+  - 集群总线协议（端口 + 10000）
+  - Hash Tag 语法支持 `{tag}`
+  - Jedis/Lettuce/Redisson 客户端兼容性测试
+- **主从复制**：支持完整的 Redis 主从复制协议
+  - 全量同步（RDB 传输）
+  - 增量同步（基于复制积压缓冲区）
+  - 复制状态管理
+  - 从节点只读模式
+- **哨兵模式（Sentinel）**：实现哨兵模式核心功能
+
+### Changed
+
+- 升级 Spring Boot 版本至 3.4.11
+
+## [1.0.0] - 2026-03-04
+
+### Added
+
+- 完整 RESP 协议解析与编码，支持 RESP2 和 RESP3
+- 内存数据结构与过期支持（String/List/Set/Hash/ZSet/Stream）
+- Lua 脚本执行（EVAL/EVALSHA/redis.call），沙箱与执行统计
+- RDB 与 AOF 持久化机制
+- 基于 Netty 的高并发 NIO 服务器
+- 发布/订阅：频道订阅、模式订阅和流订阅
+- 事务支持：MULTI/EXEC/DISCARD/WATCH
+- Spring Boot Starter 自动配置集成
+- 内存统计与 MEMORY 命令族
+- 高性能 MONITOR 命令与事件管线
+- 批量命令支持：MSET, MGET, HMSET, HMGET, DEL (多键)
+- 多元素推入：LPUSH/RPUSH/SADD/ZADD 支持多元素
 - 完整 RESP3 协议支持，包括新数据类型（Map、Set、Null、Boolean、Double、Big Number）
 - 协议版本自动检测和切换，支持 RESP2 和 RESP3 客户端
 - 优化 Lua 脚本处理器的字符串编码处理，符合 Redis 规范
-- 模式订阅支持（PSUBSCRIBE/PUNSUBSCRIBE）
-- 流订阅支持（SSUBSCRIBE/SUNSUBSCRIBE）
 - 慢查询日志功能（SLOWLOG GET/LEN/RESET）
 - 扩展字符串命令：SETNX, GETSET, SETRANGE, GETRANGE, PSETEX
 - 扩展集合命令：SPOP, SRANDMEMBER, SMOVE, SINTER, SUNION, SDIFF, SSCAN
@@ -29,26 +63,22 @@ version: 1.0.1-SNAPSHOT
 - Lua struct 库增强：支持 Lc0、Ic0、ic0 等组合格式说明符，变长字符串打包和解包
 - MONITOR 命令重构：采用 MPSC 无锁环形缓冲区实现高性能命令监控（<40ns 开销）
 - 分布式追踪支持：基于 TraceId 的全链路追踪，自动注入日志 MDC，支持多线程环境下的 TraceId 传递
-- **BLPOP/BRPOP 阻塞命令支持**：完整实现 Redis 规范的阻塞列表弹出命令，支持多键等待、超时设置、LPUSH/RPUSH 唤醒
-- **配置文件 Lua 支持**：新增 lua-timeout、lua-sandbox-enabled、lua-max-script-bytes 等配置项
+- BLPOP/BRPOP 阻塞命令支持：完整实现 Redis 规范的阻塞列表弹出命令
+- 配置文件 Lua 支持：新增 lua-timeout、lua-sandbox-enabled、lua-max-script-bytes 等配置项
+- 多线程 I/O 优化：三层线程模型（Boss → Worker → Business）
+- 内存池集成：Netty PooledByteBufAllocator
+- 内存碎片整理：自动/手动
+- Docker 部署支持
+- Kubernetes 部署支持
 
 ### Changed
 
 - 升级 Netty 版本至 4.2.10.Final
-- 升级 Spring Boot 版本至 3.4.11
 - 升级 Caffeine 版本至 3.2.3
 - 升级 Guava 版本至 33.5.0-jre
 - 升级 Kryo 版本至 5.6.0
 - RDB 持久化改用 Kryo 序列化框架
 - MONITOR 命令支持 DB 和 MATCH 过滤参数
-
-### Deprecated
-
-- 无
-
-### Removed
-
-- 无
 
 ### Fixed
 
@@ -63,46 +93,9 @@ version: 1.0.1-SNAPSHOT
 - 修复 RDB 持久化 ZSet 分数丢失问题，完整保存和恢复分数
 - 修复 RDB 长度编码错误，添加边界检查
 - 添加过期键主动清理机制，避免过期键长期占用内存
-- **修复 Lua 脚本中 HSCAN/SSCAN/ZSCAN 嵌套数组解析问题**：当 HSCAN 等命令在 Lua 脚本中返回嵌套数组时，`res[2]` 为 nil 的问题
-- **修复 BLPOP/BRPOP 命令未注册问题**：命令未被识别的问题
+- 修复 Lua 脚本中 HSCAN/SSCAN/ZSCAN 嵌套数组解析问题
+- 修复 BLPOP/BRPOP 命令未注册问题
 
 ### Security
 
 - 增强 Lua 脚本沙箱安全性
-
-## [1.0.0] - 2026-03-04
-
-### Added
-
-- 完整 RESP 协议解析与编码
-- 内存数据结构与过期支持（String/List/Set/Hash/ZSet）
-- Lua 脚本执行（EVAL/EVALSHA/redis.call），沙箱与执行统计
-- RDB 与 AOF 持久化机制
-- 基于 Netty 的高并发 NIO 服务器
-- 发布/订阅：频道订阅与消息广播
-- 事务支持：MULTI/EXEC/DISCARD/WATCH
-- Spring Boot Starter 自动配置集成
-- 内存统计与 MEMORY 命令族
-- 高性能 MONITOR 命令与事件管线
-- 批量命令支持：MSET, MGET, HMSET, HMGET, DEL (多键)
-- 多元素推入：LPUSH/RPUSH/SADD/ZADD 支持多元素
-
-### Changed
-
-- 无
-
-### Deprecated
-
-- 无
-
-### Removed
-
-- 无
-
-### Fixed
-
-- 无
-
-### Security
-
-- 无

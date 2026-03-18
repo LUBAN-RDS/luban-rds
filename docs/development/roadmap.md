@@ -8,11 +8,11 @@
 
 ## 2. 项目状态
 
-### 2.1 已完成的功能 (Completed)
+### 2.1 v1.0.0 已发布功能
 
 #### 核心功能
 - [x] **Redis 协议 (RESP) 支持**: 完整的请求解析与响应编码，支持 RESP2 和 RESP3 协议协商。
-- [x] **内存存储**: 支持 String, List, Set, Hash, ZSet 五大基础数据类型。
+- [x] **内存存储**: 支持 String, List, Set, Hash, ZSet, Stream 六大数据类型。
 - [x] **键过期时间**: 支持 `EXPIRE`, `PEXPIRE`, `TTL`, `PTTL`, `PERSIST` 等命令。
 - [x] **发布订阅 (Pub/Sub)**: 支持 `SUBSCRIBE`, `UNSUBSCRIBE`, `PUBLISH`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `SSUBSCRIBE`, `SUNSUBSCRIBE`。
 - [x] **Lua 脚本支持**: 集成 LuaJ，支持 `EVAL`, `EVALSHA`, `SCRIPT LOAD` 等，包含沙箱模式。
@@ -59,6 +59,8 @@
 - [x] **Docker Compose**: 提供完整的 Docker Compose 配置，支持一键部署。
 - [x] **Kubernetes 部署**: 提供完整的 Kubernetes 部署清单，包括 Deployment、Service、ConfigMap 等。
 
+### 2.2 v1.0.1-SNAPSHOT 新增功能
+
 #### 集群功能
 - [x] **Redis Cluster 集群模式**: 完整实现 Redis Cluster 协议兼容。
   - 16384 槽位分配与管理（BitSet 优化，查询 < 1ms）
@@ -70,22 +72,22 @@
   - Hash Tag 语法支持 `{tag}`
   - Jedis/Lettuce/Redisson 客户端兼容性测试
 
-### 2.2 正在开发的功能 (In Progress)
+#### 高可用性
+- [x] **主从复制**: 实现全量复制与增量复制机制。
+- [x] **哨兵模式 (Sentinel)**: 实现哨兵模式核心功能。
+
+### 2.3 正在开发的功能 (In Progress)
 
 #### 安全特性
 - [ ] **访问控制列表 (ACL)**: 实现细粒度的用户权限控制（命令级、Key 模式级）。
 - [ ] **传输加密 (TLS/SSL)**: 支持 SSL/TLS 加密连接，保障数据传输安全。
 
-### 2.3 计划中的功能 (Planned)
+### 2.4 计划中的功能 (Planned)
 
 #### 高级数据类型
 - [ ] **地理空间索引 (Geo)**: 支持 `GEOADD`, `GEODIST`, `GEORADIUS` 等。
 - [ ] **位图 (Bitmap)**: 支持 `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`。
 - [ ] **超日志 (HyperLogLog)**: 支持 `PFADD`, `PFCOUNT`, `PFMERGE`。
-
-#### 高可用性
-- [x] **主从复制**: 实现全量复制与增量复制机制。
-- [ ] **哨兵模式 (Sentinel)**: 监控主从拓扑，实现自动故障转移。
 
 #### 云原生与运维
 - [ ] **Kubernetes Operator**: 简化在 K8s 环境下的部署与运维。
