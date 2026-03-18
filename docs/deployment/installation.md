@@ -692,7 +692,7 @@ redis-cli -h localhost -p 9736 INFO
 
 # 输出示例
 # Server
-redis_version:1.0.0
+redis_version:1.0.0-SNAPSHOT
 redis_git_sha1:00000000
 redis_git_dirty:0
 redis_build_id:abcdef123456

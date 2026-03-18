@@ -467,7 +467,66 @@ Luban-RDS 的功能架构设计具有以下特点：
 - 扩展性：支持命令扩展、存储扩展和插件系统
 - 易用性：提供 Spring Boot 集成，便于在 Spring 应用中使用
 
-## 18. 下一步
+## 18. 主从复制
+
+### 18.1 复制概述
+
+**核心功能**：支持完整的 Redis 主从复制协议，实现数据的实时同步和高可用性。
+
+### 18.2 核心组件
+
+| 组件 | 功能描述 |
+|------|----------|
+| MasterReplicationManager | 主节点复制管理器，处理从节点连接和数据同步 |
+| SlaveReplicationService | 从节点复制服务，负责与主节点建立连接和同步数据 |
+| ReplicationBacklog | 复制积压缓冲区，用于增量同步 |
+| ReplicationCommandHandler | 处理复制相关命令（SLAVEOF、PSYNC、REPLCONF） |
+
+### 18.3 复制流程
+
+**全量同步**：
+1. 从节点发送 `PSYNC ? -1` 命令
+2. 主节点返回 `+FULLRESYNC <replid> <offset>`
+3. 主节点生成 RDB 快照并发送给从节点
+4. 从节点加载 RDB 快照
+5. 主节点发送缓冲区中的增量命令
+
+**增量同步**：
+1. 从节点发送 `PSYNC <replid> <offset>` 命令
+2. 主节点检查复制积压缓冲区
+3. 若找到匹配的偏移量，返回 `+CONTINUE` 并发送增量命令
+4. 若未找到匹配的偏移量，触发全量同步
+
+### 18.4 复制命令
+
+| 命令 | 功能描述 |
+|------|----------|
+| SLAVEOF host port | 配置为指定主节点的从节点 |
+| SLAVEOF NO ONE | 取消从节点身份，成为主节点 |
+| PSYNC replid offset | 部分同步命令 |
+| REPLCONF | 复制配置命令 |
+| ROLE | 查看节点角色 |
+
+### 18.5 复制状态管理
+
+**从节点状态**：
+- DISCONNECTED：未连接到主节点
+- CONNECTING：正在连接主节点
+- HANDSHAKE：正在进行握手
+- FULL_SYNC：正在进行全量同步
+- PARTIAL_SYNC：正在进行增量同步
+- ONLINE：复制正常运行
+
+### 18.6 配置选项
+
+| 配置项 | 默认值 | 描述 |
+|--------|--------|------|
+| replicaof | "" | 主节点地址（host:port） |
+| masterauth | "" | 主节点认证密码 |
+| repl-timeout | 60 | 复制超时时间（秒） |
+| repl-backlog-size | 1MB | 复制积压缓冲区大小 |
+
+## 19. 下一步
 
 - [设计决策](./design.md)：了解重要设计选择的理由和权衡
 - [部署指南](../deployment/)：学习如何部署和配置 Luban-RDS
