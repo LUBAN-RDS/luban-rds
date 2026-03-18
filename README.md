@@ -39,6 +39,7 @@ Luban-RDS 是一个完全兼容 Redis 协议的轻量级内存数据库，使用
 - **内存分析**: 支持 MEMORY 命令族进行内存诊断
 - **分布式追踪**: 支持 TraceId 全链路追踪，自动注入日志，多线程环境下自动传递
 - **Stream 数据类型**: 完整支持 Stream 相关命令（XADD、XLEN、XRANGE、XREVRANGE、XREAD、XGROUP、XREADGROUP 等）
+- **Redis Cluster 集群**: 完整支持 Redis Cluster 协议，包括 16384 槽位分配、MOVED/ASK 重定向、Gossip 协议、故障检测
 
 ## 🚀 快速开始
 
@@ -206,6 +207,15 @@ luban-rds/
 │   └── src/main/java/          # 服务器启动入口
 ├── luban-rds-benchmark/        # 性能测试模块
 │   └── src/main/java/          # 性能测试代码
+├── luban-rds-cluster/          # 集群模块
+│   ├── src/main/java/com/janeluo/luban/rds/cluster/
+│   │   ├── node/               # 节点数据模型
+│   │   ├── slot/               # 槽位管理
+│   │   ├── config/             # 集群配置
+│   │   ├── gossip/             # Gossip 协议
+│   │   ├── bus/                # 集群总线
+│   │   └── handler/            # CLUSTER 命令处理器
+│   └── src/test/java/          # 集群测试（含 Jedis/Lettuce/Redisson 兼容性测试）
 ├── docker/                     # Docker 部署配置
 │   ├── entrypoint.sh           # 容器入口脚本
 │   ├── healthcheck.sh          # 健康检查脚本
@@ -276,6 +286,13 @@ luban-rds/
 ### 内存管理命令
 - MEMORY USAGE, MEMORY STATS, MEMORY PURGE, MEMORY MALLOC-STATS, MEMORY DOCTOR, MEMORY HELP
 
+### 集群命令
+- CLUSTER INFO, CLUSTER NODES, CLUSTER MEET, CLUSTER FORGET, CLUSTER ADDSLOTS, CLUSTER DELSLOTS
+- CLUSTER SETSLOT, CLUSTER KEYSLOT, CLUSTER COUNTKEYSINSLOT, CLUSTER GETKEYSINSLOT
+- CLUSTER REPLICATE, CLUSTER FAILOVER, CLUSTER RESET, CLUSTER SAVECONFIG
+- CLUSTER SLAVES, CLUSTER REPLICAS, CLUSTER MYID, CLUSTER SLOTS, CLUSTER COUNTFAILUREREPORTS
+- ASKING, READONLY, READWRITE
+
 #### 发布/订阅示例
 ```bash
 # 终端 A：订阅频道
@@ -329,6 +346,12 @@ luban-rds/
 | `lua-sandbox-enabled` | 是否启用 Lua 沙箱模式 | yes |
 | `lua-max-script-bytes` | Lua 脚本最大字节数 | 65536 |
 | `lua-max-return-bytes` | Lua 脚本最大返回字节数 | 1048576 |
+| `cluster-enabled` | 是否启用集群模式 | false |
+| `cluster-config-file` | 集群配置文件路径 | nodes.conf |
+| `cluster-node-timeout` | 节点超时时间（毫秒） | 15000 |
+| `cluster-announce-ip` | 对外宣布的 IP | "" |
+| `cluster-announce-port` | 对外宣布的端口 | 0 |
+| `cluster-announce-bus-port` | 对外宣布的总线端口 | 0 |
 
 ## 💾 持久化
 
@@ -562,6 +585,15 @@ mvn test
 - [x] **阻塞列表命令（BLPOP/BRPOP）**：完整实现 Redis 规范，支持多键等待、超时设置、LPUSH/RPUSH 唤醒
 - [x] **Lua 嵌套数组支持**：修复 HSCAN/SSCAN/ZSCAN 在 Lua 脚本中的嵌套数组解析问题
 - [x] **配置文件 Lua 支持**：支持 lua-timeout、lua-sandbox-enabled 等配置项
+- [x] **Redis Cluster 集群模式**：完整实现 Redis Cluster 协议兼容
+  - 16384 槽位分配与管理（BitSet 优化，查询 < 1ms）
+  - MOVED/ASK 重定向机制
+  - Gossip 协议心跳检测
+  - PFAIL/FAIL 故障检测
+  - 槽位迁移（IMPORTING/MIGRATING 状态）
+  - 集群总线协议（端口 + 10000）
+  - Hash Tag 语法支持 `{tag}`
+  - Jedis/Lettuce/Redisson 客户端兼容性测试
 
 ### 正在开发
 
@@ -571,7 +603,6 @@ mvn test
 
 ### 计划中
 
-- [ ] 支持集群模式
 - [ ] 支持哨兵模式（Sentinel）
 - [ ] 支持高级数据类型（Geo、Bitmap、HyperLogLog）
 - [ ] Kubernetes Operator

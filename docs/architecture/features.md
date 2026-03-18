@@ -380,7 +380,81 @@ Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
 - 事务入队阶段若存在参数错误，EXEC 返回 EXECABORT
 - 事务内 SELECT 更新客户端数据库状态
 
-## 17. 总结
+## 17. Redis Cluster 集群
+
+### 17.1 集群概述
+
+**核心功能**：完整实现 Redis Cluster 协议，支持分布式部署和数据分片。
+
+### 17.2 核心组件
+
+| 组件 | 功能描述 |
+|------|----------|
+| ClusterNode | 节点数据模型，包含 ID、地址、状态、槽位分配 |
+| SlotManager | 槽位管理，支持 16384 槽位分配和查询 |
+| ClusterConfig | 集群配置管理，节点列表和槽位分配表 |
+| GossipProtocol | Gossip 协议实现，心跳检测和故障发现 |
+| ClusterBusServer | 集群总线服务器，端口 = 服务端口 + 10000 |
+| ClusterCommandHandler | CLUSTER 命令处理器 |
+
+### 17.3 槽位管理
+
+**槽位计算**：
+- 使用 CRC16 算法计算键的槽位
+- 槽位范围：0-16383
+- 支持 Hash Tag 语法：`{tag}key`
+
+**性能优化**：
+- 使用 BitSet 存储槽位（16384 bits = 2KB）
+- AtomicInteger 缓存已分配槽位数量（O(1) 查询）
+- ReadWriteLock 保证线程安全
+
+### 17.4 集群命令
+
+| 命令 | 功能描述 |
+|------|----------|
+| CLUSTER INFO | 集群状态信息 |
+| CLUSTER NODES | 节点列表和槽位分配 |
+| CLUSTER MEET ip port | 添加节点到集群 |
+| CLUSTER FORGET nodeid | 从集群移除节点 |
+| CLUSTER ADDSLOTS slot [...] | 分配槽位 |
+| CLUSTER SETSLOT slot NODE nodeid | 设置槽位归属 |
+| CLUSTER KEYSLOT key | 计算键的槽位 |
+| CLUSTER REPLICATE nodeid | 配置为从节点 |
+| CLUSTER FAILOVER | 手动故障转移 |
+
+### 17.5 重定向机制
+
+**MOVED 重定向**：
+- 槽位属于其他节点时返回
+- 格式：`-MOVED slot ip:port`
+- 客户端应更新槽位缓存
+
+**ASK 重定向**：
+- 槽位迁移过程中返回
+- 格式：`-ASK slot ip:port`
+- 客户端需发送 ASKING 命令后重试
+
+### 17.6 Gossip 协议
+
+**心跳机制**：
+- 定期发送 PING 消息（cluster-node-timeout / 2）
+- 响应 PONG 消息
+- 携带随机节点信息用于传播
+
+**故障检测**：
+1. 节点超时 → 标记为 PFAIL（可能下线）
+2. 多数主节点确认 → 标记为 FAIL（下线）
+3. 广播 FAIL 消息
+
+### 17.7 客户端兼容性
+
+**已测试客户端**：
+- Jedis Cluster（完整兼容）
+- Lettuce Cluster（完整兼容）
+- Redisson Cluster（完整兼容）
+
+## 18. 总结
 
 Luban-RDS 的功能架构设计具有以下特点：
 

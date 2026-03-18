@@ -500,7 +500,94 @@ MONITOR MATCH ^SET.*
 1614850000.123456 [0 127.0.0.1:54321] "SET" "key" "value"
 ```
 
-## 18. 下一步
+## 18. 集群命令
+
+Luban-RDS 完整支持 Redis Cluster 协议，提供完整的集群管理命令。
+
+| 命令 | 语法 | 说明 |
+|------|------|------|
+| **CLUSTER INFO** | `CLUSTER INFO` | 获取集群状态信息 |
+| **CLUSTER NODES** | `CLUSTER NODES` | 获取集群节点列表和槽位分配 |
+| **CLUSTER MEET** | `CLUSTER MEET ip port` | 将节点添加到集群 |
+| **CLUSTER FORGET** | `CLUSTER FORGET nodeid` | 从集群移除节点 |
+| **CLUSTER ADDSLOTS** | `CLUSTER ADDSLOTS slot [slot ...]` | 分配槽位给当前节点 |
+| **CLUSTER DELSLOTS** | `CLUSTER DELSLOTS slot [slot ...]` | 移除槽位分配 |
+| **CLUSTER SETSLOT** | `CLUSTER SETSLOT slot NODE nodeid` | 设置槽位归属节点 |
+| **CLUSTER KEYSLOT** | `CLUSTER KEYSLOT key` | 计算键的槽位 |
+| **CLUSTER COUNTKEYSINSLOT** | `CLUSTER COUNTKEYSINSLOT slot` | 获取槽位中的键数量 |
+| **CLUSTER GETKEYSINSLOT** | `CLUSTER GETKEYSINSLOT slot count` | 获取槽位中的键列表 |
+| **CLUSTER REPLICATE** | `CLUSTER REPLICATE nodeid` | 将当前节点配置为指定节点的从节点 |
+| **CLUSTER FAILOVER** | `CLUSTER FAILOVER [FORCE\|TAKEOVER]` | 手动触发故障转移 |
+| **CLUSTER RESET** | `CLUSTER RESET [HARD\|SOFT]` | 重置集群状态 |
+| **CLUSTER SAVECONFIG** | `CLUSTER SAVECONFIG` | 保存集群配置到文件 |
+| **CLUSTER SLAVES** | `CLUSTER SLAVES nodeid` | 获取指定节点的从节点列表 |
+| **CLUSTER REPLICAS** | `CLUSTER REPLICAS nodeid` | 获取指定节点的副本列表 |
+| **CLUSTER MYID** | `CLUSTER MYID` | 获取当前节点的 ID |
+| **CLUSTER SLOTS** | `CLUSTER SLOTS` | 获取槽位分配信息 |
+| **CLUSTER COUNTFAILUREREPORTS** | `CLUSTER COUNTFAILUREREPORTS nodeid` | 获取节点故障报告数量 |
+| **ASKING** | `ASKING` | 发送 ASKING 标记（用于 ASK 重定向） |
+| **READONLY** | `READONLY` | 启用从节点只读模式 |
+| **READWRITE** | `READWRITE` | 禁用从节点只读模式 |
+
+**示例**：
+```bash
+# 查看集群信息
+CLUSTER INFO
+
+# 查看集群节点
+CLUSTER NODES
+
+# 添加节点到集群
+CLUSTER MEET 192.168.1.2 7001
+
+# 分配槽位
+CLUSTER ADDSLOTS 0 1 2 3 4 5
+
+# 计算键的槽位
+CLUSTER KEYSLOT user:1000
+
+# 设置槽位归属
+CLUSTER SETSLOT 1000 NODE abc123...
+
+# 故障转移
+CLUSTER FAILOVER
+```
+
+### 槽位计算
+
+Luban-RDS 使用 CRC16 算法计算键的槽位：
+
+- 槽位范围：0 - 16383
+- 支持 Hash Tag 语法：`{tag}key`，只有 `{}` 内的内容参与计算
+
+**Hash Tag 示例**：
+```bash
+# 以下键会被分配到同一槽位
+SET {user:1000}:name "Alice"
+SET {user:1000}:age "25"
+SET {user:1000}:email "alice@example.com"
+
+# 计算槽位
+CLUSTER KEYSLOT {user:1000}:name
+# 返回相同槽位
+CLUSTER KEYSLOT {user:1000}:age
+```
+
+### 重定向机制
+
+**MOVED 重定向**：
+```
+-MOVED 3999 127.0.0.1:7001
+```
+表示槽位 3999 属于 127.0.0.1:7001 节点，客户端应更新槽位缓存并重定向。
+
+**ASK 重定向**：
+```
+-ASK 3999 127.0.0.1:7001
+```
+表示槽位 3999 正在迁移中，客户端应发送 ASKING 命令后重定向。
+
+## 19. 下一步
 
 - **[核心接口](./core.md)**：了解 MemoryStore 等核心接口的详细定义
 - **[协议说明](./protocol.md)**：深入了解 RESP 协议的工作原理
