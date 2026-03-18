@@ -272,11 +272,24 @@ tcp-keepalive 300
 
 ### 9.1 Luban-RDS 支持集群模式吗？
 
-目前 Luban-RDS 主要支持单机模式，集群模式正在规划中。
+是的，Luban-RDS 完整支持 Redis Cluster 集群模式，包括：
+- 16384 槽位分配与管理
+- MOVED/ASK 重定向机制
+- Gossip 协议心跳检测
+- 故障检测与转移
+- 集群总线协议
+
+详细配置请参考 [集群命令](../api/commands.md#18-集群命令) 文档。
 
 ### 9.2 Luban-RDS 支持主从复制吗？
 
-目前 Luban-RDS 支持基本的主从复制功能，详细配置请参考相关文档。
+是的，Luban-RDS 支持完整的 Redis 主从复制协议，包括：
+- 全量同步（RDB 传输）
+- 增量同步（基于复制积压缓冲区）
+- 复制状态管理
+- 从节点只读模式
+
+详细配置请参考 [主从复制](../architecture/features.md#19-主从复制) 文档。
 
 ### 9.3 如何贡献代码？
 
@@ -295,5 +308,5 @@ tcp-keepalive 300
 ## 10. 下一步
 
  - [更新日志](/changelog)：了解版本更新内容
-- [路线图](https://github.com/your-org/luban-rds/blob/main/ROADMAP.md)：了解未来规划
-- [相关资源](https://github.com/your-org/luban-rds/blob/main/README.md)：获取相关学习资源
+ - [路线图](https://github.com/janeluo/luban-rds)：了解未来规划
+ - [相关资源](https://github.com/janeluo/luban-rds)：获取相关学习资源

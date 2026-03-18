@@ -105,7 +105,7 @@ title: 构建和测试
 
 ```bash
 # 克隆代码仓库
-git clone https://github.com/your-org/luban-rds.git
+git clone https://github.com/janeluo/luban-rds.git
 
 # 进入项目目录
 cd luban-rds

@@ -51,10 +51,8 @@ title: 社区资源
 
 ### 2.3 社交媒体
 
-- **Twitter**：[@luban_rds](https://twitter.com/luban_rds)
 - **GitHub 社交**：关注 [luban-rds](https://github.com/LUBAN-RDS/luban-rds)
-- **掘金**：[https://juejin.cn/tag/Luban-RDS](https://juejin.cn/tag/Luban-RDS)
-- **CSDN**：[https://blog.csdn.net/column/details/luban-rds.html](https://blog.csdn.net/column/details/luban-rds.html)
+
 
 ## 3. 贡献指南
 
@@ -106,23 +104,18 @@ title: 社区资源
 
 ### 4.1 教程与指南
 
-- **快速开始**：[https://your-org.github.io/luban-rds/guide/quickstart.html](https://your-org.github.io/luban-rds/guide/quickstart.html)
-- **使用示例**：[https://your-org.github.io/luban-rds/guide/examples.html](https://your-org.github.io/luban-rds/guide/examples.html)
-- **高级功能**：[https://your-org.github.io/luban-rds/guide/advanced.html](https://your-org.github.io/luban-rds/guide/advanced.html)
+- **快速开始**：[https://luban-rds.github.io/luban-rds/guide/quickstart.html](https://luban-rds.github.io/luban-rds/guide/quickstart.html)
+- **使用示例**：[https://luban-rds.github.io/luban-rds/guide/examples.html](https://luban-rds.github.io/luban-rds/guide/examples.html)
+- **高级功能**：[https://luban-rds.github.io/luban-rds/guide/advanced.html](https://luban-rds.github.io/luban-rds/guide/advanced.html)
 
-### 4.2 视频教程
 
-- **Luban-RDS 入门**：[YouTube 链接](https://www.youtube.com/watch?v=example)
-- **Lua 脚本使用**：[B站链接](https://www.bilibili.com/video/av12345678)
-- **Spring Boot 集成**：[腾讯视频链接](https://v.qq.com/x/page/example.html)
+### 4.2 技术文章
 
-### 4.3 技术文章
+- **Luban-RDS 设计原理**：[技术博客链接](https://luban-rds.github.io/articles/luban-rds-design.html)
+- **Redis 协议解析**：[技术博客链接](https://luban-rds.github.io/articles/redis-protocol.html)
+- **Lua 脚本优化**：[技术博客链接](https://luban-rds.github.io/articles/lua-optimization.html)
 
-- **Luban-RDS 设计原理**：[技术博客链接](https://your-org.github.io/articles/luban-rds-design.html)
-- **Redis 协议解析**：[技术博客链接](https://your-org.github.io/articles/redis-protocol.html)
-- **Lua 脚本优化**：[技术博客链接](https://your-org.github.io/articles/lua-optimization.html)
-
-### 4.4 相关项目
+### 4.3 相关项目
 
 - **Redis 官方**：[https://redis.io/](https://redis.io/)
 - **Lettuce**：[https://lettuce.io/](https://lettuce.io/)（Redis 客户端）
@@ -133,43 +126,7 @@ title: 社区资源
 
 ### 5.1 商业支持
 
-- **企业版**：提供商业版本，包含更多高级功能
-- **技术支持**：提供 24/7 技术支持
-- **咨询服务**：提供架构设计和性能优化咨询
-- **培训服务**：提供企业内部培训
-
-### 5.2 合作伙伴
-
-- **云服务提供商**：与主流云服务提供商合作，提供托管服务
-- **系统集成商**：与系统集成商合作，提供完整解决方案
-- **技术咨询公司**：与技术咨询公司合作，提供专业服务
-
-### 5.3 案例研究
-
-- **大型电商**：使用 Luban-RDS 作为缓存和会话存储
-- **金融科技**：使用 Luban-RDS 作为数据存储和消息队列
-- **在线教育**：使用 Luban-RDS 作为用户数据和课程缓存
-- **游戏行业**：使用 Luban-RDS 作为游戏状态和排行榜存储
-
-## 6. 活动与会议
-
-### 6.1 线上活动
-
-- **技术分享会**：定期举办线上技术分享会
-- **社区会议**：定期举办社区会议，讨论项目进展
-- **黑客马拉松**：定期举办黑客马拉松，促进创新
-
-### 6.2 线下活动
-
-- **技术沙龙**：在各大城市举办技术沙龙
-- **开发者大会**：参加或举办开发者大会
-- **行业峰会**：参加相关行业峰会，分享经验
-
-### 6.3 参与方式
-
-- **关注社交媒体**：获取活动通知
-- **加入邮件列表**：订阅项目邮件列表
-- **加入社区群组**：加入社区讨论群组
+暂不支持
 
 ## 7. 常见问题
 
@@ -239,7 +196,6 @@ title: 社区资源
 
 ## 11. 联系方式
 
-- **项目邮箱**：luban-rds@your-org.com
-- **GitHub Issues**：[https://github.com/your-org/luban-rds/issues](https://github.com/your-org/luban-rds/issues)
-- **GitHub Discussions**：[https://github.com/your-org/luban-rds/discussions](https://github.com/your-org/luban-rds/discussions)
+- **GitHub Issues**：[https://github.com/LUBAN-RDS/luban-rds/issues](https://github.com/LUBAN-RDS/luban-rds/issues)
+- **GitHub Discussions**：[https://github.com/LUBAN-RDS/luban-rds/discussions](https://github.com/LUBAN-RDS/luban-rds/discussions)
 - **Gitter 聊天室**：[https://gitter.im/luban-rds/community](https://gitter.im/luban-rds/community)

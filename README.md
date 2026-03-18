@@ -579,7 +579,7 @@ mvn test
 
 ## 📍 未来规划
 
-### 已完成功能 (v1.0.0-SNAPSHOT)
+### 已完成功能 (v1.0.1-SNAPSHOT)
 
 - [x] 支持持久化（RDB、AOF）
 - [x] 支持内存淘汰策略（LRU、Random、TTL）

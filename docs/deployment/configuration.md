@@ -812,7 +812,24 @@ redis-cli -h localhost -p 9736 INFO persistence | grep -E "rdb_|aof_"
 | `LUBAN_RDS_SLOWLOG_SLOWER_THAN` | slowlog-log-slower-than | 10000 | 慢查询阈值（微秒） |
 | `LUBAN_RDS_SLOWLOG_MAX_LEN` | slowlog-max-len | 128 | 慢查询日志最大长度 |
 
-### 15.5 JVM 配置
+### 15.5 主从复制环境变量
+
+| 变量名 | 配置项 | 默认值 | 描述 |
+|--------|--------|--------|------|
+| `LUBAN_RDS_REPLICAOF` | replicaof | "" | 主节点地址（host:port） |
+| `LUBAN_RDS_MASTERAUTH` | masterauth | "" | 主节点认证密码 |
+| `LUBAN_RDS_REPL_TIMEOUT` | repl-timeout | 60 | 复制超时时间（秒） |
+| `LUBAN_RDS_REPL_BACKLOG_SIZE` | repl-backlog-size | 1mb | 复制积压缓冲区大小 |
+
+### 15.6 集群环境变量
+
+| 变量名 | 配置项 | 默认值 | 描述 |
+|--------|--------|--------|------|
+| `LUBAN_RDS_CLUSTER_ENABLED` | cluster-enabled | false | 是否启用集群模式 |
+| `LUBAN_RDS_CLUSTER_CONFIG_FILE` | cluster-config-file | nodes.conf | 集群配置文件路径 |
+| `LUBAN_RDS_CLUSTER_NODE_TIMEOUT` | cluster-node-timeout | 15000 | 节点超时时间（毫秒） |
+
+### 15.7 JVM 配置
 
 | 变量名 | 默认值 | 描述 |
 |--------|--------|------|
