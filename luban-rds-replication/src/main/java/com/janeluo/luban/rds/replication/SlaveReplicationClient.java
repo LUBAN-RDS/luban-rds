@@ -13,15 +13,39 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 从节点复制客户端
+ * 
  * 用于连接主节点并进行复制握手和数据同步
+ * 
+ * 优化点：
+ * - 自动重连机制
+ * - 重连后优先尝试部分同步
+ * - 重连统计信息
+ * - 指数退避重连策略
  */
 public class SlaveReplicationClient {
     
     private static final Logger logger = LoggerFactory.getLogger(SlaveReplicationClient.class);
+    
+    /**
+     * 默认重连间隔（毫秒）
+     */
+    private static final long DEFAULT_RECONNECT_INTERVAL = 1000;
+    
+    /**
+     * 最大重连间隔（毫秒）
+     */
+    private static final long MAX_RECONNECT_INTERVAL = 30000;
+    
+    /**
+     * 重连间隔增长因子
+     */
+    private static final double RECONNECT_INTERVAL_MULTIPLIER = 1.5;
     
     private final RdsConfig config;
     private final ReplicationCallback callback;
@@ -36,6 +60,14 @@ public class SlaveReplicationClient {
     // 复制偏移量
     private volatile long replicationOffset = 0;
     private volatile String masterReplId;
+    
+    // 重连相关
+    private volatile long currentReconnectInterval = DEFAULT_RECONNECT_INTERVAL;
+    private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
+    private final AtomicInteger totalReconnects = new AtomicInteger(0);
+    private final AtomicInteger successfulReconnects = new AtomicInteger(0);
+    private final AtomicLong lastReconnectTime = new AtomicLong(0);
+    private final AtomicLong totalReconnectTime = new AtomicLong(0);
     
     /**
      * 创建复制客户端
@@ -91,8 +123,6 @@ public class SlaveReplicationClient {
                     @Override
                     protected void initChannel(SocketChannel ch) {
                         ChannelPipeline pipeline = ch.pipeline();
-                        // 这里需要添加RESP协议解码器
-                        // 暂时使用简单的字符串处理
                         pipeline.addLast(new SimpleChannelInboundHandler<ByteBuf>() {
                             @Override
                             protected void channelRead0(ChannelHandlerContext ctx, ByteBuf msg) {
@@ -118,6 +148,19 @@ public class SlaveReplicationClient {
             if (f.isSuccess()) {
                 logger.info("成功连接到主节点 {}:{}", masterHost, masterPort);
                 channel = f.channel();
+                
+                // 重置重连间隔
+                currentReconnectInterval = DEFAULT_RECONNECT_INTERVAL;
+                
+                // 记录成功重连
+                if (reconnectAttempts.get() > 0) {
+                    successfulReconnects.incrementAndGet();
+                    long reconnectDuration = System.currentTimeMillis() - lastReconnectTime.get();
+                    totalReconnectTime.addAndGet(reconnectDuration);
+                    logger.info("重连成功，耗时 {} ms", reconnectDuration);
+                }
+                
+                reconnectAttempts.set(0);
                 startHandshake();
             } else {
                 logger.error("连接主节点失败: {}:{}", masterHost, masterPort, f.cause());
@@ -237,10 +280,12 @@ public class SlaveReplicationClient {
      */
     private void startPsync() {
         if (masterReplId != null) {
-            // 部分重同步
+            // 部分重同步 - 优先尝试
+            logger.info("尝试部分重同步，replId: {}, offset: {}", masterReplId, replicationOffset);
             sendCommand("PSYNC", masterReplId, String.valueOf(replicationOffset));
         } else {
             // 全量同步
+            logger.info("尝试全量同步");
             sendCommand("PSYNC", "?", "-1");
         }
     }
@@ -266,7 +311,7 @@ public class SlaveReplicationClient {
             }
         } else if (response.startsWith("+CONTINUE")) {
             // 部分重同步
-            logger.info("部分重同步");
+            logger.info("部分重同步成功");
             state.set(ReplicationState.PARTIAL_SYNC);
             
             String[] parts = response.split(" ");
@@ -323,17 +368,41 @@ public class SlaveReplicationClient {
     }
     
     /**
-     * 调度重连
+     * 调度重连（使用指数退避策略）
      */
     private void scheduleReconnect() {
         if (!running) {
             return;
         }
         
+        int attempts = reconnectAttempts.incrementAndGet();
+        totalReconnects.incrementAndGet();
+        lastReconnectTime.set(System.currentTimeMillis());
+        
+        logger.info("计划重连，第 {} 次尝试，间隔 {} ms", attempts, currentReconnectInterval);
+        
         workerGroup.schedule(() -> {
             logger.info("尝试重新连接主节点...");
             connect();
-        }, config.getReplReconnectInterval(), TimeUnit.MILLISECONDS);
+        }, currentReconnectInterval, TimeUnit.MILLISECONDS);
+        
+        // 指数退避
+        currentReconnectInterval = Math.min(
+            (long) (currentReconnectInterval * RECONNECT_INTERVAL_MULTIPLIER),
+            MAX_RECONNECT_INTERVAL
+        );
+    }
+    
+    /**
+     * 手动触发重连
+     */
+    public void reconnect() {
+        if (channel != null && channel.isActive()) {
+            channel.close();
+        }
+        
+        currentReconnectInterval = DEFAULT_RECONNECT_INTERVAL;
+        connect();
     }
     
     /**
@@ -388,6 +457,27 @@ public class SlaveReplicationClient {
     }
     
     /**
+     * 设置复制偏移量
+     */
+    public void setReplicationOffset(long offset) {
+        this.replicationOffset = offset;
+    }
+    
+    /**
+     * 获取主节点复制 ID
+     */
+    public String getMasterReplId() {
+        return masterReplId;
+    }
+    
+    /**
+     * 设置主节点复制 ID
+     */
+    public void setMasterReplId(String replId) {
+        this.masterReplId = replId;
+    }
+    
+    /**
      * 是否在线
      */
     public boolean isOnline() {
@@ -401,5 +491,73 @@ public class SlaveReplicationClient {
         if (isOnline()) {
             sendCommand("REPLCONF", "ACK", String.valueOf(replicationOffset));
         }
+    }
+    
+    // ==================== 重连统计信息 ====================
+    
+    /**
+     * 获取当前重连尝试次数
+     */
+    public int getReconnectAttempts() {
+        return reconnectAttempts.get();
+    }
+    
+    /**
+     * 获取总重连次数
+     */
+    public int getTotalReconnects() {
+        return totalReconnects.get();
+    }
+    
+    /**
+     * 获取成功重连次数
+     */
+    public int getSuccessfulReconnects() {
+        return successfulReconnects.get();
+    }
+    
+    /**
+     * 获取上次重连时间
+     */
+    public long getLastReconnectTime() {
+        return lastReconnectTime.get();
+    }
+    
+    /**
+     * 获取总重连耗时
+     */
+    public long getTotalReconnectTime() {
+        return totalReconnectTime.get();
+    }
+    
+    /**
+     * 获取平均重连耗时
+     */
+    public long getAverageReconnectTime() {
+        int successCount = successfulReconnects.get();
+        if (successCount == 0) {
+            return 0;
+        }
+        return totalReconnectTime.get() / successCount;
+    }
+    
+    /**
+     * 获取当前重连间隔
+     */
+    public long getCurrentReconnectInterval() {
+        return currentReconnectInterval;
+    }
+    
+    /**
+     * 获取重连统计信息
+     */
+    public String getReconnectInfo() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("reconnect_attempts:").append(reconnectAttempts.get()).append("\r\n");
+        sb.append("reconnect_total:").append(totalReconnects.get()).append("\r\n");
+        sb.append("reconnect_successful:").append(successfulReconnects.get()).append("\r\n");
+        sb.append("reconnect_current_interval:").append(currentReconnectInterval).append(" ms\r\n");
+        sb.append("reconnect_avg_time:").append(getAverageReconnectTime()).append(" ms\r\n");
+        return sb.toString();
     }
 }

@@ -40,6 +40,7 @@ Luban-RDS 是一个完全兼容 Redis 协议的轻量级内存数据库，使用
 - **分布式追踪**: 支持 TraceId 全链路追踪，自动注入日志，多线程环境下自动传递
 - **Stream 数据类型**: 完整支持 Stream 相关命令（XADD、XLEN、XRANGE、XREVRANGE、XREAD、XGROUP、XREADGROUP 等）
 - **Redis Cluster 集群**: 完整支持 Redis Cluster 协议，包括 16384 槽位分配、MOVED/ASK 重定向、Gossip 协议、故障检测
+- **主从复制**: 支持完整的主从复制功能，包括全量同步和增量同步
 
 ## 🚀 快速开始
 
@@ -161,6 +162,7 @@ public class RedisController {
 - **SLF4J**：1.7.36，日志框架
 - **LuaJ**：3.0.1，Java 实现的 Lua 解释器（用于 Lua 脚本支持）
 - **Kryo**：5.6.0，高性能序列化框架（用于 RDB 持久化）
+- **主从复制**：支持完整的 Redis 主从复制协议
 
 ## 📁 项目结构
 
@@ -216,6 +218,13 @@ luban-rds/
 │   │   ├── bus/                # 集群总线
 │   │   └── handler/            # CLUSTER 命令处理器
 │   └── src/test/java/          # 集群测试（含 Jedis/Lettuce/Redisson 兼容性测试）
+├── luban-rds-replication/      # 主从复制模块
+│   ├── src/main/java/com/janeluo/luban/rds/replication/
+│   │   ├── MasterReplicationManager.java  # 主节点复制管理器
+│   │   ├── SlaveReplicationService.java  # 从节点复制服务
+│   │   ├── ReplicationBacklog.java  # 复制积压缓冲区
+│   │   └── handler/            # 复制命令处理器
+│   └── src/test/java/          # 复制测试
 ├── docker/                     # Docker 部署配置
 │   ├── entrypoint.sh           # 容器入口脚本
 │   ├── healthcheck.sh          # 健康检查脚本
@@ -293,6 +302,9 @@ luban-rds/
 - CLUSTER SLAVES, CLUSTER REPLICAS, CLUSTER MYID, CLUSTER SLOTS, CLUSTER COUNTFAILUREREPORTS
 - ASKING, READONLY, READWRITE
 
+### 复制命令
+- SLAVEOF, PSYNC, REPLCONF, ROLE
+
 #### 发布/订阅示例
 ```bash
 # 终端 A：订阅频道
@@ -352,6 +364,10 @@ luban-rds/
 | `cluster-announce-ip` | 对外宣布的 IP | "" |
 | `cluster-announce-port` | 对外宣布的端口 | 0 |
 | `cluster-announce-bus-port` | 对外宣布的总线端口 | 0 |
+| `replicaof` | 主节点地址（host:port） | "" |
+| `masterauth` | 主节点认证密码 | "" |
+| `repl-timeout` | 复制超时时间（秒） | 60 |
+| `repl-backlog-size` | 复制积压缓冲区大小 | 1MB |
 
 ## 💾 持久化
 
@@ -594,10 +610,14 @@ mvn test
   - 集群总线协议（端口 + 10000）
   - Hash Tag 语法支持 `{tag}`
   - Jedis/Lettuce/Redisson 客户端兼容性测试
+- [x] **主从复制**：支持完整的主从复制功能
+  - 全量同步（RDB 传输）
+  - 增量同步（基于复制积压缓冲区）
+  - 复制状态管理
+  - 从节点只读模式
 
 ### 正在开发
 
-- [ ] 支持主从复制
 - [ ] 访问控制列表（ACL）
 - [ ] 传输加密（TLS/SSL）
 

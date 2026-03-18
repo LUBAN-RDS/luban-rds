@@ -21,6 +21,9 @@ import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.persistence.PersistServiceFactory;
 import com.janeluo.luban.rds.protocol.RedisProtocolParser;
+import com.janeluo.luban.rds.sentinel.config.SentinelConfig;
+import com.janeluo.luban.rds.sentinel.core.Sentinel;
+import com.janeluo.luban.rds.sentinel.core.SentinelManager;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.UnpooledByteBufAllocator;
@@ -121,6 +124,23 @@ public class NettyRedisServer implements RedisServer {
      */
     private ClusterBusClient clusterBusClient;
     
+    // ==================== 哨兵相关组件 ====================
+    
+    /**
+     * 是否启用哨兵模式
+     */
+    private boolean sentinelEnabled;
+    
+    /**
+     * 哨兵配置
+     */
+    private SentinelConfig sentinelConfig;
+    
+    /**
+     * 哨兵实例
+     */
+    private Sentinel sentinel;
+    
     /**
      * 使用默认配置创建服务器
      */
@@ -219,6 +239,56 @@ public class NettyRedisServer implements RedisServer {
         if (config.isClusterEnabled()) {
             initClusterMode();
         }
+        
+        // 初始化哨兵模式
+        if (config.isSentinelEnabled()) {
+            initSentinelMode();
+        }
+    }
+    
+    /**
+     * 初始化哨兵模式
+     */
+    private void initSentinelMode() {
+        logger.info("初始化哨兵模式...");
+        
+        this.sentinelEnabled = true;
+        
+        // 1. 创建哨兵配置
+        this.sentinelConfig = new SentinelConfig();
+        this.sentinelConfig.setPort(config.getSentinelPort());
+        this.sentinelConfig.setBind(config.getBind());
+        this.sentinelConfig.setDownAfterMilliseconds(config.getSentinelDownAfterMilliseconds());
+        this.sentinelConfig.setFailoverTimeout(config.getSentinelFailoverTimeout());
+        this.sentinelConfig.setParallelSyncs(config.getSentinelParallelSyncs());
+        
+        // 设置公告 IP 和端口
+        if (config.getSentinelAnnounceIp() != null && !config.getSentinelAnnounceIp().isEmpty()) {
+            this.sentinelConfig.setBind(config.getSentinelAnnounceIp());
+        }
+        if (config.getSentinelAnnouncePort() > 0) {
+            this.sentinelConfig.setPort(config.getSentinelAnnouncePort());
+        }
+        
+        // 2. 解析并添加主节点监控配置
+        String sentinelMonitor = config.getSentinelMonitor();
+        if (sentinelMonitor != null && !sentinelMonitor.isEmpty()) {
+            String[] parts = sentinelMonitor.split("\\s+");
+            if (parts.length >= 4) {
+                String name = parts[0];
+                String host = parts[1];
+                int port = Integer.parseInt(parts[2]);
+                int quorum = Integer.parseInt(parts[3]);
+                this.sentinelConfig.addMasterConfig(name, host, port, quorum);
+                logger.info("哨兵监控主节点: name={}, host={}, port={}, quorum={}", 
+                           name, host, port, quorum);
+            }
+        }
+        
+        // 3. 创建哨兵实例
+        this.sentinel = SentinelManager.getInstance().createSentinel(this.sentinelConfig);
+        
+        logger.info("哨兵模式初始化完成: port={}", config.getSentinelPort());
     }
     
     /**

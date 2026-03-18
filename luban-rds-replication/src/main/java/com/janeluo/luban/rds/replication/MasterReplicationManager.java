@@ -1,5 +1,7 @@
 package com.janeluo.luban.rds.replication;
 
+import com.janeluo.luban.rds.core.store.MemoryStore;
+import com.janeluo.luban.rds.persistence.impl.RdbPersistService;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
@@ -10,11 +12,20 @@ import org.slf4j.LoggerFactory;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 主节点复制管理器
+ * 
+ * 管理主节点的复制功能，包括：
+ * - 从节点连接管理
+ * - 全量同步和部分同步
+ * - RDB 快照生成和传输
+ * - 命令传播
+ * - 复制延迟监控
  */
 public class MasterReplicationManager {
     
@@ -30,6 +41,20 @@ public class MasterReplicationManager {
     private final AtomicLong syncFull = new AtomicLong(0);
     private final AtomicLong syncPartialOk = new AtomicLong(0);
     private final AtomicLong syncPartialErr = new AtomicLong(0);
+    
+    // RDB 快照生成器
+    private RdbSnapshotGenerator snapshotGenerator;
+    private MemoryStore memoryStore;
+    
+    // 传输进度跟踪
+    private final Map<String, TransferProgressTracker> transferTrackers = new ConcurrentHashMap<>();
+    
+    // 异步执行器
+    private final ExecutorService asyncExecutor = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "master-replication-async");
+        t.setDaemon(true);
+        return t;
+    });
     
     private MasterReplicationManager(int backlogSize) {
         this.slaves = new CopyOnWriteArrayList<>();
@@ -54,6 +79,22 @@ public class MasterReplicationManager {
         }
     }
     
+    /**
+     * 设置 RDB 持久化服务
+     */
+    public void setRdbPersistService(RdbPersistService rdbPersistService) {
+        this.snapshotGenerator = new RdbSnapshotGenerator(rdbPersistService, 
+            rdbPersistService.getDataDir());
+        logger.info("RDB snapshot generator initialized");
+    }
+    
+    /**
+     * 设置内存存储
+     */
+    public void setMemoryStore(MemoryStore memoryStore) {
+        this.memoryStore = memoryStore;
+    }
+    
     public void setRequirepass(String requirepass) { this.requirepass = requirepass; }
     
     public SlaveInfo addSlave(Channel channel) {
@@ -70,6 +111,10 @@ public class MasterReplicationManager {
         if (slave != null) {
             slaves.remove(slave);
             connectedSlaves.decrementAndGet();
+            
+            // 移除传输进度跟踪器
+            transferTrackers.remove(slave.getSlaveId());
+            
             logger.info("Slave disconnected: {}, remaining slaves: {}", slave.getSlaveId(), connectedSlaves.get());
         }
     }
@@ -117,6 +162,10 @@ public class MasterReplicationManager {
                     slave.setState(ReplicationState.ONLINE);
                     slave.addFlag(SlaveInfo.SLAVE_FLAG_ONLINE);
                     slave.removeFlag(SlaveInfo.SLAVE_FLAG_SYNCING);
+                    
+                    // 更新延迟统计
+                    slave.updateReplicationLag(backlog.getMasterReplOffset());
+                    
                     logger.trace("Slave {} ACK offset: {}", slave.getSlaveId(), offset);
                     return null;
                 } catch (NumberFormatException e) {
@@ -180,6 +229,64 @@ public class MasterReplicationManager {
             
             return new PsyncResponse(response, null, true);
         }
+    }
+    
+    /**
+     * 执行全量同步
+     * 
+     * @param channel 从节点通道
+     * @return 是否成功开始同步
+     */
+    public boolean performFullSync(Channel channel) {
+        if (snapshotGenerator == null || memoryStore == null) {
+            logger.error("RDB snapshot generator or memory store not initialized");
+            return false;
+        }
+        
+        SlaveInfo slave = slaveChannelMap.get(channel);
+        if (slave == null) {
+            logger.error("Slave not found for channel: {}", channel);
+            return false;
+        }
+        
+        // 创建传输进度跟踪器
+        TransferProgressTracker tracker = new TransferProgressTracker();
+        transferTrackers.put(slave.getSlaveId(), tracker);
+        tracker.startGenerating();
+        
+        // 异步执行 RDB 生成和传输
+        asyncExecutor.submit(() -> {
+            try {
+                long transferredBytes = snapshotGenerator.generateAndTransfer(
+                    memoryStore, channel, tracker);
+                
+                if (transferredBytes > 0) {
+                    logger.info("Full sync completed for slave {}, transferred {} bytes",
+                               slave.getSlaveId(), transferredBytes);
+                    
+                    // 标记从节点为在线
+                    slave.setState(ReplicationState.ONLINE);
+                    slave.addFlag(SlaveInfo.SLAVE_FLAG_ONLINE);
+                    slave.removeFlag(SlaveInfo.SLAVE_FLAG_SYNCING);
+                } else {
+                    logger.error("Full sync failed for slave {}", slave.getSlaveId());
+                    tracker.onError("RDB transfer failed");
+                }
+                
+            } catch (Exception e) {
+                logger.error("Error during full sync for slave {}", slave.getSlaveId(), e);
+                tracker.onError(e.getMessage());
+            }
+        });
+        
+        return true;
+    }
+    
+    /**
+     * 获取传输进度
+     */
+    public TransferProgressTracker getTransferProgress(String slaveId) {
+        return transferTrackers.get(slaveId);
     }
     
     public void propagateCommand(byte[] command) {
@@ -251,6 +358,19 @@ public class MasterReplicationManager {
     public long getSyncPartialOk() { return syncPartialOk.get(); }
     public long getSyncPartialErr() { return syncPartialErr.get(); }
     
+    /**
+     * 获取已同步到指定偏移量的从节点数量
+     */
+    public int getSyncedSlavesCount(long offset) {
+        int count = 0;
+        for (SlaveInfo slave : slaves) {
+            if (slave.isOnline() && slave.getOffset() >= offset) {
+                count++;
+            }
+        }
+        return count;
+    }
+    
     public String getReplicationInfo() {
         StringBuilder info = new StringBuilder();
         
@@ -265,7 +385,7 @@ public class MasterReplicationManager {
                 .append(",port=").append(slave.getPort())
                 .append(",state=").append(slave.getState().getName())
                 .append(",offset=").append(slave.getOffset())
-                .append(",lag=").append((System.currentTimeMillis() - slave.getLastInteractionTime()) / 1000)
+                .append(",lag=").append(slave.getReplicationLag())
                 .append("\r\n");
         }
         
@@ -278,6 +398,27 @@ public class MasterReplicationManager {
         info.append("sync_partial_err:").append(syncPartialErr.get()).append("\r\n");
         
         return info.toString();
+    }
+    
+    /**
+     * 关闭管理器
+     */
+    public void shutdown() {
+        logger.info("Shutting down master replication manager...");
+        
+        asyncExecutor.shutdown();
+        
+        for (SlaveInfo slave : slaves) {
+            if (slave.getChannel().isActive()) {
+                slave.getChannel().close();
+            }
+        }
+        
+        slaves.clear();
+        slaveChannelMap.clear();
+        transferTrackers.clear();
+        
+        logger.info("Master replication manager shutdown completed");
     }
     
     public static class PsyncResponse {

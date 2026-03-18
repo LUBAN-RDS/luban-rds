@@ -9,9 +9,9 @@
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
-    <artifactId>luban-rds-replication</artifactId>
-    <name>luban-rds-replication</name>
-    <description>主从复制模块</description>
+    <artifactId>luban-rds-sentinel</artifactId>
+    <name>luban-rds-sentinel</name>
+    <description>哨兵模式模块</description>
 
     <dependencies>
         <!-- 内部依赖 -->
@@ -27,9 +27,20 @@
         </dependency>
         <dependency>
             <groupId>com.janeluo</groupId>
-            <artifactId>luban-rds-persistence</artifactId>
+            <artifactId>luban-rds-protocol</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-replication</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-client</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        
         <!-- Netty -->
         <dependency>
             <groupId>io.netty</groupId>

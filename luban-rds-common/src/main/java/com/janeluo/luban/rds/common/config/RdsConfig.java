@@ -313,6 +313,58 @@ public class RdsConfig {
      */
     private boolean replDisableTcpNodelay = false;
 
+    // ==================== 哨兵配置 ====================
+
+    /**
+     * 是否启用哨兵模式
+     */
+    private boolean sentinelEnabled = false;
+
+    /**
+     * 哨兵监听端口，默认 26379
+     */
+    private int sentinelPort = 26379;
+
+    /**
+     * 哨兵配置文件路径
+     */
+    private String sentinelConfigFile = "sentinel.conf";
+
+    /**
+     * 哨兵监控的主节点配置（格式：name host port quorum）
+     */
+    private String sentinelMonitor = "";
+
+    /**
+     * 节点下线检测时间（毫秒），默认 30000
+     */
+    private long sentinelDownAfterMilliseconds = 30000;
+
+    /**
+     * 故障转移超时时间（毫秒），默认 180000
+     */
+    private long sentinelFailoverTimeout = 180000;
+
+    /**
+     * 故障转移后同时同步的从节点数，默认 1
+     */
+    private int sentinelParallelSyncs = 1;
+
+    /**
+     * 哨兵公告 IP
+     */
+    private String sentinelAnnounceIp = "";
+
+    /**
+     * 哨兵公告端口
+     */
+    private int sentinelAnnouncePort = 0;
+
+    /**
+     * 哨兵心跳间隔（毫秒），默认 1000
+     */
+    private long sentinelHeartbeatInterval = 1000;
+
     // ==================== Getter 和 Setter ====================
 
     public String getBind() {
@@ -761,6 +813,86 @@ public class RdsConfig {
 
     public void setReplDisableTcpNodelay(boolean replDisableTcpNodelay) {
         this.replDisableTcpNodelay = replDisableTcpNodelay;
+    }
+
+    public boolean isSentinelEnabled() {
+        return sentinelEnabled;
+    }
+
+    public void setSentinelEnabled(boolean sentinelEnabled) {
+        this.sentinelEnabled = sentinelEnabled;
+    }
+
+    public int getSentinelPort() {
+        return sentinelPort;
+    }
+
+    public void setSentinelPort(int sentinelPort) {
+        this.sentinelPort = sentinelPort;
+    }
+
+    public String getSentinelConfigFile() {
+        return sentinelConfigFile;
+    }
+
+    public void setSentinelConfigFile(String sentinelConfigFile) {
+        this.sentinelConfigFile = sentinelConfigFile;
+    }
+
+    public String getSentinelMonitor() {
+        return sentinelMonitor;
+    }
+
+    public void setSentinelMonitor(String sentinelMonitor) {
+        this.sentinelMonitor = sentinelMonitor;
+    }
+
+    public long getSentinelDownAfterMilliseconds() {
+        return sentinelDownAfterMilliseconds;
+    }
+
+    public void setSentinelDownAfterMilliseconds(long sentinelDownAfterMilliseconds) {
+        this.sentinelDownAfterMilliseconds = sentinelDownAfterMilliseconds;
+    }
+
+    public long getSentinelFailoverTimeout() {
+        return sentinelFailoverTimeout;
+    }
+
+    public void setSentinelFailoverTimeout(long sentinelFailoverTimeout) {
+        this.sentinelFailoverTimeout = sentinelFailoverTimeout;
+    }
+
+    public int getSentinelParallelSyncs() {
+        return sentinelParallelSyncs;
+    }
+
+    public void setSentinelParallelSyncs(int sentinelParallelSyncs) {
+        this.sentinelParallelSyncs = sentinelParallelSyncs;
+    }
+
+    public String getSentinelAnnounceIp() {
+        return sentinelAnnounceIp;
+    }
+
+    public void setSentinelAnnounceIp(String sentinelAnnounceIp) {
+        this.sentinelAnnounceIp = sentinelAnnounceIp;
+    }
+
+    public int getSentinelAnnouncePort() {
+        return sentinelAnnouncePort;
+    }
+
+    public void setSentinelAnnouncePort(int sentinelAnnouncePort) {
+        this.sentinelAnnouncePort = sentinelAnnouncePort;
+    }
+
+    public long getSentinelHeartbeatInterval() {
+        return sentinelHeartbeatInterval;
+    }
+
+    public void setSentinelHeartbeatInterval(long sentinelHeartbeatInterval) {
+        this.sentinelHeartbeatInterval = sentinelHeartbeatInterval;
     }
 
     @Override

@@ -370,6 +370,13 @@ public class RdbPersistService implements PersistService {
         return persistCount.get();
     }
     
+    /**
+     * 获取数据目录
+     */
+    public String getDataDir() {
+        return dataDir;
+    }
+    
     private void writeRdbHeader(DataOutputStream dos) throws IOException {
         // 写入Redis RDB文件标识
         dos.writeBytes("REDIS0009"); // 使用Redis 6.0+的RDB版本

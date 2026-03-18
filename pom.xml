@@ -59,6 +59,7 @@
         <module>luban-rds-client</module>
         <module>luban-rds-cluster</module>
         <module>luban-rds-replication</module>
+        <module>luban-rds-sentinel</module>
         <module>luban-rds-spring-boot-starter</module>
         <module>luban-rds-persistence</module>
         <module>luban-rds-bin</module>
@@ -180,6 +181,16 @@
             <dependency>
                 <groupId>com.janeluo</groupId>
                 <artifactId>luban-rds-cluster</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.janeluo</groupId>
+                <artifactId>luban-rds-replication</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.janeluo</groupId>
+                <artifactId>luban-rds-sentinel</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

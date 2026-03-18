@@ -1,6 +1,8 @@
 package com.janeluo.luban.rds.replication;
 
 import com.janeluo.luban.rds.common.config.RdsConfig;
+import com.janeluo.luban.rds.core.store.MemoryStore;
+import com.janeluo.luban.rds.persistence.impl.RdbPersistService;
 import io.netty.buffer.ByteBuf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,7 +15,13 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 从节点复制服务
- * 管理从节点侧的复制逻辑
+ * 
+ * 管理从节点侧的复制逻辑，包括：
+ * - 连接主节点
+ * - 全量同步和部分同步
+ * - RDB 数据加载
+ * - 命令传播
+ * - 只读模式管理
  */
 public class SlaveReplicationService implements ReplicationCallback {
     
@@ -36,6 +44,16 @@ public class SlaveReplicationService implements ReplicationCallback {
     private volatile String masterReplId;
     private volatile long secondReplOffset = -1;
     
+    // RDB 数据加载器
+    private RdbDataLoader rdbDataLoader;
+    private MemoryStore memoryStore;
+    
+    // 只读模式管理器
+    private final ReadOnlyModeManager readOnlyModeManager;
+    
+    // 传输进度跟踪
+    private final TransferProgressTracker progressTracker;
+    
     /**
      * 创建从节点复制服务
      *
@@ -44,6 +62,27 @@ public class SlaveReplicationService implements ReplicationCallback {
     public SlaveReplicationService(RdsConfig config) {
         this.config = config;
         this.client = new SlaveReplicationClient(config, this);
+        this.readOnlyModeManager = new ReadOnlyModeManager();
+        this.progressTracker = new TransferProgressTracker();
+        
+        // 设置为从节点模式
+        readOnlyModeManager.setSlave(true);
+    }
+    
+    /**
+     * 设置 RDB 持久化服务
+     */
+    public void setRdbPersistService(RdbPersistService rdbPersistService) {
+        this.rdbDataLoader = new RdbDataLoader(rdbPersistService, 
+            rdbPersistService.getDataDir());
+        logger.info("RDB data loader initialized");
+    }
+    
+    /**
+     * 设置内存存储
+     */
+    public void setMemoryStore(MemoryStore memoryStore) {
+        this.memoryStore = memoryStore;
     }
     
     /**
@@ -88,6 +127,11 @@ public class SlaveReplicationService implements ReplicationCallback {
         }
         
         client.stop();
+        
+        // 取消 RDB 加载
+        if (rdbDataLoader != null && rdbDataLoader.isLoading()) {
+            rdbDataLoader.cancelLoading();
+        }
     }
     
     /**
@@ -137,6 +181,11 @@ public class SlaveReplicationService implements ReplicationCallback {
         this.masterReplId = replId;
         this.masterReplOffset.set(offset);
         state.set(ReplicationState.FULL_SYNC);
+        
+        // 开始 RDB 加载
+        if (rdbDataLoader != null && memoryStore != null) {
+            rdbDataLoader.startLoading(memoryStore, progressTracker);
+        }
     }
     
     @Override
@@ -152,8 +201,12 @@ public class SlaveReplicationService implements ReplicationCallback {
         try {
             logger.debug("收到 RDB 数据: {} bytes", data.readableBytes());
             
-            // 这里需要实现 RDB 加载逻辑
-            // 暂时只更新偏移量
+            // 写入 RDB 加载器
+            if (rdbDataLoader != null && rdbDataLoader.isLoading()) {
+                rdbDataLoader.writeChunk(data);
+            }
+            
+            // 更新偏移量
             slaveReplOffset.addAndGet(data.readableBytes());
             
             // 标记为加载 RDB
@@ -169,6 +222,11 @@ public class SlaveReplicationService implements ReplicationCallback {
     public void onOnline() {
         logger.info("复制同步完成，进入在线状态");
         state.set(ReplicationState.ONLINE);
+        
+        // 完成 RDB 加载
+        if (rdbDataLoader != null && rdbDataLoader.isLoading() && memoryStore != null) {
+            rdbDataLoader.finishLoading(memoryStore);
+        }
     }
     
     @Override
@@ -220,7 +278,21 @@ public class SlaveReplicationService implements ReplicationCallback {
      * 是否只读
      */
     public boolean isReadOnly() {
-        return config.isSlaveReadOnly();
+        return readOnlyModeManager.isReadOnly();
+    }
+    
+    /**
+     * 设置只读模式
+     */
+    public void setReadOnly(boolean readOnly) {
+        readOnlyModeManager.setReadOnly(readOnly);
+    }
+    
+    /**
+     * 检查命令是否应该被拦截
+     */
+    public String checkReadOnlyIntercept(String command) {
+        return readOnlyModeManager.interceptWriteCommand(command);
     }
     
     /**
@@ -239,7 +311,10 @@ public class SlaveReplicationService implements ReplicationCallback {
         ).append("\r\n");
         sb.append("slave_repl_offset:").append(slaveReplOffset.get()).append("\r\n");
         sb.append("slave_priority:100\r\n");
-        sb.append("slave_read_only:").append(config.isSlaveReadOnly() ? 1 : 0).append("\r\n");
+        sb.append("slave_read_only:").append(readOnlyModeManager.isReadOnly() ? 1 : 0).append("\r\n");
+        
+        // 重连统计
+        sb.append(client.getReconnectInfo());
         
         return sb.toString();
     }
@@ -266,5 +341,26 @@ public class SlaveReplicationService implements ReplicationCallback {
      */
     public String getMasterReplId() {
         return masterReplId;
+    }
+    
+    /**
+     * 获取传输进度跟踪器
+     */
+    public TransferProgressTracker getProgressTracker() {
+        return progressTracker;
+    }
+    
+    /**
+     * 获取只读模式管理器
+     */
+    public ReadOnlyModeManager getReadOnlyModeManager() {
+        return readOnlyModeManager;
+    }
+    
+    /**
+     * 手动触发重连
+     */
+    public void reconnect() {
+        client.reconnect();
     }
 }
