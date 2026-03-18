@@ -1,0 +1,288 @@
+package com.janeluo.luban.rds.cluster.bus;
+
+import com.janeluo.luban.rds.cluster.gossip.*;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.embedded.EmbeddedChannel;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * ClusterBusCodec 编解码器测试
+ */
+class ClusterBusCodecTest {
+
+    /**
+     * 生成40字符的十六进制节点ID
+     */
+    private String generateNodeId(int seed) {
+        StringBuilder sb = new StringBuilder(40);
+        for (int i = 0; i < 40; i++) {
+            sb.append(Integer.toHexString((seed + i) % 16));
+        }
+        return sb.toString();
+    }
+
+    @Test
+    @DisplayName("测试编码器和解码器管道")
+    void testEncoderDecoderPipeline() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new ClusterBusCodec.Encoder(),
+                new ClusterBusCodec.Decoder()
+        );
+
+        String senderNodeId = generateNodeId(1);
+        long pingTime = System.currentTimeMillis();
+
+        PingMessage original = new PingMessage(senderNodeId, pingTime);
+
+        // 写入消息
+        assertTrue(channel.writeOutbound(original), "消息应该成功写入");
+
+        // 读取编码后的字节
+        ByteBuf encoded = channel.readOutbound();
+        assertNotNull(encoded, "编码结果不应为空");
+
+        // 写入解码器
+        assertTrue(channel.writeInbound(encoded), "字节应该成功写入解码器");
+
+        // 读取解码后的消息
+        GossipMessage decoded = channel.readInbound();
+        assertNotNull(decoded, "解码结果不应为空");
+        assertTrue(decoded instanceof PingMessage, "解码结果应该是 PingMessage");
+
+        PingMessage pingMessage = (PingMessage) decoded;
+        assertEquals(original.getSenderNodeId(), pingMessage.getSenderNodeId());
+        assertEquals(original.getPingTime(), pingMessage.getPingTime());
+
+        channel.finish();
+    }
+
+    @Test
+    @DisplayName("测试多种消息类型的编解码")
+    void testMultipleMessageTypes() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new ClusterBusCodec.Encoder(),
+                new ClusterBusCodec.Decoder()
+        );
+
+        String senderNodeId = generateNodeId(1);
+
+        // 测试 PING
+        testMessageCodec(channel, new PingMessage(senderNodeId, System.currentTimeMillis()));
+
+        // 测试 PONG
+        testMessageCodec(channel, new PongMessage(senderNodeId, 
+                System.currentTimeMillis() - 100, System.currentTimeMillis()));
+
+        // 测试 MEET
+        testMessageCodec(channel, new MeetMessage(senderNodeId, generateNodeId(2), 
+                "192.168.1.1", 6379, 16379, 100L));
+
+        // 测试 FAIL
+        testMessageCodec(channel, new FailMessage(senderNodeId, generateNodeId(2), 
+                System.currentTimeMillis()));
+
+        // 测试 PUBLISH
+        testMessageCodec(channel, new PublishMessage(senderNodeId, "test-channel", 
+                "Hello".getBytes()));
+
+        // 测试 FAILOVER_AUTH_REQUEST
+        testMessageCodec(channel, new FailoverAuthRequestMessage(senderNodeId, 
+                100L, 200L, 10000L));
+
+        // 测试 FAILOVER_AUTH_ACK
+        testMessageCodec(channel, new FailoverAuthAckMessage(senderNodeId, 
+                100L, 200L, 300L));
+
+        // 测试 UPDATE
+        testMessageCodec(channel, new UpdateMessage(senderNodeId, 100L, 
+                generateNodeId(2), "192.168.1.1", 6379, 16379));
+
+        channel.finish();
+    }
+
+    private void testMessageCodec(EmbeddedChannel channel, GossipMessage original) {
+        // 编码
+        assertTrue(channel.writeOutbound(original));
+
+        // 读取编码结果
+        ByteBuf encoded = channel.readOutbound();
+        assertNotNull(encoded);
+
+        // 解码
+        assertTrue(channel.writeInbound(encoded));
+
+        // 读取解码结果
+        GossipMessage decoded = channel.readInbound();
+        assertNotNull(decoded);
+        assertEquals(original.getClass(), decoded.getClass());
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId());
+        assertEquals(original.getType(), decoded.getType());
+    }
+
+    @Test
+    @DisplayName("测试粘包处理")
+    void testStickyPacketHandling() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new ClusterBusCodec.Encoder(),
+                new ClusterBusCodec.Decoder()
+        );
+
+        String senderNodeId = generateNodeId(1);
+
+        // 创建多条消息
+        PingMessage msg1 = new PingMessage(senderNodeId, System.currentTimeMillis());
+        PingMessage msg2 = new PingMessage(senderNodeId, System.currentTimeMillis() + 1);
+        PingMessage msg3 = new PingMessage(senderNodeId, System.currentTimeMillis() + 2);
+
+        // 编码所有消息
+        channel.writeOutbound(msg1);
+        channel.writeOutbound(msg2);
+        channel.writeOutbound(msg3);
+
+        // 合并所有编码后的字节
+        ByteBuf combined = Unpooled.buffer();
+        ByteBuf encoded;
+        while ((encoded = channel.readOutbound()) != null) {
+            combined.writeBytes(encoded);
+        }
+
+        // 一次性写入解码器
+        assertTrue(channel.writeInbound(combined));
+
+        // 应该解码出3条消息
+        int count = 0;
+        GossipMessage decoded;
+        while ((decoded = channel.readInbound()) != null) {
+            assertTrue(decoded instanceof PingMessage);
+            count++;
+        }
+
+        assertEquals(3, count, "应该解码出3条消息");
+
+        channel.finish();
+    }
+
+    @Test
+    @DisplayName("测试半包处理")
+    void testHalfPacketHandling() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new ClusterBusCodec.Decoder()
+        );
+
+        String senderNodeId = generateNodeId(1);
+        PingMessage original = new PingMessage(senderNodeId, System.currentTimeMillis());
+
+        // 编码消息
+        byte[] fullData = original.encode();
+        ByteBuf fullBuf = Unpooled.wrappedBuffer(fullData);
+
+        // 分两次写入
+        int splitPoint = fullData.length / 2;
+        ByteBuf firstHalf = fullBuf.readBytes(splitPoint);
+        ByteBuf secondHalf = fullBuf.readBytes(fullBuf.readableBytes());
+
+        // 写入前半部分，不应该有输出
+        assertFalse(channel.writeInbound(firstHalf));
+        assertNull(channel.readInbound());
+
+        // 写入后半部分，应该能解码出完整消息
+        assertTrue(channel.writeInbound(secondHalf));
+        GossipMessage decoded = channel.readInbound();
+        assertNotNull(decoded);
+        assertTrue(decoded instanceof PingMessage);
+
+        PingMessage pingMessage = (PingMessage) decoded;
+        assertEquals(original.getSenderNodeId(), pingMessage.getSenderNodeId());
+        assertEquals(original.getPingTime(), pingMessage.getPingTime());
+
+        channel.finish();
+    }
+
+    @Test
+    @DisplayName("测试带 Gossip 节点信息的消息编解码")
+    void testMessageWithGossipNodes() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new ClusterBusCodec.Encoder(),
+                new ClusterBusCodec.Decoder()
+        );
+
+        String senderNodeId = generateNodeId(1);
+        long pingTime = System.currentTimeMillis();
+
+        // 创建 Gossip 节点信息
+        List<GossipNodeInfo> gossipNodes = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            GossipNodeInfo nodeInfo = new GossipNodeInfo(
+                    generateNodeId(i + 2),
+                    "192.168.1." + (i + 2),
+                    6379 + i,
+                    16379 + i,
+                    100L + i,
+                    new java.util.HashSet<>()
+            );
+            gossipNodes.add(nodeInfo);
+        }
+
+        PingMessage original = new PingMessage(senderNodeId, pingTime, gossipNodes);
+
+        // 编码和解码
+        assertTrue(channel.writeOutbound(original));
+        ByteBuf encoded = channel.readOutbound();
+        assertTrue(channel.writeInbound(encoded));
+
+        GossipMessage decoded = channel.readInbound();
+        assertTrue(decoded instanceof PingMessage);
+
+        PingMessage pingMessage = (PingMessage) decoded;
+        assertEquals(3, pingMessage.getGossipNodeCount());
+
+        // 验证节点信息
+        List<GossipNodeInfo> decodedNodes = pingMessage.getGossipNodes();
+        for (int i = 0; i < 3; i++) {
+            GossipNodeInfo originalNode = gossipNodes.get(i);
+            GossipNodeInfo decodedNode = decodedNodes.get(i);
+            assertEquals(originalNode.getNodeId(), decodedNode.getNodeId());
+            assertEquals(originalNode.getIp(), decodedNode.getIp());
+            assertEquals(originalNode.getPort(), decodedNode.getPort());
+        }
+
+        channel.finish();
+    }
+
+    @Test
+    @DisplayName("测试空消息处理")
+    void testNullMessageHandling() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new ClusterBusCodec.Encoder()
+        );
+
+        // 写入空消息，应该被忽略
+        assertFalse(channel.writeOutbound(null));
+
+        channel.finish();
+    }
+
+    @Test
+    @DisplayName("测试消息长度验证")
+    void testMessageLengthValidation() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new ClusterBusCodec.Decoder()
+        );
+
+        // 创建一个太短的数据包
+        ByteBuf shortData = Unpooled.buffer(10);
+        shortData.writeBytes(new byte[10]);
+
+        // 应该被忽略（数据不足）
+        assertFalse(channel.writeInbound(shortData));
+
+        channel.finish();
+    }
+}

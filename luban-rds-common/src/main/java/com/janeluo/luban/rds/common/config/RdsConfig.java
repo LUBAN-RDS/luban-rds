@@ -213,6 +213,53 @@ public class RdsConfig {
      */
     private String luaBlockedFunctions = "";
 
+    // ==================== 集群配置 ====================
+
+    /**
+     * 是否启用集群模式
+     */
+    private boolean clusterEnabled = false;
+
+    /**
+     * 集群配置文件路径
+     */
+    private String clusterConfigFile = "nodes.conf";
+
+    /**
+     * 节点超时时间（毫秒）
+     */
+    private long clusterNodeTimeout = 15000;
+
+    /**
+     * 对外宣布的 IP 地址
+     */
+    private String clusterAnnounceIp = "";
+
+    /**
+     * 对外宣布的端口
+     */
+    private int clusterAnnouncePort = 0;
+
+    /**
+     * 对外宣布的总线端口
+     */
+    private int clusterAnnounceBusPort = 0;
+
+    /**
+     * 从节点有效性因子
+     */
+    private int clusterSlaveValidityFactor = 10;
+
+    /**
+     * 迁移屏障
+     */
+    private int clusterMigrationBarrier = 1;
+
+    /**
+     * 是否需要全部槽位覆盖
+     */
+    private boolean clusterRequireFullCoverage = true;
+
     // ==================== Getter 和 Setter ====================
 
     public String getBind() {
@@ -509,6 +556,78 @@ public class RdsConfig {
 
     public void setLuaBlockedFunctions(String luaBlockedFunctions) {
         this.luaBlockedFunctions = luaBlockedFunctions;
+    }
+
+    public boolean isClusterEnabled() {
+        return clusterEnabled;
+    }
+
+    public void setClusterEnabled(boolean clusterEnabled) {
+        this.clusterEnabled = clusterEnabled;
+    }
+
+    public String getClusterConfigFile() {
+        return clusterConfigFile;
+    }
+
+    public void setClusterConfigFile(String clusterConfigFile) {
+        this.clusterConfigFile = clusterConfigFile;
+    }
+
+    public long getClusterNodeTimeout() {
+        return clusterNodeTimeout;
+    }
+
+    public void setClusterNodeTimeout(long clusterNodeTimeout) {
+        this.clusterNodeTimeout = clusterNodeTimeout;
+    }
+
+    public String getClusterAnnounceIp() {
+        return clusterAnnounceIp;
+    }
+
+    public void setClusterAnnounceIp(String clusterAnnounceIp) {
+        this.clusterAnnounceIp = clusterAnnounceIp;
+    }
+
+    public int getClusterAnnouncePort() {
+        return clusterAnnouncePort;
+    }
+
+    public void setClusterAnnouncePort(int clusterAnnouncePort) {
+        this.clusterAnnouncePort = clusterAnnouncePort;
+    }
+
+    public int getClusterAnnounceBusPort() {
+        return clusterAnnounceBusPort;
+    }
+
+    public void setClusterAnnounceBusPort(int clusterAnnounceBusPort) {
+        this.clusterAnnounceBusPort = clusterAnnounceBusPort;
+    }
+
+    public int getClusterSlaveValidityFactor() {
+        return clusterSlaveValidityFactor;
+    }
+
+    public void setClusterSlaveValidityFactor(int clusterSlaveValidityFactor) {
+        this.clusterSlaveValidityFactor = clusterSlaveValidityFactor;
+    }
+
+    public int getClusterMigrationBarrier() {
+        return clusterMigrationBarrier;
+    }
+
+    public void setClusterMigrationBarrier(int clusterMigrationBarrier) {
+        this.clusterMigrationBarrier = clusterMigrationBarrier;
+    }
+
+    public boolean isClusterRequireFullCoverage() {
+        return clusterRequireFullCoverage;
+    }
+
+    public void setClusterRequireFullCoverage(boolean clusterRequireFullCoverage) {
+        this.clusterRequireFullCoverage = clusterRequireFullCoverage;
     }
 
     @Override

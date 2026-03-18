@@ -11,6 +11,10 @@ import com.janeluo.luban.rds.protocol.RedisProtocolParser;
 import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
 import com.janeluo.luban.rds.core.slowlog.SlowLogManager;
 import com.janeluo.luban.rds.protocol.Command;
+import com.janeluo.luban.rds.cluster.config.ClusterConfig;
+import com.janeluo.luban.rds.cluster.node.ClusterNode;
+import com.janeluo.luban.rds.cluster.slot.SlotManager;
+import com.janeluo.luban.rds.cluster.slot.SlotUtils;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
@@ -77,7 +81,9 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 "SLOWLOG",
                 // Stream 命令
                 "XADD","XLEN","XRANGE","XREVRANGE","XDEL","XTRIM","XREAD","XINFO",
-                "XGROUP","XREADGROUP","XACK","XPENDING","XCLAIM","XAUTOCLAIM"
+                "XGROUP","XREADGROUP","XACK","XPENDING","XCLAIM","XAUTOCLAIM",
+                // 集群命令
+                "ASKING","READONLY","READWRITE","CLUSTER"
         };
         for (String n : names) KNOWN_COMMANDS.add(n);
         
@@ -169,15 +175,40 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     // 客户端空闲超时时间（毫秒），0表示禁用
     private final int timeout;
     
+    // 集群模式相关字段
+    private final boolean clusterEnabled;
+    private final ClusterConfig clusterConfig;
+    private final SlotManager slotManager;
+    
     public RedisServerHandler(MemoryStore memoryStore, DefaultCommandHandler commandHandler, RedisProtocolParser protocolParser) {
-        this(memoryStore, commandHandler, protocolParser, 0);
+        this(memoryStore, commandHandler, protocolParser, 0, false, null, null);
     }
     
     public RedisServerHandler(MemoryStore memoryStore, DefaultCommandHandler commandHandler, RedisProtocolParser protocolParser, int timeout) {
+        this(memoryStore, commandHandler, protocolParser, timeout, false, null, null);
+    }
+    
+    /**
+     * 完整构造方法（支持集群模式）
+     *
+     * @param memoryStore     内存存储
+     * @param commandHandler  命令处理器
+     * @param protocolParser  协议解析器
+     * @param timeout         客户端空闲超时时间（毫秒）
+     * @param clusterEnabled  是否启用集群模式
+     * @param clusterConfig   集群配置
+     * @param slotManager     槽位管理器
+     */
+    public RedisServerHandler(MemoryStore memoryStore, DefaultCommandHandler commandHandler, 
+                              RedisProtocolParser protocolParser, int timeout,
+                              boolean clusterEnabled, ClusterConfig clusterConfig, SlotManager slotManager) {
         this.memoryStore = memoryStore;
         this.commandHandler = commandHandler;
         this.protocolParser = protocolParser;
         this.timeout = timeout;
+        this.clusterEnabled = clusterEnabled;
+        this.clusterConfig = clusterConfig;
+        this.slotManager = slotManager;
     }
     
     @Override
@@ -370,6 +401,39 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 logger.debug("Handling MONITOR command");
                 handleMonitorCommand(ctx, clientInfo, args);
                 return;
+            } else if ("ASKING".equals(commandName)) {
+                // 处理 ASKING 命令
+                logger.debug("Handling ASKING command");
+                String response = handleAsking(clientInfo);
+                ByteBuf responseBuffer = protocolParser.serialize(response);
+                if (responseBuffer != null && responseBuffer.isReadable()) {
+                    ctx.writeAndFlush(responseBuffer);
+                } else if (responseBuffer != null) {
+                    responseBuffer.release();
+                }
+                return;
+            } else if ("READONLY".equals(commandName)) {
+                // 处理 READONLY 命令
+                logger.debug("Handling READONLY command");
+                String response = handleReadonly(clientInfo);
+                ByteBuf responseBuffer = protocolParser.serialize(response);
+                if (responseBuffer != null && responseBuffer.isReadable()) {
+                    ctx.writeAndFlush(responseBuffer);
+                } else if (responseBuffer != null) {
+                    responseBuffer.release();
+                }
+                return;
+            } else if ("READWRITE".equals(commandName)) {
+                // 处理 READWRITE 命令
+                logger.debug("Handling READWRITE command");
+                String response = handleReadwrite(clientInfo);
+                ByteBuf responseBuffer = protocolParser.serialize(response);
+                if (responseBuffer != null && responseBuffer.isReadable()) {
+                    ctx.writeAndFlush(responseBuffer);
+                } else if (responseBuffer != null) {
+                    responseBuffer.release();
+                }
+                return;
             }
             if (clientInfo.isInMonitorMode()) {
                  // MONITOR clients only accept QUIT
@@ -454,6 +518,37 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             } else if ("PUBLISH".equals(commandName)) {
                 handlePublish(ctx, args);
                 return;
+            }
+            
+            // ==================== 集群重定向检查 ====================
+            // 在命令执行前检查是否需要重定向
+            if (clusterEnabled && commandRequiresKey(commandName)) {
+                String key = extractKeyFromCommand(commandName, args);
+                if (key != null) {
+                    // 先检查 MOVED 重定向
+                    String redirect = checkSlotAndRedirect(key);
+                    if (redirect != null) {
+                        ByteBuf redirectBuffer = protocolParser.serialize(redirect);
+                        if (redirectBuffer != null && redirectBuffer.isReadable()) {
+                            ctx.writeAndFlush(redirectBuffer);
+                        } else if (redirectBuffer != null) {
+                            redirectBuffer.release();
+                        }
+                        return;
+                    }
+                    
+                    // 再检查 ASK 重定向
+                    redirect = checkAskRedirect(key, clientInfo);
+                    if (redirect != null) {
+                        ByteBuf redirectBuffer = protocolParser.serialize(redirect);
+                        if (redirectBuffer != null && redirectBuffer.isReadable()) {
+                            ctx.writeAndFlush(redirectBuffer);
+                        } else if (redirectBuffer != null) {
+                            redirectBuffer.release();
+                        }
+                        return;
+                    }
+                }
             }
 
             long startTime = System.nanoTime();
@@ -561,6 +656,10 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         private final java.util.Map<String, Long> watchedVersions = new HashMap<>();
         private io.netty.buffer.ByteBuf inboundBuf; // Initialized in channelActive using channel allocator
         private ProtocolVersion protocolVersion = ProtocolVersion.RESP2; // Default to RESP2
+        
+        // 集群模式相关字段
+        private boolean asking; // ASK 状态，用于槽位迁移过程中的重定向
+        private boolean readonly; // READONLY 状态，允许从节点处理读请求
         
         public ClientInfo(String name) {
             this.name = name;
@@ -674,6 +773,23 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         
         public io.netty.buffer.ByteBuf getInboundBuf() {
             return inboundBuf;
+        }
+        
+        // 集群模式相关 getter/setter
+        public boolean isAsking() {
+            return asking;
+        }
+        
+        public void setAsking(boolean asking) {
+            this.asking = asking;
+        }
+        
+        public boolean isReadonly() {
+            return readonly;
+        }
+        
+        public void setReadonly(boolean readonly) {
+            this.readonly = readonly;
         }
     }
 
@@ -1837,5 +1953,255 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         }
         buf.release();
         return sb.toString();
+    }
+    
+    // ==================== 集群重定向相关方法 ====================
+    
+    /**
+     * 不需要键的命令集合（这些命令不需要重定向检查）
+     */
+    private static final java.util.Set<String> NO_KEY_COMMANDS = new HashSet<>();
+    static {
+        // 管理命令
+        NO_KEY_COMMANDS.add("PING");
+        NO_KEY_COMMANDS.add("ECHO");
+        NO_KEY_COMMANDS.add("QUIT");
+        NO_KEY_COMMANDS.add("AUTH");
+        NO_KEY_COMMANDS.add("COMMAND");
+        NO_KEY_COMMANDS.add("INFO");
+        NO_KEY_COMMANDS.add("CONFIG");
+        NO_KEY_COMMANDS.add("TIME");
+        NO_KEY_COMMANDS.add("BGSAVE");
+        NO_KEY_COMMANDS.add("BGREWRITEAOF");
+        NO_KEY_COMMANDS.add("LASTSAVE");
+        NO_KEY_COMMANDS.add("SLOWLOG");
+        NO_KEY_COMMANDS.add("MEMORY");
+        NO_KEY_COMMANDS.add("MONITOR");
+        
+        // 集群命令
+        NO_KEY_COMMANDS.add("ASKING");
+        NO_KEY_COMMANDS.add("READONLY");
+        NO_KEY_COMMANDS.add("READWRITE");
+        NO_KEY_COMMANDS.add("CLUSTER");
+        
+        // 事务命令
+        NO_KEY_COMMANDS.add("MULTI");
+        NO_KEY_COMMANDS.add("EXEC");
+        NO_KEY_COMMANDS.add("DISCARD");
+        NO_KEY_COMMANDS.add("WATCH");
+        NO_KEY_COMMANDS.add("UNWATCH");
+        
+        // 数据库命令
+        NO_KEY_COMMANDS.add("SELECT");
+        NO_KEY_COMMANDS.add("FLUSHDB");
+        NO_KEY_COMMANDS.add("FLUSHALL");
+        NO_KEY_COMMANDS.add("DBSIZE");
+        NO_KEY_COMMANDS.add("KEYS");
+        NO_KEY_COMMANDS.add("SCAN");
+        
+        // Pub/Sub 命令
+        NO_KEY_COMMANDS.add("SUBSCRIBE");
+        NO_KEY_COMMANDS.add("UNSUBSCRIBE");
+        NO_KEY_COMMANDS.add("PSUBSCRIBE");
+        NO_KEY_COMMANDS.add("PUNSUBSCRIBE");
+        NO_KEY_COMMANDS.add("PUBLISH");
+        NO_KEY_COMMANDS.add("SSUBSCRIBE");
+        NO_KEY_COMMANDS.add("SUNSUBSCRIBE");
+        
+        // 脚本命令
+        NO_KEY_COMMANDS.add("SCRIPT");
+        NO_KEY_COMMANDS.add("EVAL");
+        NO_KEY_COMMANDS.add("EVALSHA");
+    }
+    
+    /**
+     * 检查命令是否需要键参数
+     *
+     * @param commandName 命令名称
+     * @return 是否需要键参数
+     */
+    private boolean commandRequiresKey(String commandName) {
+        return !NO_KEY_COMMANDS.contains(commandName.toUpperCase());
+    }
+    
+    /**
+     * 从命令参数中提取键
+     * 
+     * <p>根据命令类型返回第一个键参数。对于多键命令，返回第一个键。
+     *
+     * @param commandName 命令名称
+     * @param args        命令参数（包含命令名）
+     * @return 键名，如果没有键则返回null
+     */
+    private String extractKeyFromCommand(String commandName, String[] args) {
+        if (args == null || args.length < 2) {
+            return null;
+        }
+        
+        String cmd = commandName.toUpperCase();
+        
+        // 大多数命令的键在第一个参数位置
+        // SET key value, GET key, HSET key field value, LPUSH key value, etc.
+        // args[0] 是命令名，args[1] 是键
+        
+        // 特殊处理多键命令
+        if ("MGET".equals(cmd) || "MSET".equals(cmd) || "MSETNX".equals(cmd) || "DEL".equals(cmd) || "EXISTS".equals(cmd)) {
+            // MGET key [key ...], MSET key value [key value ...], DEL key [key ...]
+            return args.length >= 2 ? args[1] : null;
+        }
+        
+        if ("SUNION".equals(cmd) || "SINTER".equals(cmd) || "SDIFF".equals(cmd) || "SMOVE".equals(cmd)) {
+            // SUNION key [key ...], SMOVE source destination member
+            return args.length >= 2 ? args[1] : null;
+        }
+        
+        if ("ZUNIONSTORE".equals(cmd) || "ZINTERSTORE".equals(cmd)) {
+            // ZUNIONSTORE destination numkeys key [key ...]
+            return args.length >= 4 ? args[3] : null;
+        }
+        
+        if ("EVAL".equals(cmd) || "EVALSHA".equals(cmd)) {
+            // EVAL script numkeys key [key ...] arg [arg ...]
+            if (args.length >= 4) {
+                try {
+                    int numkeys = Integer.parseInt(args[2]);
+                    if (numkeys > 0 && args.length >= 4) {
+                        return args[3];
+                    }
+                } catch (NumberFormatException e) {
+                    return null;
+                }
+            }
+            return null;
+        }
+        
+        // 默认返回第一个参数作为键
+        return args[1];
+    }
+    
+    /**
+     * 检查键所属槽位是否在本节点（MOVED 重定向检查）
+     *
+     * @param key 键名
+     * @return null 表示在本节点，否则返回 MOVED 响应字符串
+     */
+    private String checkSlotAndRedirect(String key) {
+        if (!clusterEnabled || slotManager == null) {
+            return null;
+        }
+        
+        int slot = SlotUtils.keyHashSlot(key);
+        
+        // 检查槽位是否已分配
+        if (!slotManager.isSlotAssigned(slot)) {
+            return "-CLUSTERDOWN Hash slot not served\r\n";
+        }
+        
+        // 检查槽位是否在本节点
+        if (!slotManager.isSlotLocal(slot)) {
+            if (clusterConfig == null) {
+                return "-CLUSTERDOWN No cluster config\r\n";
+            }
+            
+            String ownerNodeId = slotManager.getSlotOwner(slot);
+            ClusterNode owner = clusterConfig.getNode(ownerNodeId);
+            
+            if (owner == null) {
+                return "-CLUSTERDOWN Slot owner not found\r\n";
+            }
+            
+            return "-MOVED " + slot + " " + owner.getIp() + ":" + owner.getPort() + "\r\n";
+        }
+        
+        return null;
+    }
+    
+    /**
+     * 检查 ASK 重定向
+     * 用于槽位迁移过程中
+     *
+     * @param key        键名
+     * @param clientInfo 客户端信息
+     * @return null 表示正常处理，否则返回 ASK 响应字符串
+     */
+    private String checkAskRedirect(String key, ClientInfo clientInfo) {
+        if (!clusterEnabled || slotManager == null) {
+            return null;
+        }
+        
+        int slot = SlotUtils.keyHashSlot(key);
+        
+        // 检查客户端是否设置了 ASKING 状态
+        if (clientInfo != null && clientInfo.isAsking()) {
+            // 客户端已发送 ASKING 命令，允许访问导入中的槽位
+            // 清除 ASKING 状态（一次性使用）
+            clientInfo.setAsking(false);
+            return null;
+        }
+        
+        // 检查槽位是否在 MIGRATING 状态
+        if (slotManager.isSlotMigrating(slot)) {
+            // 检查键是否还存在
+            if (memoryStore.exists(clientInfo != null ? clientInfo.getCurrentDatabase() : 0, key)) {
+                return null; // 键还在本节点，正常处理
+            }
+            
+            // 键已迁移，返回 ASK 重定向
+            String targetNodeId = slotManager.getMigratingTarget(slot);
+            if (targetNodeId == null || clusterConfig == null) {
+                return null;
+            }
+            
+            ClusterNode target = clusterConfig.getNode(targetNodeId);
+            if (target == null) {
+                return null;
+            }
+            
+            return "-ASK " + slot + " " + target.getIp() + ":" + target.getPort() + "\r\n";
+        }
+        
+        return null;
+    }
+    
+    /**
+     * 处理 ASKING 命令
+     * 设置连接的 ASK 状态，允许访问导入中的槽位
+     *
+     * @param clientInfo 客户端信息
+     * @return 响应字符串
+     */
+    private String handleAsking(ClientInfo clientInfo) {
+        if (clientInfo != null) {
+            clientInfo.setAsking(true);
+        }
+        return "+OK\r\n";
+    }
+    
+    /**
+     * 处理 READONLY 命令
+     * 允许从节点处理读请求
+     *
+     * @param clientInfo 客户端信息
+     * @return 响应字符串
+     */
+    private String handleReadonly(ClientInfo clientInfo) {
+        if (clientInfo != null) {
+            clientInfo.setReadonly(true);
+        }
+        return "+OK\r\n";
+    }
+    
+    /**
+     * 处理 READWRITE 命令
+     * 取消只读模式
+     *
+     * @param clientInfo 客户端信息
+     * @return 响应字符串
+     */
+    private String handleReadwrite(ClientInfo clientInfo) {
+        if (clientInfo != null) {
+            clientInfo.setReadonly(false);
+        }
+        return "+OK\r\n";
     }
 }

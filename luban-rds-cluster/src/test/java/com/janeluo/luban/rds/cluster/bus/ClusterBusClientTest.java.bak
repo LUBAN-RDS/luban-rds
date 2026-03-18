@@ -1,0 +1,326 @@
+package com.janeluo.luban.rds.cluster.bus;
+
+import com.janeluo.luban.rds.cluster.config.ClusterConfig;
+import com.janeluo.luban.rds.cluster.gossip.GossipMessage;
+import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
+import com.janeluo.luban.rds.cluster.node.ClusterNode;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * ClusterBusClient 单元测试
+ */
+class ClusterBusClientTest {
+
+    private static final String NODE_ID_1 = "1234567890123456789012345678901234567890";
+    private static final String NODE_ID_2 = "abcdefghijklmnopqrstuvwxyz1234567890abcd";
+    private static final int SERVICE_PORT = 19736;
+    private static final int BUS_PORT = SERVICE_PORT + ClusterBusServer.BUS_PORT_OFFSET;
+
+    private ClusterConfig clusterConfig1;
+    private ClusterConfig clusterConfig2;
+    private MockGossipProtocol gossipProtocol1;
+    private MockGossipProtocol gossipProtocol2;
+    private ClusterBusServer server;
+    private ClusterBusClient client;
+
+    @BeforeEach
+    void setUp() throws InterruptedException {
+        // 初始化节点1配置
+        clusterConfig1 = new ClusterConfig(NODE_ID_1);
+        gossipProtocol1 = new MockGossipProtocol(clusterConfig1);
+
+        // 初始化节点2配置
+        clusterConfig2 = new ClusterConfig(NODE_ID_2);
+        gossipProtocol2 = new MockGossipProtocol(clusterConfig2);
+
+        // 启动服务器
+        server = new ClusterBusServer(SERVICE_PORT, clusterConfig1, gossipProtocol1);
+        server.start();
+
+        // 等待服务器启动
+        Thread.sleep(100);
+
+        // 创建客户端
+        client = new ClusterBusClient(clusterConfig2, gossipProtocol2);
+    }
+
+    @AfterEach
+    void tearDown() {
+        // 关闭客户端
+        if (client != null) {
+            client.close();
+        }
+
+        // 停止服务器
+        if (server != null) {
+            server.stop();
+        }
+    }
+
+    @Test
+    void testClientConnect() throws InterruptedException {
+        // 连接到服务器
+        var future = client.connect(NODE_ID_1, "localhost", SERVICE_PORT);
+        
+        // 等待连接完成
+        boolean success = future.await(5, TimeUnit.SECONDS);
+        assertTrue(success, "连接应该成功");
+        assertTrue(future.isSuccess(), "连接应该成功");
+
+        // 等待连接建立
+        Thread.sleep(200);
+
+        // 验证连接状态
+        assertTrue(client.isConnected(NODE_ID_1));
+        assertEquals(1, client.getConnectedCount());
+    }
+
+    @Test
+    void testClientDisconnect() throws InterruptedException {
+        // 连接到服务器
+        var future = client.connect(NODE_ID_1, "localhost", SERVICE_PORT);
+        future.await(5, TimeUnit.SECONDS);
+        Thread.sleep(200);
+
+        assertTrue(client.isConnected(NODE_ID_1));
+
+        // 断开连接
+        client.disconnect(NODE_ID_1);
+
+        // 等待断开完成
+        Thread.sleep(200);
+
+        // 验证连接状态
+        assertFalse(client.isConnected(NODE_ID_1));
+        assertEquals(0, client.getConnectedCount());
+    }
+
+    @Test
+    void testClientSendPingMessage() throws InterruptedException {
+        // 连接到服务器
+        var future = client.connect(NODE_ID_1, "localhost", SERVICE_PORT);
+        future.await(5, TimeUnit.SECONDS);
+        Thread.sleep(200);
+
+        // 发送 PING 消息
+        GossipMessage pingMessage = GossipMessage.createPing(NODE_ID_2, clusterConfig2);
+        client.send(NODE_ID_1, pingMessage);
+
+        // 等待消息处理
+        Thread.sleep(500);
+
+        // 验证服务器收到消息
+        List<String> messages = gossipProtocol1.getReceivedMessages();
+        assertFalse(messages.isEmpty(), "服务器应该收到消息");
+        assertTrue(messages.stream().anyMatch(m -> m.contains("PING from " + NODE_ID_2)),
+                "应该收到 PING 消息");
+    }
+
+    @Test
+    void testClientBroadcast() throws InterruptedException {
+        // 连接到服务器
+        var future = client.connect(NODE_ID_1, "localhost", SERVICE_PORT);
+        future.await(5, TimeUnit.SECONDS);
+        Thread.sleep(200);
+
+        // 广播消息
+        GossipMessage message = GossipMessage.createUpdate(NODE_ID_2, clusterConfig2);
+        client.broadcast(message);
+
+        // 等待消息处理
+        Thread.sleep(500);
+
+        // 验证服务器收到消息
+        List<String> messages = gossipProtocol1.getReceivedMessages();
+        assertFalse(messages.isEmpty(), "服务器应该收到消息");
+    }
+
+    @Test
+    void testClientClose() throws InterruptedException {
+        // 连接到服务器
+        var future = client.connect(NODE_ID_1, "localhost", SERVICE_PORT);
+        future.await(5, TimeUnit.SECONDS);
+        Thread.sleep(200);
+
+        assertTrue(client.isConnected(NODE_ID_1));
+
+        // 关闭客户端
+        client.close();
+
+        // 验证连接已关闭
+        assertFalse(client.isConnected(NODE_ID_1));
+
+        // 再次关闭应该被忽略
+        client.close();
+    }
+
+    @Test
+    void testClientSendToDisconnectedNode() {
+        // 尝试向未连接的节点发送消息
+        GossipMessage message = GossipMessage.createPing(NODE_ID_1, clusterConfig2);
+        
+        // 应该不会抛出异常，只是记录警告
+        assertDoesNotThrow(() -> client.send(NODE_ID_1, message));
+    }
+
+    @Test
+    void testClientGetRemoteAddress() throws InterruptedException {
+        // 连接到服务器
+        var future = client.connect(NODE_ID_1, "localhost", SERVICE_PORT);
+        future.await(5, TimeUnit.SECONDS);
+        Thread.sleep(200);
+
+        // 获取远程地址
+        var address = client.getRemoteAddress(NODE_ID_1);
+        assertNotNull(address);
+        assertEquals(BUS_PORT, address.getPort());
+    }
+
+    @Test
+    void testClientSendAfterClose() throws InterruptedException {
+        // 连接到服务器
+        var future = client.connect(NODE_ID_1, "localhost", SERVICE_PORT);
+        future.await(5, TimeUnit.SECONDS);
+        Thread.sleep(200);
+
+        // 关闭客户端
+        client.close();
+
+        // 尝试发送消息应该抛出异常
+        GossipMessage message = GossipMessage.createPing(NODE_ID_1, clusterConfig2);
+        assertThrows(IllegalStateException.class, () -> client.send(NODE_ID_1, message));
+    }
+
+    @Test
+    void testClientConnectAfterClose() throws InterruptedException {
+        // 关闭客户端
+        client.close();
+
+        // 尝试连接应该抛出异常
+        assertThrows(IllegalStateException.class, 
+                () -> client.connect(NODE_ID_1, "localhost", SERVICE_PORT));
+    }
+
+    @Test
+    void testMultipleConnections() throws InterruptedException {
+        // 启动第二个服务器
+        int servicePort2 = 19737;
+        ClusterBusServer server2 = new ClusterBusServer(servicePort2, clusterConfig2, gossipProtocol2);
+        server2.start();
+        Thread.sleep(100);
+
+        try {
+            // 连接到第一个服务器
+            var future1 = client.connect(NODE_ID_1, "localhost", SERVICE_PORT);
+            future1.await(5, TimeUnit.SECONDS);
+
+            // 连接到第二个服务器
+            String nodeId2 = "node2_" + NODE_ID_2;
+            var future2 = client.connect(nodeId2, "localhost", servicePort2);
+            future2.await(5, TimeUnit.SECONDS);
+
+            Thread.sleep(200);
+
+            // 验证连接数量
+            assertEquals(2, client.getConnectedCount());
+            assertTrue(client.isConnected(NODE_ID_1));
+            assertTrue(client.isConnected(nodeId2));
+
+        } finally {
+            server2.stop();
+        }
+    }
+
+    /**
+     * Mock Gossip 协议实现
+     */
+    private static class MockGossipProtocol implements GossipProtocol {
+
+        private final ClusterConfig clusterConfig;
+        private final List<String> receivedMessages = new ArrayList<>();
+
+        public MockGossipProtocol(ClusterConfig clusterConfig) {
+            this.clusterConfig = clusterConfig;
+        }
+
+        @Override
+        public GossipMessage handlePing(String senderNodeId, ClusterConfig senderConfig) {
+            receivedMessages.add("PING from " + senderNodeId);
+            return GossipMessage.createPong(clusterConfig.getMyNodeId(), clusterConfig);
+        }
+
+        @Override
+        public void handlePong(String senderNodeId, ClusterConfig senderConfig) {
+            receivedMessages.add("PONG from " + senderNodeId);
+        }
+
+        @Override
+        public GossipMessage handleMeet(String senderNodeId, ClusterConfig senderConfig) {
+            receivedMessages.add("MEET from " + senderNodeId);
+            return GossipMessage.createPong(clusterConfig.getMyNodeId(), clusterConfig);
+        }
+
+        @Override
+        public void handleFail(String reporterNodeId, String failedNodeId) {
+            receivedMessages.add("FAIL: " + failedNodeId + " reported by " + reporterNodeId);
+        }
+
+        @Override
+        public void handleUpdate(String senderNodeId, ClusterConfig senderConfig) {
+            receivedMessages.add("UPDATE from " + senderNodeId);
+        }
+
+        @Override
+        public void sendPing(String targetNodeId) {
+            // Mock implementation
+        }
+
+        @Override
+        public void sendMeet(String targetNodeId, String targetHost, int targetPort) {
+            // Mock implementation
+        }
+
+        @Override
+        public void broadcastFail(String failedNodeId) {
+            // Mock implementation
+        }
+
+        @Override
+        public void broadcastUpdate() {
+            // Mock implementation
+        }
+
+        @Override
+        public ClusterConfig getClusterConfig() {
+            return clusterConfig;
+        }
+
+        @Override
+        public List<ClusterNode> getGossipNodes() {
+            return new ArrayList<>();
+        }
+
+        @Override
+        public void start() {
+            // Mock implementation
+        }
+
+        @Override
+        public void stop() {
+            // Mock implementation
+        }
+
+        public List<String> getReceivedMessages() {
+            return receivedMessages;
+        }
+    }
+}

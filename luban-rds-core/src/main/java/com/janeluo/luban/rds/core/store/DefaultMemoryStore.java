@@ -2,6 +2,7 @@ package com.janeluo.luban.rds.core.store;
 
 import com.janeluo.luban.rds.common.constant.RdsDataTypeConstant;
 import com.janeluo.luban.rds.common.util.RdsUtil;
+import com.janeluo.luban.rds.common.util.SlotUtils;
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.core.stream.Consumer;
 import com.janeluo.luban.rds.core.stream.ConsumerGroup;
@@ -279,20 +280,46 @@ public class DefaultMemoryStore implements MemoryStore {
         final Cache<String, StoreValue> storage;
         final ConcurrentHashMap<String, Boolean> keySet; // 用于跟踪所有键，支持SCAN命令
         final ConcurrentHashMap<String, AtomicLong> keyVersions; // 键版本，用于WATCH
+        final ConcurrentHashMap<Integer, Set<String>> slotToKeys; // 槽位到键的映射索引
         
         public DatabaseStore() {
             this.keySet = new ConcurrentHashMap<>(64); // 初始容量
             this.keyVersions = new ConcurrentHashMap<>(64);
+            this.slotToKeys = new ConcurrentHashMap<>();
             this.storage = Caffeine.newBuilder()
                     .initialCapacity(256) // 设置初始容量，减少扩容
                     .removalListener(new RemovalListener<String, StoreValue>() {
                         @Override
                         public void onRemoval(String key, StoreValue value, RemovalCause cause) {
-                            // 当键被移除时，从keySet中也移除
+                            // 当键被移除时，从keySet和slotToKeys中也移除
                             keySet.remove(key);
+                            removeFromSlotIndex(key);
                         }
                     })
                     .build();
+        }
+        
+        /**
+         * 从槽位索引中移除键
+         */
+        private void removeFromSlotIndex(String key) {
+            int slot = SlotUtils.getSlot(key);
+            Set<String> keysInSlot = slotToKeys.get(slot);
+            if (keysInSlot != null) {
+                keysInSlot.remove(key);
+                // 如果槽位为空，移除整个槽位条目以节省内存
+                if (keysInSlot.isEmpty()) {
+                    slotToKeys.remove(slot, keysInSlot);
+                }
+            }
+        }
+        
+        /**
+         * 添加键到槽位索引
+         */
+        private void addToSlotIndex(String key) {
+            int slot = SlotUtils.getSlot(key);
+            slotToKeys.computeIfAbsent(slot, k -> ConcurrentHashMap.newKeySet()).add(key);
         }
     }
     
@@ -890,6 +917,7 @@ public class DefaultMemoryStore implements MemoryStore {
         // 写入新值
         store.storage.put(key, newValue);
         store.keySet.put(key, Boolean.TRUE);
+        store.addToSlotIndex(key); // 更新槽位索引
         updateMemory(requiredSize);
         bumpKeyVersion(database, key);
     }
@@ -920,6 +948,7 @@ public class DefaultMemoryStore implements MemoryStore {
         // 写入新值
         store.storage.put(key, newValue);
         store.keySet.put(key, Boolean.TRUE);
+        store.addToSlotIndex(key); // 更新槽位索引
         updateMemory(requiredSize);
         bumpKeyVersion(database, key);
     }
@@ -950,6 +979,7 @@ public class DefaultMemoryStore implements MemoryStore {
         // 写入新值
         store.storage.put(key, newValue);
         store.keySet.put(key, Boolean.TRUE);
+        store.addToSlotIndex(key); // 更新槽位索引
         updateMemory(requiredSize);
         bumpKeyVersion(database, key);
     }
@@ -991,6 +1021,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 StoreValue newValue = entry.getValue();
                 store.storage.put(key, newValue);
                 store.keySet.put(key, Boolean.TRUE);
+                store.addToSlotIndex(key); // 更新槽位索引
                 updateMemory(newValue.getEstimatedSize());
                 bumpKeyVersion(database, key);
             }
@@ -1221,6 +1252,7 @@ public class DefaultMemoryStore implements MemoryStore {
         for (DatabaseStore store : databaseStores.values()) {
             store.storage.invalidateAll();
             store.keySet.clear();
+            store.slotToKeys.clear(); // 清空槽位索引
         }
         usedMemory.set(0);
     }
@@ -1373,6 +1405,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         store.storage.invalidateAll();
         store.keySet.clear();
+        store.slotToKeys.clear(); // 清空槽位索引
         // 清空时仅标记版本变化，不逐个键处理
         // 可以选择在此处重置版本，但为保持 WATCH 语义，保留现有版本映射
     }
@@ -4279,5 +4312,66 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         return consumerGroup.getLastDeliveredId();
+    }
+    
+    // ==================== 槽位操作实现 ====================
+    
+    @Override
+    public List<String> getKeysInSlot(int database, int slot, int count) {
+        if (!SlotUtils.isValidSlot(slot)) {
+            throw new IllegalArgumentException("Invalid slot number: " + slot);
+        }
+        
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        Set<String> keysInSlot = store.slotToKeys.get(slot);
+        
+        if (keysInSlot == null || keysInSlot.isEmpty()) {
+            return Collections.emptyList();
+        }
+        
+        List<String> result = new ArrayList<>();
+        int added = 0;
+        for (String key : keysInSlot) {
+            if (added >= count) {
+                break;
+            }
+            // 验证键是否仍然存在（可能已被删除但索引尚未清理）
+            if (store.storage.getIfPresent(key) != null) {
+                result.add(key);
+                added++;
+            }
+        }
+        
+        return result;
+    }
+    
+    @Override
+    public int countKeysInSlot(int database, int slot) {
+        if (!SlotUtils.isValidSlot(slot)) {
+            return 0;
+        }
+        
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        Set<String> keysInSlot = store.slotToKeys.get(slot);
+        
+        if (keysInSlot == null || keysInSlot.isEmpty()) {
+            return 0;
+        }
+        
+        // 统计实际存在的键数量（排除已过期或被删除的键）
+        int count = 0;
+        for (String key : keysInSlot) {
+            StoreValue storeValue = store.storage.getIfPresent(key);
+            if (storeValue != null && !storeValue.isExpired()) {
+                count++;
+            }
+        }
+        
+        return count;
+    }
+    
+    @Override
+    public int getKeySlot(String key) {
+        return SlotUtils.getSlot(key);
     }
 }

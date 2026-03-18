@@ -1,0 +1,428 @@
+package com.janeluo.luban.rds.cluster.gossip;
+
+import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Gossip 消息编解码测试
+ */
+class GossipMessageTest {
+
+    /**
+     * 生成40字符的十六进制节点ID
+     */
+    private String generateNodeId(int seed) {
+        StringBuilder sb = new StringBuilder(40);
+        for (int i = 0; i < 40; i++) {
+            sb.append(Integer.toHexString((seed + i) % 16));
+        }
+        return sb.toString();
+    }
+
+    // ==================== GossipMessageType 测试 ====================
+
+    @Test
+    @DisplayName("测试消息类型编码和解码")
+    void testGossipMessageType() {
+        for (GossipMessageType type : GossipMessageType.values()) {
+            byte code = type.getCode();
+            GossipMessageType decoded = GossipMessageType.fromCode(code);
+            assertEquals(type, decoded, "消息类型解码应该正确");
+            assertTrue(GossipMessageType.isValidCode(code), "编码应该有效");
+        }
+    }
+
+    @Test
+    @DisplayName("测试无效的消息类型编码")
+    void testInvalidMessageTypeCode() {
+        assertNull(GossipMessageType.fromCode((byte) 0xFF));
+        assertFalse(GossipMessageType.isValidCode((byte) 0xFF));
+    }
+
+    // ==================== GossipNodeInfo 测试 ====================
+
+    @Test
+    @DisplayName("测试 GossipNodeInfo 编解码")
+    void testGossipNodeInfoCodec() {
+        String nodeId = generateNodeId(1);
+        Set<ClusterNodeState> flags = new HashSet<>();
+        flags.add(ClusterNodeState.MASTER);
+        flags.add(ClusterNodeState.MYSELF);
+
+        GossipNodeInfo original = new GossipNodeInfo(nodeId, "192.168.1.1", 6379, 16379, 100L, flags);
+
+        // 编码
+        byte[] data = original.encode();
+        assertNotNull(data, "编码结果不应为空");
+        assertTrue(data.length > 0, "编码结果长度应大于0");
+
+        // 解码
+        GossipNodeInfo decoded = new GossipNodeInfo();
+        decoded.decode(data, 0);
+
+        // 验证
+        assertEquals(original.getNodeId(), decoded.getNodeId(), "节点ID应该一致");
+        assertEquals(original.getIp(), decoded.getIp(), "IP应该一致");
+        assertEquals(original.getPort(), decoded.getPort(), "端口应该一致");
+        assertEquals(original.getBusPort(), decoded.getBusPort(), "总线端口应该一致");
+        assertEquals(original.getConfigEpoch(), decoded.getConfigEpoch(), "配置纪元应该一致");
+        assertEquals(original.getFlags(), decoded.getFlags(), "状态标志应该一致");
+    }
+
+    @Test
+    @DisplayName("测试 GossipNodeInfo 多个节点编解码")
+    void testGossipNodeInfoMultipleNodes() {
+        Set<ClusterNodeState> flags1 = new HashSet<>();
+        flags1.add(ClusterNodeState.MASTER);
+
+        Set<ClusterNodeState> flags2 = new HashSet<>();
+        flags2.add(ClusterNodeState.SLAVE);
+        flags2.add(ClusterNodeState.FAIL);
+
+        GossipNodeInfo node1 = new GossipNodeInfo(generateNodeId(1), "192.168.1.1", 6379, 16379, 100L, flags1);
+        GossipNodeInfo node2 = new GossipNodeInfo(generateNodeId(2), "192.168.1.2", 6380, 16380, 200L, flags2);
+
+        // 连续编码和解码
+        byte[] data1 = node1.encode();
+        byte[] data2 = node2.encode();
+
+        GossipNodeInfo decoded1 = new GossipNodeInfo();
+        GossipNodeInfo decoded2 = new GossipNodeInfo();
+
+        int offset = decoded1.decode(data1, 0);
+        decoded2.decode(data2, 0);
+
+        assertEquals(node1.getNodeId(), decoded1.getNodeId());
+        assertEquals(node2.getNodeId(), decoded2.getNodeId());
+    }
+
+    // ==================== PingMessage 测试 ====================
+
+    @Test
+    @DisplayName("测试 PingMessage 编解码")
+    void testPingMessageCodec() {
+        String senderNodeId = generateNodeId(1);
+        long pingTime = System.currentTimeMillis();
+
+        Set<ClusterNodeState> flags = new HashSet<>();
+        flags.add(ClusterNodeState.MASTER);
+
+        GossipNodeInfo node1 = new GossipNodeInfo(generateNodeId(2), "192.168.1.2", 6380, 16380, 100L, flags);
+        GossipNodeInfo node2 = new GossipNodeInfo(generateNodeId(3), "192.168.1.3", 6381, 16381, 200L, flags);
+
+        PingMessage original = new PingMessage(senderNodeId, pingTime, Arrays.asList(node1, node2));
+
+        // 编码
+        byte[] data = original.encode();
+        assertNotNull(data, "编码结果不应为空");
+
+        // 解码
+        PingMessage decoded = new PingMessage();
+        decoded.decode(data);
+
+        // 验证
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId(), "发送者节点ID应该一致");
+        assertEquals(original.getType(), decoded.getType(), "消息类型应该一致");
+        assertEquals(original.getPingTime(), decoded.getPingTime(), "PING时间应该一致");
+        assertEquals(original.getGossipNodeCount(), decoded.getGossipNodeCount(), "节点数量应该一致");
+
+        // 验证节点信息
+        List<GossipNodeInfo> originalNodes = original.getGossipNodes();
+        List<GossipNodeInfo> decodedNodes = decoded.getGossipNodes();
+        for (int i = 0; i < originalNodes.size(); i++) {
+            assertEquals(originalNodes.get(i).getNodeId(), decodedNodes.get(i).getNodeId());
+            assertEquals(originalNodes.get(i).getIp(), decodedNodes.get(i).getIp());
+            assertEquals(originalNodes.get(i).getPort(), decodedNodes.get(i).getPort());
+        }
+    }
+
+    @Test
+    @DisplayName("测试 PingMessage 空节点列表编解码")
+    void testPingMessageEmptyNodes() {
+        String senderNodeId = generateNodeId(1);
+        long pingTime = System.currentTimeMillis();
+
+        PingMessage original = new PingMessage(senderNodeId, pingTime);
+
+        // 编码和解码
+        byte[] data = original.encode();
+        PingMessage decoded = new PingMessage();
+        decoded.decode(data);
+
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId());
+        assertEquals(original.getPingTime(), decoded.getPingTime());
+        assertEquals(0, decoded.getGossipNodeCount());
+    }
+
+    // ==================== PongMessage 测试 ====================
+
+    @Test
+    @DisplayName("测试 PongMessage 编解码")
+    void testPongMessageCodec() {
+        String senderNodeId = generateNodeId(1);
+        long pingTime = System.currentTimeMillis() - 100;
+        long pongTime = System.currentTimeMillis();
+
+        Set<ClusterNodeState> flags = new HashSet<>();
+        flags.add(ClusterNodeState.MASTER);
+
+        GossipNodeInfo node = new GossipNodeInfo(generateNodeId(2), "192.168.1.2", 6380, 16380, 100L, flags);
+
+        PongMessage original = new PongMessage(senderNodeId, pingTime, pongTime, Arrays.asList(node));
+
+        // 编码和解码
+        byte[] data = original.encode();
+        PongMessage decoded = new PongMessage();
+        decoded.decode(data);
+
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId());
+        assertEquals(original.getType(), decoded.getType());
+        assertEquals(original.getPingTime(), decoded.getPingTime());
+        assertEquals(original.getPongTime(), decoded.getPongTime());
+        assertEquals(original.getGossipNodeCount(), decoded.getGossipNodeCount());
+    }
+
+    // ==================== MeetMessage 测试 ====================
+
+    @Test
+    @DisplayName("测试 MeetMessage 编解码")
+    void testMeetMessageCodec() {
+        String senderNodeId = generateNodeId(1);
+        String myNodeId = generateNodeId(2);
+        String myIp = "192.168.1.100";
+        int myPort = 6379;
+        int myBusPort = 16379;
+        long configEpoch = 12345L;
+
+        MeetMessage original = new MeetMessage(senderNodeId, myNodeId, myIp, myPort, myBusPort, configEpoch);
+
+        // 编码和解码
+        byte[] data = original.encode();
+        MeetMessage decoded = new MeetMessage();
+        decoded.decode(data);
+
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId());
+        assertEquals(original.getType(), decoded.getType());
+        assertEquals(original.getMyNodeId().trim(), decoded.getMyNodeId().trim());
+        assertEquals(original.getMyIp(), decoded.getMyIp());
+        assertEquals(original.getMyPort(), decoded.getMyPort());
+        assertEquals(original.getMyBusPort(), decoded.getMyBusPort());
+        assertEquals(original.getConfigEpoch(), decoded.getConfigEpoch());
+    }
+
+    // ==================== FailMessage 测试 ====================
+
+    @Test
+    @DisplayName("测试 FailMessage 编解码")
+    void testFailMessageCodec() {
+        String senderNodeId = generateNodeId(1);
+        String failedNodeId = generateNodeId(2);
+        long failTime = System.currentTimeMillis();
+
+        FailMessage original = new FailMessage(senderNodeId, failedNodeId, failTime);
+
+        // 编码和解码
+        byte[] data = original.encode();
+        FailMessage decoded = new FailMessage();
+        decoded.decode(data);
+
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId());
+        assertEquals(original.getType(), decoded.getType());
+        assertEquals(original.getFailedNodeId().trim(), decoded.getFailedNodeId().trim());
+        assertEquals(original.getFailTime(), decoded.getFailTime());
+    }
+
+    // ==================== PublishMessage 测试 ====================
+
+    @Test
+    @DisplayName("测试 PublishMessage 编解码")
+    void testPublishMessageCodec() {
+        String senderNodeId = generateNodeId(1);
+        String channel = "test-channel";
+        byte[] message = "Hello, Cluster!".getBytes();
+
+        PublishMessage original = new PublishMessage(senderNodeId, channel, message);
+
+        // 编码和解码
+        byte[] data = original.encode();
+        PublishMessage decoded = new PublishMessage();
+        decoded.decode(data);
+
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId());
+        assertEquals(original.getType(), decoded.getType());
+        assertEquals(original.getChannel(), decoded.getChannel());
+        assertArrayEquals(original.getMessage(), decoded.getMessage());
+    }
+
+    // ==================== FailoverAuthRequestMessage 测试 ====================
+
+    @Test
+    @DisplayName("测试 FailoverAuthRequestMessage 编解码")
+    void testFailoverAuthRequestMessageCodec() {
+        String senderNodeId = generateNodeId(1);
+        long configEpoch = 100L;
+        long currentEpoch = 200L;
+        long replicationOffset = 10000L;
+
+        FailoverAuthRequestMessage original = new FailoverAuthRequestMessage(
+                senderNodeId, configEpoch, currentEpoch, replicationOffset);
+
+        // 编码和解码
+        byte[] data = original.encode();
+        FailoverAuthRequestMessage decoded = new FailoverAuthRequestMessage();
+        decoded.decode(data);
+
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId());
+        assertEquals(original.getType(), decoded.getType());
+        assertEquals(original.getConfigEpoch(), decoded.getConfigEpoch());
+        assertEquals(original.getCurrentEpoch(), decoded.getCurrentEpoch());
+        assertEquals(original.getReplicationOffset(), decoded.getReplicationOffset());
+    }
+
+    // ==================== FailoverAuthAckMessage 测试 ====================
+
+    @Test
+    @DisplayName("测试 FailoverAuthAckMessage 编解码")
+    void testFailoverAuthAckMessageCodec() {
+        String senderNodeId = generateNodeId(1);
+        long configEpoch = 100L;
+        long currentEpoch = 200L;
+        long voteEpoch = 300L;
+
+        FailoverAuthAckMessage original = new FailoverAuthAckMessage(
+                senderNodeId, configEpoch, currentEpoch, voteEpoch);
+
+        // 编码和解码
+        byte[] data = original.encode();
+        FailoverAuthAckMessage decoded = new FailoverAuthAckMessage();
+        decoded.decode(data);
+
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId());
+        assertEquals(original.getType(), decoded.getType());
+        assertEquals(original.getConfigEpoch(), decoded.getConfigEpoch());
+        assertEquals(original.getCurrentEpoch(), decoded.getCurrentEpoch());
+        assertEquals(original.getVoteEpoch(), decoded.getVoteEpoch());
+    }
+
+    // ==================== UpdateMessage 测试 ====================
+
+    @Test
+    @DisplayName("测试 UpdateMessage 编解码")
+    void testUpdateMessageCodec() {
+        String senderNodeId = generateNodeId(1);
+        long configEpoch = 100L;
+        String nodeId = generateNodeId(2);
+        String ip = "192.168.1.200";
+        int port = 6380;
+        int busPort = 16380;
+
+        UpdateMessage original = new UpdateMessage(senderNodeId, configEpoch, nodeId, ip, port, busPort);
+
+        // 编码和解码
+        byte[] data = original.encode();
+        UpdateMessage decoded = new UpdateMessage();
+        decoded.decode(data);
+
+        assertEquals(original.getSenderNodeId(), decoded.getSenderNodeId());
+        assertEquals(original.getType(), decoded.getType());
+        assertEquals(original.getConfigEpoch(), decoded.getConfigEpoch());
+        assertEquals(original.getNodeId().trim(), decoded.getNodeId().trim());
+        assertEquals(original.getIp(), decoded.getIp());
+        assertEquals(original.getPort(), decoded.getPort());
+        assertEquals(original.getBusPort(), decoded.getBusPort());
+    }
+
+    // ==================== GossipMessage 静态方法测试 ====================
+
+    @Test
+    @DisplayName("测试 GossipMessage.parseMessage 静态方法")
+    void testParseMessage() {
+        String senderNodeId = generateNodeId(1);
+        long pingTime = System.currentTimeMillis();
+
+        PingMessage original = new PingMessage(senderNodeId, pingTime);
+
+        // 编码
+        byte[] data = original.encode();
+
+        // 使用静态方法解析
+        GossipMessage parsed = GossipMessage.parseMessage(data);
+
+        assertTrue(parsed instanceof PingMessage, "解析结果应该是 PingMessage");
+        assertEquals(original.getSenderNodeId(), parsed.getSenderNodeId());
+        assertEquals(original.getType(), parsed.getType());
+        assertEquals(original.getPingTime(), ((PingMessage) parsed).getPingTime());
+    }
+
+    @Test
+    @DisplayName("测试 GossipMessage.createMessage 静态方法")
+    void testCreateMessage() {
+        for (GossipMessageType type : GossipMessageType.values()) {
+            GossipMessage message = GossipMessage.createMessage(type);
+            assertNotNull(message, "创建的消息不应为空");
+            assertEquals(type, message.getType(), "消息类型应该一致");
+        }
+    }
+
+    @Test
+    @DisplayName("测试消息头长度常量")
+    void testHeaderLength() {
+        assertEquals(45, GossipMessage.HEADER_LENGTH, "消息头长度应该是45字节");
+        assertEquals(40, GossipMessage.NODE_ID_LENGTH, "节点ID长度应该是40字节");
+    }
+
+    // ==================== 边界条件测试 ====================
+
+    @Test
+    @DisplayName("测试无效消息数据解码")
+    void testInvalidDataDecode() {
+        // 测试数据长度不足
+        assertThrows(IllegalArgumentException.class, () -> {
+            PingMessage message = new PingMessage();
+            message.decode(new byte[10]);
+        });
+
+        // 测试空数据
+        assertThrows(IllegalArgumentException.class, () -> {
+            PingMessage message = new PingMessage();
+            message.decode(null);
+        });
+    }
+
+    @Test
+    @DisplayName("测试节点ID验证")
+    void testNodeIdValidation() {
+        // 测试正确长度的节点ID
+        String validNodeId = generateNodeId(1);
+        PingMessage message = new PingMessage();
+        assertDoesNotThrow(() -> message.setSenderNodeId(validNodeId));
+
+        // 测试错误长度的节点ID
+        assertThrows(IllegalArgumentException.class, () -> {
+            message.setSenderNodeId("invalid");
+        });
+
+        // 测试非十六进制节点ID
+        assertThrows(IllegalArgumentException.class, () -> {
+            message.setSenderNodeId("ghijklmnopqrstuvwxyz1234567890abcdefghij");
+        });
+    }
+
+    @Test
+    @DisplayName("测试消息长度计算")
+    void testMessageLength() {
+        String senderNodeId = generateNodeId(1);
+        PingMessage message = new PingMessage(senderNodeId, System.currentTimeMillis());
+
+        byte[] data = message.encode();
+        assertEquals(data.length, message.getMessageLength(), "消息长度应该一致");
+    }
+}

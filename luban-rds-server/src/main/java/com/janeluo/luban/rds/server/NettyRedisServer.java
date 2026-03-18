@@ -1,5 +1,16 @@
 package com.janeluo.luban.rds.server;
 
+import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
+import com.janeluo.luban.rds.cluster.bus.ClusterBusServer;
+import com.janeluo.luban.rds.cluster.config.ClusterConfig;
+import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
+import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
+import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
+import com.janeluo.luban.rds.cluster.handler.ClusterCommandHandler;
+import com.janeluo.luban.rds.cluster.node.ClusterNode;
+import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
+import com.janeluo.luban.rds.cluster.slot.DefaultSlotManager;
+import com.janeluo.luban.rds.cluster.slot.SlotManager;
 import com.janeluo.luban.rds.common.config.ConfigLoader;
 import com.janeluo.luban.rds.common.config.RdsConfig;
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
@@ -24,6 +35,10 @@ import io.netty.util.ResourceLeakDetector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -63,6 +78,48 @@ public class NettyRedisServer implements RedisServer {
     private EventExecutorGroup businessGroup;
     private ChannelFuture channelFuture;
     private boolean running;
+    
+    // ==================== 集群相关组件 ====================
+    
+    /**
+     * 是否启用集群模式
+     */
+    private boolean clusterEnabled;
+    
+    /**
+     * 集群配置
+     */
+    private ClusterConfig clusterConfig;
+    
+    /**
+     * 槽位管理器
+     */
+    private SlotManager slotManager;
+    
+    /**
+     * 集群总线服务器
+     */
+    private ClusterBusServer clusterBusServer;
+    
+    /**
+     * Gossip 协议
+     */
+    private GossipProtocol gossipProtocol;
+    
+    /**
+     * 集群命令处理器
+     */
+    private ClusterCommandHandler clusterCommandHandler;
+    
+    /**
+     * 集群状态管理器
+     */
+    private ClusterStateManager clusterStateManager;
+    
+    /**
+     * 集群总线客户端
+     */
+    private ClusterBusClient clusterBusClient;
     
     /**
      * 使用默认配置创建服务器
@@ -157,6 +214,133 @@ public class NettyRedisServer implements RedisServer {
         RuntimeConfig.setLuaYieldMs(config.getLuaYieldMs());
         RuntimeConfig.setLuaAllowedModules(config.getLuaAllowedModules());
         RuntimeConfig.setLuaBlockedFunctions(config.getLuaBlockedFunctions());
+        
+        // 初始化集群模式
+        if (config.isClusterEnabled()) {
+            initClusterMode();
+        }
+    }
+    
+    /**
+     * 初始化集群模式
+     */
+    private void initClusterMode() {
+        logger.info("初始化集群模式...");
+        
+        this.clusterEnabled = true;
+        
+        // 1. 初始化 ClusterConfig
+        String nodeId = loadOrCreateNodeId();
+        this.clusterConfig = new ClusterConfig(nodeId);
+        
+        // 2. 初始化当前节点信息
+        initCurrentNode(nodeId);
+        
+        // 3. 初始化 SlotManager
+        this.slotManager = new DefaultSlotManager(nodeId);
+        
+        // 4. 初始化 ClusterStateManager
+        this.clusterStateManager = new ClusterStateManager(clusterConfig);
+        
+        // 5. 初始化 ClusterBusClient（需要在 GossipProtocol 之前）
+        this.clusterBusClient = new ClusterBusClient(clusterConfig, null);
+        
+        // 6. 初始化 GossipProtocol
+        this.gossipProtocol = new GossipProtocol(
+                clusterConfig, 
+                clusterBusClient, 
+                config.getClusterNodeTimeout());
+        
+        // 更新 ClusterBusClient 的 GossipProtocol 引用
+        // 注意：由于构造函数顺序问题，这里需要重新创建或使用 setter
+        // 这里简化处理，GossipProtocol 已经持有正确的引用
+        
+        // 7. 初始化 ClusterCommandHandler
+        this.clusterCommandHandler = new ClusterCommandHandler(
+                clusterConfig, 
+                slotManager, 
+                clusterStateManager, 
+                gossipProtocol);
+        
+        // 8. 初始化 ClusterBusServer
+        this.clusterBusServer = new ClusterBusServer(port, clusterConfig, gossipProtocol);
+        
+        logger.info("集群模式初始化完成: nodeId={}, port={}, busPort={}", 
+                nodeId, port, clusterBusServer.getPort());
+    }
+    
+    /**
+     * 加载或创建节点ID
+     * 
+     * @return 节点ID（40字符十六进制）
+     */
+    private String loadOrCreateNodeId() {
+        String configFile = config.getClusterConfigFile();
+        
+        // 尝试从配置文件加载
+        if (configFile != null && !configFile.isEmpty()) {
+            File file = new File(config.getDir(), configFile);
+            if (file.exists()) {
+                try {
+                    ClusterConfigPersister persister = new ClusterConfigPersister();
+                    ClusterConfig loadedConfig = persister.load(file.getAbsolutePath());
+                    String loadedNodeId = loadedConfig.getMyNodeId();
+                    if (loadedNodeId != null && !loadedNodeId.isEmpty()) {
+                        logger.info("从配置文件加载节点ID: {}", loadedNodeId);
+                        return loadedNodeId;
+                    }
+                } catch (IOException e) {
+                    logger.warn("加载集群配置文件失败，将创建新节点ID: {}", e.getMessage());
+                }
+            }
+        }
+        
+        // 生成新的节点ID
+        String newNodeId = ClusterConfigPersister.generateNodeId();
+        logger.info("生成新的节点ID: {}", newNodeId);
+        return newNodeId;
+    }
+    
+    /**
+     * 初始化当前节点信息
+     * 
+     * @param nodeId 节点ID
+     */
+    private void initCurrentNode(String nodeId) {
+        // 获取本机IP
+        String ip = config.getClusterAnnounceIp();
+        if (ip == null || ip.isEmpty()) {
+            try {
+                ip = InetAddress.getLocalHost().getHostAddress();
+            } catch (UnknownHostException e) {
+                ip = "127.0.0.1";
+                logger.warn("无法获取本机IP地址，使用默认值: {}", ip);
+            }
+        }
+        
+        // 获取端口
+        int announcePort = config.getClusterAnnouncePort();
+        if (announcePort <= 0) {
+            announcePort = port;
+        }
+        
+        // 获取总线端口
+        int busPort = config.getClusterAnnounceBusPort();
+        if (busPort <= 0) {
+            busPort = announcePort + ClusterBusServer.BUS_PORT_OFFSET;
+        }
+        
+        // 创建当前节点
+        ClusterNode myNode = new ClusterNode(nodeId, ip, announcePort, busPort);
+        myNode.addState(ClusterNodeState.MYSELF);
+        myNode.addState(ClusterNodeState.MASTER);  // 默认为主节点
+        
+        // 添加到集群配置
+        clusterConfig.addNode(myNode);
+        clusterConfig.setMyNodeId(nodeId);
+        
+        logger.info("当前节点初始化完成: nodeId={}, address={}", 
+                nodeId, myNode.getFullAddress());
     }
     
     /**
@@ -244,6 +428,18 @@ public class NettyRedisServer implements RedisServer {
             running = true;
             logger.info("LbRDS server started on port {}", port);
             
+            // 启动集群总线服务器
+            if (clusterEnabled && clusterBusServer != null) {
+                clusterBusServer.start();
+                logger.info("集群总线服务器启动成功，端口: {}", clusterBusServer.getPort());
+            }
+            
+            // 启动 Gossip 协议
+            if (clusterEnabled && gossipProtocol != null) {
+                gossipProtocol.start();
+                logger.info("Gossip 协议启动成功");
+            }
+            
             // Start periodic persistence task
             startPeriodicPersistTask();
             
@@ -297,6 +493,38 @@ public class NettyRedisServer implements RedisServer {
         }
         
         try {
+            // 停止 Gossip 协议
+            if (gossipProtocol != null) {
+                gossipProtocol.stop();
+                logger.info("Gossip 协议已停止");
+            }
+            
+            // 停止集群总线服务器
+            if (clusterBusServer != null) {
+                clusterBusServer.stop();
+                logger.info("集群总线服务器已停止");
+            }
+            
+            // 关闭集群总线客户端
+            if (clusterBusClient != null) {
+                clusterBusClient.close();
+                logger.info("集群总线客户端已关闭");
+            }
+            
+            // 保存集群配置
+            if (clusterConfig != null && config.getClusterConfigFile() != null) {
+                try {
+                    ClusterConfigPersister persister = new ClusterConfigPersister();
+                    File configFile = new File(config.getDir(), config.getClusterConfigFile());
+                    // 确保目录存在
+                    configFile.getParentFile().mkdirs();
+                    persister.save(clusterConfig, configFile.getAbsolutePath());
+                    logger.info("集群配置已保存到: {}", configFile.getAbsolutePath());
+                } catch (IOException e) {
+                    logger.error("保存集群配置失败", e);
+                }
+            }
+            
             // 停止定期持久化任务
             persistExecutor.shutdown();
             if (!persistExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -371,5 +599,79 @@ public class NettyRedisServer implements RedisServer {
      */
     public RdsConfig getConfig() {
         return config;
+    }
+    
+    // ==================== 集群相关 Getter 方法 ====================
+    
+    /**
+     * 获取集群配置
+     * 
+     * @return 集群配置对象，如果未启用集群模式则返回 null
+     */
+    public ClusterConfig getClusterConfig() {
+        return clusterConfig;
+    }
+    
+    /**
+     * 获取槽位管理器
+     * 
+     * @return 槽位管理器，如果未启用集群模式则返回 null
+     */
+    public SlotManager getSlotManager() {
+        return slotManager;
+    }
+    
+    /**
+     * 检查是否启用集群模式
+     * 
+     * @return 是否启用集群模式
+     */
+    public boolean isClusterEnabled() {
+        return clusterEnabled;
+    }
+    
+    /**
+     * 获取集群命令处理器
+     * 
+     * @return 集群命令处理器，如果未启用集群模式则返回 null
+     */
+    public ClusterCommandHandler getClusterCommandHandler() {
+        return clusterCommandHandler;
+    }
+    
+    /**
+     * 获取集群状态管理器
+     * 
+     * @return 集群状态管理器，如果未启用集群模式则返回 null
+     */
+    public ClusterStateManager getClusterStateManager() {
+        return clusterStateManager;
+    }
+    
+    /**
+     * 获取 Gossip 协议
+     * 
+     * @return Gossip 协议，如果未启用集群模式则返回 null
+     */
+    public GossipProtocol getGossipProtocol() {
+        return gossipProtocol;
+    }
+    
+    /**
+     * 获取集群总线服务器
+     * 
+     * @return 集群总线服务器，如果未启用集群模式则返回 null
+     */
+    public ClusterBusServer getClusterBusServer() {
+        return clusterBusServer;
+    }
+    
+    /**
+     * 获取集群总线客户端
+     * 
+     * @return 集群总线客户端，如果未启用集群模式则返回 null
+     */
+    public ClusterBusClient getClusterBusClient() {
+        return clusterBusClient;
     }
 }

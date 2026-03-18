@@ -1,0 +1,422 @@
+package com.janeluo.luban.rds.cluster.gossip;
+
+import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
+
+import java.io.Serializable;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
+
+/**
+ * Gossip 节点信息
+ * <p>
+ * 用于在心跳消息中携带节点状态信息，实现集群状态的传播
+ * </p>
+ */
+public class GossipNodeInfo implements Serializable {
+
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * 节点ID长度（40字符十六进制）
+     */
+    public static final int NODE_ID_LENGTH = 40;
+
+    /**
+     * 节点ID（40字符十六进制字符串）
+     */
+    private String nodeId;
+
+    /**
+     * 节点IP地址
+     */
+    private String ip;
+
+    /**
+     * 节点端口
+     */
+    private int port;
+
+    /**
+     * 集群总线端口（用于节点间通信）
+     */
+    private int busPort;
+
+    /**
+     * 配置纪元（用于集群配置版本控制）
+     */
+    private long configEpoch;
+
+    /**
+     * 节点状态标志集合
+     */
+    private Set<ClusterNodeState> flags;
+
+    /**
+     * 默认构造方法
+     */
+    public GossipNodeInfo() {
+        this.flags = new HashSet<>();
+    }
+
+    /**
+     * 带节点ID的构造方法
+     *
+     * @param nodeId 节点ID（40字符十六进制）
+     */
+    public GossipNodeInfo(String nodeId) {
+        this();
+        setNodeId(nodeId);
+    }
+
+    /**
+     * 完整构造方法
+     *
+     * @param nodeId      节点ID
+     * @param ip          IP地址
+     * @param port        端口
+     * @param busPort     集群总线端口
+     * @param configEpoch 配置纪元
+     * @param flags       状态标志集合
+     */
+    public GossipNodeInfo(String nodeId, String ip, int port, int busPort,
+                          long configEpoch, Set<ClusterNodeState> flags) {
+        this(nodeId);
+        this.ip = ip;
+        this.port = port;
+        this.busPort = busPort;
+        this.configEpoch = configEpoch;
+        this.flags = flags != null ? new HashSet<>(flags) : new HashSet<>();
+    }
+
+    // ==================== Getter/Setter 方法 ====================
+
+    public String getNodeId() {
+        return nodeId;
+    }
+
+    /**
+     * 设置节点ID
+     *
+     * @param nodeId 节点ID（必须是40字符的十六进制字符串）
+     * @throws IllegalArgumentException 如果节点ID格式不正确
+     */
+    public void setNodeId(String nodeId) {
+        if (nodeId != null && nodeId.length() != NODE_ID_LENGTH) {
+            throw new IllegalArgumentException(
+                    "节点ID长度必须为" + NODE_ID_LENGTH + "字符，当前长度: " + nodeId.length());
+        }
+        if (nodeId != null && !nodeId.matches("[0-9a-fA-F]+")) {
+            throw new IllegalArgumentException("节点ID必须为十六进制字符串");
+        }
+        this.nodeId = nodeId;
+    }
+
+    public String getIp() {
+        return ip;
+    }
+
+    public void setIp(String ip) {
+        this.ip = ip;
+    }
+
+    public int getPort() {
+        return port;
+    }
+
+    public void setPort(int port) {
+        if (port < 0 || port > 65535) {
+            throw new IllegalArgumentException("端口号必须在0-65535范围内");
+        }
+        this.port = port;
+    }
+
+    public int getBusPort() {
+        return busPort;
+    }
+
+    public void setBusPort(int busPort) {
+        if (busPort < 0 || busPort > 65535) {
+            throw new IllegalArgumentException("集群总线端口必须在0-65535范围内");
+        }
+        this.busPort = busPort;
+    }
+
+    public long getConfigEpoch() {
+        return configEpoch;
+    }
+
+    public void setConfigEpoch(long configEpoch) {
+        this.configEpoch = configEpoch;
+    }
+
+    public Set<ClusterNodeState> getFlags() {
+        return flags;
+    }
+
+    public void setFlags(Set<ClusterNodeState> flags) {
+        this.flags = flags != null ? new HashSet<>(flags) : new HashSet<>();
+    }
+
+    // ==================== 状态管理方法 ====================
+
+    /**
+     * 添加节点状态标志
+     *
+     * @param flag 要添加的状态标志
+     */
+    public void addFlag(ClusterNodeState flag) {
+        this.flags.add(flag);
+    }
+
+    /**
+     * 移除节点状态标志
+     *
+     * @param flag 要移除的状态标志
+     */
+    public void removeFlag(ClusterNodeState flag) {
+        this.flags.remove(flag);
+    }
+
+    /**
+     * 检查是否具有指定状态标志
+     *
+     * @param flag 要检查的状态标志
+     * @return 是否具有该状态标志
+     */
+    public boolean hasFlag(ClusterNodeState flag) {
+        return this.flags.contains(flag);
+    }
+
+    /**
+     * 判断是否为主节点
+     *
+     * @return 是否为主节点
+     */
+    public boolean isMaster() {
+        return hasFlag(ClusterNodeState.MASTER);
+    }
+
+    /**
+     * 判断是否为从节点
+     *
+     * @return 是否为从节点
+     */
+    public boolean isSlave() {
+        return hasFlag(ClusterNodeState.SLAVE);
+    }
+
+    /**
+     * 判断是否已下线
+     *
+     * @return 是否已下线
+     */
+    public boolean isFail() {
+        return hasFlag(ClusterNodeState.FAIL);
+    }
+
+    /**
+     * 判断是否可能下线
+     *
+     * @return 是否可能下线
+     */
+    public boolean isPfail() {
+        return hasFlag(ClusterNodeState.PFAIL);
+    }
+
+    // ==================== 编解码方法 ====================
+
+    /**
+     * 将节点信息编码为字节数组
+     * <p>
+     * 编码格式：
+     * - 节点ID（40字节）
+     * - IP地址长度（1字节）+ IP地址（变长）
+     * - 端口（4字节，大端序）
+     * - 总线端口（4字节，大端序）
+     * - 配置纪元（8字节，大端序）
+     * - 状态标志数量（1字节）+ 状态标志（每个2字节）
+     * </p>
+     *
+     * @return 编码后的字节数组
+     */
+    public byte[] encode() {
+        // 计算总长度
+        int ipBytesLength = ip != null ? ip.getBytes(java.nio.charset.StandardCharsets.UTF_8).length : 0;
+        int flagsCount = flags.size();
+        int totalLength = NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2;
+
+        byte[] data = new byte[totalLength];
+        int offset = 0;
+
+        // 写入节点ID
+        if (nodeId != null) {
+            byte[] nodeIdBytes = nodeId.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            System.arraycopy(nodeIdBytes, 0, data, offset, NODE_ID_LENGTH);
+        }
+        offset += NODE_ID_LENGTH;
+
+        // 写入IP地址长度和IP地址
+        data[offset++] = (byte) ipBytesLength;
+        if (ipBytesLength > 0) {
+            byte[] ipBytes = ip.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            System.arraycopy(ipBytes, 0, data, offset, ipBytesLength);
+            offset += ipBytesLength;
+        }
+
+        // 写入端口（大端序）
+        data[offset++] = (byte) (port >> 24);
+        data[offset++] = (byte) (port >> 16);
+        data[offset++] = (byte) (port >> 8);
+        data[offset++] = (byte) port;
+
+        // 写入总线端口（大端序）
+        data[offset++] = (byte) (busPort >> 24);
+        data[offset++] = (byte) (busPort >> 16);
+        data[offset++] = (byte) (busPort >> 8);
+        data[offset++] = (byte) busPort;
+
+        // 写入配置纪元（大端序）
+        data[offset++] = (byte) (configEpoch >> 56);
+        data[offset++] = (byte) (configEpoch >> 48);
+        data[offset++] = (byte) (configEpoch >> 40);
+        data[offset++] = (byte) (configEpoch >> 32);
+        data[offset++] = (byte) (configEpoch >> 24);
+        data[offset++] = (byte) (configEpoch >> 16);
+        data[offset++] = (byte) (configEpoch >> 8);
+        data[offset++] = (byte) configEpoch;
+
+        // 写入状态标志数量
+        data[offset++] = (byte) flagsCount;
+
+        // 写入状态标志
+        for (ClusterNodeState flag : flags) {
+            short flagCode = (short) flag.ordinal();
+            data[offset++] = (byte) (flagCode >> 8);
+            data[offset++] = (byte) flagCode;
+        }
+
+        return data;
+    }
+
+    /**
+     * 从字节数组解码节点信息
+     *
+     * @param data   字节数组
+     * @param offset 起始偏移量
+     * @return 解码后的偏移量
+     */
+    public int decode(byte[] data, int offset) {
+        // 读取节点ID
+        byte[] nodeIdBytes = new byte[NODE_ID_LENGTH];
+        System.arraycopy(data, offset, nodeIdBytes, 0, NODE_ID_LENGTH);
+        this.nodeId = new String(nodeIdBytes, java.nio.charset.StandardCharsets.UTF_8);
+        offset += NODE_ID_LENGTH;
+
+        // 读取IP地址长度和IP地址
+        int ipLength = data[offset++] & 0xFF;
+        if (ipLength > 0) {
+            byte[] ipBytes = new byte[ipLength];
+            System.arraycopy(data, offset, ipBytes, 0, ipLength);
+            this.ip = new String(ipBytes, java.nio.charset.StandardCharsets.UTF_8);
+            offset += ipLength;
+        }
+
+        // 读取端口（大端序）
+        this.port = ((data[offset++] & 0xFF) << 24) |
+                ((data[offset++] & 0xFF) << 16) |
+                ((data[offset++] & 0xFF) << 8) |
+                (data[offset++] & 0xFF);
+
+        // 读取总线端口（大端序）
+        this.busPort = ((data[offset++] & 0xFF) << 24) |
+                ((data[offset++] & 0xFF) << 16) |
+                ((data[offset++] & 0xFF) << 8) |
+                (data[offset++] & 0xFF);
+
+        // 读取配置纪元（大端序）
+        this.configEpoch = ((long) (data[offset++] & 0xFF) << 56) |
+                ((long) (data[offset++] & 0xFF) << 48) |
+                ((long) (data[offset++] & 0xFF) << 40) |
+                ((long) (data[offset++] & 0xFF) << 32) |
+                ((long) (data[offset++] & 0xFF) << 24) |
+                ((long) (data[offset++] & 0xFF) << 16) |
+                ((long) (data[offset++] & 0xFF) << 8) |
+                ((long) (data[offset++] & 0xFF));
+
+        // 读取状态标志数量
+        int flagsCount = data[offset++] & 0xFF;
+
+        // 读取状态标志
+        this.flags.clear();
+        ClusterNodeState[] states = ClusterNodeState.values();
+        for (int i = 0; i < flagsCount; i++) {
+            short flagCode = (short) (((data[offset++] & 0xFF) << 8) | (data[offset++] & 0xFF));
+            if (flagCode >= 0 && flagCode < states.length) {
+                this.flags.add(states[flagCode]);
+            }
+        }
+
+        return offset;
+    }
+
+    /**
+     * 计算编码后的字节长度
+     *
+     * @return 字节长度
+     */
+    public int getEncodedLength() {
+        int ipBytesLength = ip != null ? ip.getBytes(java.nio.charset.StandardCharsets.UTF_8).length : 0;
+        int flagsCount = flags.size();
+        return NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2;
+    }
+
+    // ==================== 工具方法 ====================
+
+    /**
+     * 获取节点地址字符串（ip:port格式）
+     *
+     * @return 地址字符串
+     */
+    public String getAddress() {
+        return ip + ":" + port;
+    }
+
+    /**
+     * 获取节点完整地址字符串（ip:port@busPort格式）
+     *
+     * @return 完整地址字符串
+     */
+    public String getFullAddress() {
+        return ip + ":" + port + "@" + busPort;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        GossipNodeInfo that = (GossipNodeInfo) o;
+        return Objects.equals(nodeId, that.nodeId);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(nodeId);
+    }
+
+    @Override
+    public String toString() {
+        return "GossipNodeInfo{" +
+                "nodeId='" + nodeId + '\'' +
+                ", ip='" + ip + '\'' +
+                ", port=" + port +
+                ", busPort=" + busPort +
+                ", configEpoch=" + configEpoch +
+                ", flags=" + flags +
+                '}';
+    }
+}

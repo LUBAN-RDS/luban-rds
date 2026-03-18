@@ -870,6 +870,32 @@ public interface MemoryStore {
      */
     StreamId getGroupLastDeliveredId(int database, String key, String group);
     
+    // ==================== 槽位操作接口 ====================
+    
+    /**
+     * 获取指定槽位中的键列表
+     * @param database 数据库索引
+     * @param slot 槽位号
+     * @param count 最大返回数量
+     * @return 键列表
+     */
+    List<String> getKeysInSlot(int database, int slot, int count);
+    
+    /**
+     * 获取指定槽位中的键数量
+     * @param database 数据库索引
+     * @param slot 槽位号
+     * @return 键数量
+     */
+    int countKeysInSlot(int database, int slot);
+    
+    /**
+     * 获取键所属的槽位
+     * @param key 键名
+     * @return 槽位号
+     */
+    int getKeySlot(String key);
+    
     /**
      * Memory statistics information class
      */
