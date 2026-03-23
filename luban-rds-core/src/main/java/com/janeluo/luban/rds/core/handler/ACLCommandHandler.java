@@ -1,8 +1,7 @@
-package com.janeluo.luban.rds.acl.handler;
+package com.janeluo.luban.rds.core.handler;
 
-import com.janeluo.luban.rds.acl.ACLManager;
-import com.janeluo.luban.rds.acl.ACLUser;
-import com.janeluo.luban.rds.core.handler.CommandHandler;
+import com.janeluo.luban.rds.core.acl.ACLManager;
+import com.janeluo.luban.rds.core.acl.ACLUser;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 
 import java.util.ArrayList;
@@ -101,7 +100,7 @@ public class ACLCommandHandler implements CommandHandler {
         }
         
         try {
-            ACLUser user = aclManager.setUser(username, rules);
+            aclManager.setUser(username, rules);
             aclManager.getAuditLogger().logUserCreated(username);
             return "+OK\r\n";
         } catch (Exception e) {

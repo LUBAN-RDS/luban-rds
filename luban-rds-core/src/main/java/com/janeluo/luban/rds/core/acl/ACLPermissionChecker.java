@@ -1,4 +1,4 @@
-package com.janeluo.luban.rds.acl;
+package com.janeluo.luban.rds.core.acl;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

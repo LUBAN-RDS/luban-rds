@@ -1,4 +1,4 @@
-package com.janeluo.luban.rds.acl;
+package com.janeluo.luban.rds.core.acl;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;

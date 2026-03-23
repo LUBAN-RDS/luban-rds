@@ -1,4 +1,4 @@
-package com.janeluo.luban.rds.acl;
+package com.janeluo.luban.rds.core.acl;
 
 import java.util.HashSet;
 import java.util.Set;
