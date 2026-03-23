@@ -64,6 +64,7 @@
         <module>luban-rds-persistence</module>
         <module>luban-rds-bin</module>
         <module>luban-rds-benchmark</module>
+        <module>luban-rds-acl</module>
     </modules>
 
     <dependencyManagement>
