@@ -4,21 +4,21 @@ title: 安装指南
 
 # 安装指南
 
-本指南详细介绍了如何在不同环境下安装和配置 Luban-RDS。
+本指南详细介绍如何在不同环境下安装和配置 Luban-RDS。
 
 ## 环境要求
 
 | 环境 | 最低要求 | 推荐配置 |
 |------|----------|----------|
 | **操作系统** | Windows 7+, Linux, macOS | Linux (CentOS 7+, Ubuntu 18.04+) |
-| **Java 版本** | Java 17+ | Java 17 |
+| **Java 版本** | JDK 17+ | JDK 17 (LTS) |
 | **内存** | 512MB | 2GB+ |
 | **CPU** | 1 核 | 2 核+ |
 | **网络** | 100Mbps | 1Gbps |
 
 ## 安装方式
 
-### 1. 从源码构建
+### 方式一：从源码构建
 
 #### 步骤 1：克隆仓库
 
@@ -26,7 +26,7 @@ title: 安装指南
 # 从 GitHub 克隆
 git clone https://github.com/LUBAN-RDS/luban-rds.git
 
-# 或从 Gitee 克隆
+# 或从 Gitee 克隆（国内更快）
 git clone https://gitee.com/luban-rds/luban-rds.git
 
 cd luban-rds
@@ -35,18 +35,16 @@ cd luban-rds
 #### 步骤 2：构建项目
 
 ```bash
-# 构建所有模块
+# 完整构建（包含测试）
 mvn clean package
 
-# 跳过测试构建（更快）
+# 快速构建（跳过测试）
 mvn clean package -DskipTests
 ```
 
-构建完成后，可执行文件会生成在 `luban-rds-bin/target/` 目录中。
+构建完成后，可执行文件位于 `luban-rds-bin/target/` 目录。
 
-### 2. 直接下载
-
-（如果提供预构建的二进制文件）
+### 方式二：下载预构建版本
 
 ```bash
 # 下载最新版本

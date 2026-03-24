@@ -1,30 +1,52 @@
+---
+title: 开发指南
+---
+
 # 开发指南
 
-欢迎参与 Luban-RDS 项目的开发！本章节提供了开发环境搭建、开发流程、代码规范等相关指南，帮助您快速上手并贡献代码。
+欢迎参与 Luban-RDS 项目的开发！本部分提供开发环境搭建、开发流程、代码规范等相关指南，帮助您快速上手并贡献代码。
 
 ## 目录
 
-- [环境搭建](setup.md)
-- [开发流程](process.md)
-- [代码规范](standards.md)
-- [测试指南](testing.md)
-- [贡献指南](contributing.md)
-- [开发路线图](roadmap.md)
+- **[环境搭建](setup.md)** — 开发环境配置与项目构建
+- **[构建和测试](build.md)** — 项目构建与测试流程
+- **[开发流程](process.md)** — 规范化的开发流程说明
+- **[代码规范](standards.md)** — 编码规范与最佳实践
+- **[代码风格指南](code-style.md)** — 详细的代码风格规范
+- **[测试指南](testing.md)** — 单元测试与集成测试指南
+- **[贡献指南](contributing.md)** — 如何为项目贡献代码
+- **[开发路线图](roadmap.md)** — 版本规划与功能路线图
 
 ## 开发环境要求
 
-- Java 17 或更高版本
-- Maven 3.8 或更高版本
-- Git 版本控制
-- IDE（推荐 IntelliJ IDEA 或 Eclipse）
+| 工具 | 版本要求 | 说明 |
+|------|---------|------|
+| **JDK** | 17+ | 推荐 OpenJDK 17 或 Oracle JDK 17 |
+| **Maven** | 3.8+ | 项目构建管理工具 |
+| **Git** | 任意版本 | 版本控制工具 |
+| **IDE** | - | 推荐 IntelliJ IDEA 或 Eclipse |
 
-## 开始开发
+## 快速开始
 
-1. 克隆代码库
-2. 配置开发环境
-3. 了解项目结构
-4. 开始编写代码
-5. 运行测试
-6. 提交代码
+```bash
+# 1. 克隆代码库
+git clone https://github.com/LUBAN-RDS/luban-rds.git
+cd luban-rds
+
+# 2. 构建项目
+mvn clean install
+
+# 3. 运行测试
+mvn test
+
+# 4. 启动服务器（开发模式）
+mvn -pl luban-rds-server exec:java -Dexec.mainClass="com.janeluo.luban.rds.server.NettyRedisServer"
+```
+
+## 开发流程
+
+```
+克隆代码 → 环境搭建 → 编写代码 → 运行测试 → 提交 PR → 代码审查 → 合并代码
+```
 
 详细步骤请参考各个子章节的内容。

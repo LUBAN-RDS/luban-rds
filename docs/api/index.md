@@ -4,13 +4,13 @@ title: API 文档
 
 # API 文档
 
-本部分提供了 Luban-RDS 的详细 API 文档，包括核心接口、命令列表和协议说明。
+本部分提供 Luban-RDS 的详细 API 文档，包括核心接口、命令列表和协议说明。
 
 ## API 内容
 
-- **[核心接口](./core.md)** - MemoryStore 等核心接口的详细说明
-- **[命令列表](./commands.md)** - 支持的所有 Redis 命令
-- **[协议说明](./protocol.md)** - RESP 协议的详细解析
+- **[核心接口](./core.md)** — MemoryStore 等核心接口的详细说明
+- **[命令列表](./commands.md)** — 支持的所有 Redis 命令
+- **[协议说明](./protocol.md)** — RESP 协议的详细解析
 
 ## 核心模块
 
@@ -26,12 +26,14 @@ Luban-RDS 采用 Maven 多模块结构，主要模块包括：
 
 ## 版本信息
 
-- **当前版本**：1.0.1-SNAPSHOT
-- **已发布版本**：1.0.0
-- **Java 版本要求**：Java 17+
-- **兼容 Redis 版本**：6.0+
+| 项目 | 版本 |
+|------|------|
+| **当前版本** | 1.0.1-SNAPSHOT |
+| **已发布版本** | 1.0.0 |
+| **Java 版本要求** | JDK 17+ |
+| **兼容 Redis 版本** | 6.0+ |
 
-## 示例代码
+## 快速示例
 
 ### Java 客户端示例
 
@@ -57,7 +59,7 @@ client.close();
 ```java
 // 添加依赖
 // <dependency>
-//     <groupId>com.janeluoluo</groupId>
+//     <groupId>com.janeluo.luban</groupId>
 //     <artifactId>luban-rds-spring-boot-starter</artifactId>
 //     <version>1.0.0</version>
 // </dependency>

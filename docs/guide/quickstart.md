@@ -4,13 +4,15 @@ title: 快速开始
 
 # 快速开始
 
-本指南将帮助您在 5 分钟内快速上手 Luban-RDS。
+本指南帮助您在 5 分钟内快速上手 Luban-RDS。
 
 ## 环境要求
 
-- **Java 17+**：Luban-RDS 基于 Java 开发
-- **Maven 3.6+**：用于构建项目
-- **Docker**（可选）：用于容器化部署
+| 工具 | 版本要求 | 说明 |
+|------|---------|------|
+| **JDK** | 17+ | Luban-RDS 基于 Java 开发 |
+| **Maven** | 3.6+ | 用于构建项目 |
+| **Docker** | 任意版本 | 可选，用于容器化部署 |
 
 ## 方式一：Docker 快速启动（推荐）
 
@@ -26,13 +28,14 @@ docker-compose up -d
 
 # 验证服务
 redis-cli -h localhost -p 9736 PING
+# 输出: PONG
 ```
 
-或者直接使用 Docker 命令：
+或直接使用 Docker 命令：
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.1 .
+docker build -t luban-rds:1.0.0 .
 
 # 运行容器
 docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.0
