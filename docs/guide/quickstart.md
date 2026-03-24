@@ -35,10 +35,10 @@ redis-cli -h localhost -p 9736 PING
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.0 .
+docker build -t luban-rds:1.0.1 .
 
 # 运行容器
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.0
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.1
 
 # 验证服务
 redis-cli -h localhost -p 9736 PING

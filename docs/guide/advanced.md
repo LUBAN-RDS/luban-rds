@@ -381,7 +381,7 @@ Luban-RDS 提供了 Spring Boot starter 模块，方便在 Spring Boot 应用中
 <dependency>
     <groupId>com.janeluo.luban</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 

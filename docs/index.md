@@ -1,7 +1,7 @@
 ---
 title: Luban-RDS 文档
 last_updated: 2026-03-24
-version: 1.0.1-SNAPSHOT
+version: 1.0.1
 ---
 
 <div align="center">
@@ -75,13 +75,13 @@ version: 1.0.1-SNAPSHOT
 
 ## ✨ 版本特性
 
-### v1.0.1-SNAPSHOT (当前开发版本)
+### v1.0.1 (已发布)
 
-#### 🚀 新增功能
-- ✅ **Redis Cluster 集群模式**: 完整实现 Redis Cluster 协议兼容
+#### 🚀 分布式能力
+- ✅ **Redis Cluster**: 完整集群协议实现
   - 16384 槽位分配与管理
   - MOVED/ASK 重定向机制
-  - Gossip 协议心跳检测
+  - Gossip 心跳检测
   - 集群总线协议
 - ✅ **主从复制**: 支持完整的 Redis 主从复制协议
   - 全量同步（RDB 传输）

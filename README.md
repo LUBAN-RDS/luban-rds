@@ -110,7 +110,7 @@ OK
 <dependency>
     <groupId>com.janeluo.luban</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
@@ -581,7 +581,7 @@ docker-compose down
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.0 .
+docker build -t luban-rds:1.0.1 .
 
 # 基础运行
 docker run -d \

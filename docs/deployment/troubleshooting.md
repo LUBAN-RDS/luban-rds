@@ -57,7 +57,7 @@ title: 故障排查
    ```
 
 **解决方案**：
-- 启动服务：`java -jar luban-rds-bin-1.0.0.jar`
+- 启动服务：`java -jar luban-rds-bin-1.0.1.jar`
 - 修正端口配置：确保端口未被占用
 - 修正绑定地址：设置为 `0.0.0.0` 允许所有地址访问
 - 配置防火墙：开放 9736 端口
@@ -707,14 +707,14 @@ tail -f /var/log/syslog | grep luban-rds
    ```bash
    rm -f /data/dump.rdb /data/appendonly.aof
    ```
-3. **启动服务**：`java -jar luban-rds-bin-1.0.0.jar`
+3. **启动服务**：`java -jar luban-rds-bin-1.0.1.jar`
 4. **导入数据**：从备份或其他来源导入数据
 
 **常规恢复**：
 1. **停止服务**：`redis-cli -h localhost -p 9736 SHUTDOWN`
 2. **检查配置**：确保配置正确
 3. **检查持久化文件**：确保文件完整
-4. **启动服务**：`java -jar luban-rds-bin-1.0.0.jar`
+4. **启动服务**：`java -jar luban-rds-bin-1.0.1.jar`
 5. **验证服务**：`redis-cli -h localhost -p 9736 PING`
 
 ## 10. 预防措施

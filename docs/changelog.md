@@ -1,13 +1,13 @@
 ---
 title: 更新日志
 last_updated: 2026-03-24
-version: 1.0.1-SNAPSHOT
+version: 1.0.1
 ---
 # 更新日志
 
 Luban-RDS 是一款轻量级、高性能、完全兼容 RESP 协议的 Java 内存数据库，易于嵌入和扩展。
 
-## [1.0.1-SNAPSHOT] - 开发中
+## [1.0.1] - 2026-03-24
 
 ### 新增功能
 

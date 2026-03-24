@@ -74,10 +74,10 @@ mvn test -Dtest=LuaCommandHandlerTest
 
 ```bash
 # 启动嵌入式服务器
-java -cp luban-rds-server/target/luban-rds-server-1.0.0.jar com.janeluo.luban.rds.server.EmbeddedRedisServer
+java -cp luban-rds-server/target/luban-rds-server-1.0.1.jar com.janeluo.luban.rds.server.EmbeddedRedisServer
 
 # 启动独立服务器
-java -cp luban-rds-bin/target/luban-rds-bin-1.0.0.jar com.janeluo.luban.rds.bin.RedisServerMain
+java -cp luban-rds-bin/target/luban-rds-bin-1.0.1.jar com.janeluo.luban.rds.bin.RedisServerMain
 ```
 
 ## 3. 开发流程

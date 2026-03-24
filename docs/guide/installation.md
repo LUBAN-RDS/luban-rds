@@ -48,10 +48,10 @@ mvn clean package -DskipTests
 
 ```bash
 # 下载最新版本
-wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.0/luban-rds-bin-1.0.0.jar
+wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.1/luban-rds-bin-1.0.1.jar
 
 # 启动服务器
-java -jar luban-rds-bin-1.0.0.jar
+java -jar luban-rds-bin-1.0.1.jar
 ```
 
 ## 配置选项

@@ -224,7 +224,7 @@ tcp-keepalive 300
    <dependency>
        <groupId>com.janeluo</groupId>
        <artifactId>luban-rds-spring-boot-starter</artifactId>
-       <version>1.0.0</version>
+       <version>1.0.1</version>
    </dependency>
    ```
 
