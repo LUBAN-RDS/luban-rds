@@ -882,11 +882,34 @@ redis-cli -h localhost -p 9736 INFO persistence | grep -E "rdb_|aof_"
 
 ### 15.6 集群环境变量
 
+以下环境变量覆盖配置文件中的对应集群配置项（命名规则：`LUBAN_RDS_CLUSTER_<UPPER_SNAKE>`）。
+
+#### 基础配置
+
 | 变量名 | 配置项 | 默认值 | 描述 |
 |--------|--------|--------|------|
 | `LUBAN_RDS_CLUSTER_ENABLED` | cluster-enabled | false | 是否启用集群模式 |
-| `LUBAN_RDS_CLUSTER_CONFIG_FILE` | cluster-config-file | nodes.conf | 集群配置文件路径 |
+| `LUBAN_RDS_CLUSTER_CONFIG_FILE` | cluster-config-file | nodes.conf | 集群节点配置文件路径 |
 | `LUBAN_RDS_CLUSTER_NODE_TIMEOUT` | cluster-node-timeout | 15000 | 节点超时时间（毫秒） |
+| `LUBAN_RDS_CLUSTER_REQUIRE_FULL_COVERAGE` | cluster-require-full-coverage | true | 是否要求所有槽位已分配 |
+| `LUBAN_RDS_CLUSTER_ALLOW_READS_WHEN_DOWN` | cluster-allow-reads-when-down | false | fail 状态是否允许读 |
+| `LUBAN_RDS_CLUSTER_MIGRATION_BARRIER` | cluster-migration-barrier | 1 | 保留给从节点的最小槽位数 |
+
+#### 网络公告
+
+| 变量名 | 配置项 | 默认值 | 描述 |
+|--------|--------|--------|------|
+| `LUBAN_RDS_CLUSTER_ANNOUNCE_IP` | cluster-announce-ip | "" | 对外公告 IP |
+| `LUBAN_RDS_CLUSTER_ANNOUNCE_PORT` | cluster-announce-port | "" | 对外公告服务端口 |
+| `LUBAN_RDS_CLUSTER_ANNOUNCE_BUS_PORT` | cluster-announce-bus-port | "" | 对外公告总线端口（默认 = 服务端口 + 10000） |
+| `LUBAN_RDS_CLUSTER_BUS_PORT` | cluster-announce-bus-port | (port + 10000) | 直接设置总线端口，等价于 cluster-announce-bus-port |
+
+#### Gossip
+
+| 变量名 | 配置项 | 默认值 | 描述 |
+|--------|--------|--------|------|
+| `LUBAN_RDS_CLUSTER_GOSSIP_INTERVAL` | cluster-gossip-interval | 1000 | Gossip 心跳间隔（毫秒） |
+| `LUBAN_RDS_CLUSTER_GOSSIP_TIMEOUT` | cluster-gossip-timeout | 5000 | Gossip 消息超时（毫秒） |
 
 ### 15.7 JVM 配置
 
