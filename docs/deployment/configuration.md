@@ -426,6 +426,65 @@ rename-command CONFIG "CFG"
 |--------|------|--------|------|
 | monitor-max-clients | 整数 | 100 | 最大允许并发 MONITOR 客户端数量。超过此限制时，新连接将收到错误。 |
 
+### 9.5 集群模式配置
+
+Luban-RDS 完整实现 Redis Cluster 协议（16384 槽位、Gossip 通信、MOVED/ASK 重定向、主从复制与故障转移）。启用集群模式后，节点同时监听两个端口：服务端口（默认 9736）和总线端口（默认 = 服务端口 + 10000，对应 `ClusterBusServer.BUS_PORT_OFFSET`）。
+
+#### 9.5.1 基础配置
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| cluster-enabled | 布尔值 | no | 是否启用集群模式。启用后节点启动时进入集群状态（`cluster_state:ok` 或 `fail`），并启动总线服务器。 |
+| cluster-config-file | 字符串 | "nodes.conf" | 集群节点配置文件路径，用于持久化节点 ID、槽位分配、配置纪元等信息。重启时自动加载。 |
+| cluster-node-timeout | 整数 | 15000 | 节点超时时间（毫秒）。超过此时间未响应 Gossip PING 的节点会被标记为 PFAIL，进而可能升级为 FAIL。 |
+| cluster-slots-validity-factor | 整数 | 0 | 槽位迁移的合法性校验因子，0 表示不校验。 |
+| cluster-migration-barrier | 整数 | 1 | 主节点保留给从节点的最小槽位数，用于主从故障切换时减少数据丢失风险。 |
+| cluster-require-full-coverage | 布尔值 | yes | 是否要求所有槽位都已分配。当存在未分配槽位时，集群状态为 `fail`，写操作会被拒绝。 |
+| cluster-allow-reads-when-down | 布尔值 | no | 当集群处于 `fail` 状态时是否允许读操作。建议保持 `no` 以保证一致性。 |
+
+#### 9.5.2 网络公告
+
+当节点位于 NAT 或端口映射环境（如 Docker/K8s）时，需通过 `cluster-announce-*` 配置显式公告对外地址。
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| cluster-announce-ip | 字符串 | "" | 对外公告的 IP 地址。空表示使用 `host` 配置。 |
+| cluster-announce-port | 字符串 | "" | 对外公告的服务端口。空表示使用 `port` 配置。 |
+| cluster-announce-bus-port | 字符串 | "" | 对外公告的总线端口。空表示使用默认（服务端口 + 10000）。 |
+| cluster-announce-hostname | 字符串 | "" | 对外公告的主机名（与 IP 二选一）。 |
+
+**总线端口规则**：总线端口默认 = `port + 10000`。例如 `port 9736` → 总线端口 `19736`。NAT 场景下必须通过 `cluster-announce-bus-port` 显式映射。
+
+#### 9.5.3 Gossip 协议
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| cluster-gossip-interval | 整数 | 1000 | Gossip 心跳间隔（毫秒），对齐 `GossipProtocol.DEFAULT_GOSSIP_INTERVAL`。 |
+| cluster-gossip-timeout | 整数 | 5000 | Gossip 消息超时时间（毫秒）。 |
+
+#### 9.5.4 从节点
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| cluster-replica-validity-factor | 整数 | 10 | 从节点数据有效性因子，乘以 `cluster-node-timeout` 后判定从节点是否过期。 |
+| cluster-replica-serve-stale-data | 布尔值 | yes | 主从失联时从节点是否继续提供（可能过期的）读服务。 |
+| cluster-replication-factor | 整数 | 1 | 每个主节点的从节点数量上限（仅文档规划用，实际由运维配置）。 |
+
+**配置文件示例**：
+```conf
+# 启用集群模式
+cluster-enabled yes
+cluster-config-file nodes.conf
+cluster-node-timeout 15000
+
+# 网络公告（NAT/容器环境）
+cluster-announce-ip 192.168.1.10
+cluster-announce-port 9736
+cluster-announce-bus-port 19736
+```
+
+详细部署流程、扩缩容和故障转移参见 [集群部署指南](./cluster-setup.md)；协议层组件、槽位算法、MOVED/ASK 重定向参见 [功能架构 - Redis Cluster 集群](../architecture/features.md#17-redis-cluster-集群)。
+
 ## 10. 配置优化建议
 
 ### 10.1 生产环境优化
