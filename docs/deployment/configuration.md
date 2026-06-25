@@ -430,7 +430,7 @@ rename-command CONFIG "CFG"
 
 Luban-RDS 完整实现 Redis Cluster 协议（16384 槽位、Gossip 通信、MOVED/ASK 重定向、主从复制与故障转移）。启用集群模式后，节点同时监听两个端口：服务端口（默认 9736）和总线端口（默认 = 服务端口 + 10000，对应 `ClusterBusServer.BUS_PORT_OFFSET`）。
 
-#### 9.5.1 基础配置
+### 9.5.1 基础配置
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
@@ -442,7 +442,7 @@ Luban-RDS 完整实现 Redis Cluster 协议（16384 槽位、Gossip 通信、MOV
 | cluster-require-full-coverage | 布尔值 | yes | 是否要求所有槽位都已分配。当存在未分配槽位时，集群状态为 `fail`，写操作会被拒绝。 |
 | cluster-allow-reads-when-down | 布尔值 | no | 当集群处于 `fail` 状态时是否允许读操作。建议保持 `no` 以保证一致性。 |
 
-#### 9.5.2 网络公告
+### 9.5.2 网络公告
 
 当节点位于 NAT 或端口映射环境（如 Docker/K8s）时，需通过 `cluster-announce-*` 配置显式公告对外地址。
 
@@ -455,14 +455,14 @@ Luban-RDS 完整实现 Redis Cluster 协议（16384 槽位、Gossip 通信、MOV
 
 **总线端口规则**：总线端口默认 = `port + 10000`。例如 `port 9736` → 总线端口 `19736`。NAT 场景下必须通过 `cluster-announce-bus-port` 显式映射。
 
-#### 9.5.3 Gossip 协议
+### 9.5.3 Gossip 协议
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | cluster-gossip-interval | 整数 | 1000 | Gossip 心跳间隔（毫秒），对齐 `GossipProtocol.DEFAULT_GOSSIP_INTERVAL`。 |
 | cluster-gossip-timeout | 整数 | 5000 | Gossip 消息超时时间（毫秒）。 |
 
-#### 9.5.4 从节点
+### 9.5.4 从节点
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
