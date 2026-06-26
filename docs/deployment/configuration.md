@@ -735,8 +735,39 @@ rename-command CONFIG ""
 
 # 日志配置
 loglevel notice
-logfile "/var/log/luban-rds.log"
+    logfile "/var/log/luban-rds.log"
 ```
+
+### 12.4 集群环境配置示例
+
+最小 3 主节点集群，每个节点使用相同配置模板（仅 `port`、`cluster-announce-ip`、`dir` 不同）：
+
+**node-1.conf（192.168.1.10）**
+```conf
+# 服务端口与总线端口（总线 = 服务端口 + 10000）
+port 9736
+bind 0.0.0.0
+dir /data/node-1
+
+# 集群模式
+cluster-enabled yes
+cluster-config-file nodes-1.conf
+cluster-node-timeout 15000
+cluster-announce-ip 192.168.1.10
+cluster-announce-port 9736
+cluster-announce-bus-port 19736
+
+# 持久化（生产建议 RDB + AOF）
+appendonly yes
+appendfilename "appendonly-1.aof"
+appendfsync everysec
+```
+
+**node-2.conf（192.168.1.11）**：`port 9737`、`dir /data/node-2`、`cluster-announce-port 9737`、`cluster-announce-bus-port 19737`、`appendfilename "appendonly-2.aof"`。
+
+**node-3.conf（192.168.1.12）**：同上，`port 9738`、总线端口 `19738`。
+
+启动后使用 `CLUSTER MEET` 互连、分配槽位即可组成集群，详见 [集群部署指南](./cluster-setup.md)。
 
 ## 13. 配置验证
 
