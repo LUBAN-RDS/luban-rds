@@ -10,6 +10,7 @@ title: 部署运维
 
 - **[安装部署](./installation.md)** — 不同环境下的安装和部署方法
 - **[配置指南](./configuration.md)** — 详细的配置选项和说明
+- **[集群部署](./cluster-setup.md)** — Redis Cluster 模式的初始化、扩缩容和故障转移
 - **[监控维护](./monitoring.md)** — 系统监控和日常维护
 - **[故障排查](./troubleshooting.md)** — 常见问题和解决方案
 
@@ -53,5 +54,6 @@ Luban-RDS 支持多种部署方式，适应不同的应用场景：
 
 - **[安装部署](./installation.md)**：学习如何在不同环境下安装和部署 Luban-RDS
 - **[配置指南](./configuration.md)**：了解详细的配置选项和优化建议
+- **[集群部署](./cluster-setup.md)**：部署 Redis Cluster 集群
 - **[监控维护](./monitoring.md)**：学习如何监控和维护 Luban-RDS 服务
 - **[故障排查](./troubleshooting.md)**：掌握常见问题的排查和解决方法
