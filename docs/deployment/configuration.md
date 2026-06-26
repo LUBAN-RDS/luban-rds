@@ -759,11 +759,11 @@ cluster-announce-bus-port 19736
 
 # 持久化（生产建议 RDB + AOF）
 appendonly yes
-appendfilename "appendonly-1.aof"
+aof-filename "appendonly-1.aof"
 appendfsync everysec
 ```
 
-**node-2.conf（192.168.1.11）**：`port 9737`、`dir /data/node-2`、`cluster-announce-port 9737`、`cluster-announce-bus-port 19737`、`appendfilename "appendonly-2.aof"`。
+**node-2.conf（192.168.1.11）**：`port 9737`、`dir /data/node-2`、`cluster-announce-port 9737`、`cluster-announce-bus-port 19737`、`aof-filename "appendonly-2.aof"`。
 
 **node-3.conf（192.168.1.12）**：同上，`port 9738`、总线端口 `19738`。
 
