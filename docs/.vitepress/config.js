@@ -107,6 +107,7 @@ export default defineConfig({
           items: [
             { text: '安装部署', link: '/deployment/installation' },
             { text: '配置指南', link: '/deployment/configuration' },
+            { text: '集群部署', link: '/deployment/cluster-setup' },
             { text: '监控维护', link: '/deployment/monitoring' },
             { text: '故障排查', link: '/deployment/troubleshooting' }
           ]
