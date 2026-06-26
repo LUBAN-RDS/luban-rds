@@ -901,8 +901,8 @@ redis-cli -h localhost -p 9736 INFO persistence | grep -E "rdb_|aof_"
 |--------|--------|--------|------|
 | `LUBAN_RDS_CLUSTER_ANNOUNCE_IP` | cluster-announce-ip | "" | 对外公告 IP |
 | `LUBAN_RDS_CLUSTER_ANNOUNCE_PORT` | cluster-announce-port | "" | 对外公告服务端口 |
-| `LUBAN_RDS_CLUSTER_ANNOUNCE_BUS_PORT` | cluster-announce-bus-port | "" | 对外公告总线端口（默认 = 服务端口 + 10000） |
-| `LUBAN_RDS_CLUSTER_BUS_PORT` | cluster-announce-bus-port | (port + 10000) | 直接设置总线端口，等价于 cluster-announce-bus-port |
+| `LUBAN_RDS_CLUSTER_ANNOUNCE_BUS_PORT` | cluster-announce-bus-port | "" | 对外公告总线端口（空表示使用默认值 = 服务端口 + 10000） |
+| `LUBAN_RDS_CLUSTER_BUS_PORT` | cluster-bus-port | (port + 10000) | 直接设置总线端口（等价于 cluster-announce-bus-port 别名） |
 
 #### Gossip
 
