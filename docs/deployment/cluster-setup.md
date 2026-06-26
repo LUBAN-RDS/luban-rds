@@ -239,7 +239,7 @@ Lettuce、Redisson 同样原生支持，详细参见 [功能架构 17.7](../arch
 
 - **健康重启**：节点重启后自动重新加入集群
 - **磁盘损坏**：删除 `nodes.conf` 后重启会以新节点 ID 启动，需 `CLUSTER MEET` 与 `CLUSTER NODES` 重新加入
-- **脑裂恢复**：多数派节点选举新纪元（`configEpoch`），少数派重启后被 `FORGET` 重新加入
+- **脑裂恢复**：多数派节点选举新纪元（`config-epoch`），少数派重启后被 `FORGET` 重新加入
 
 ### 8.4 跨机房部署
 
