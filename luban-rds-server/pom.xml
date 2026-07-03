@@ -107,6 +107,13 @@
             <version>5.9.3</version>
             <scope>test</scope>
         </dependency>
+        <!-- JUnit Vintage Engine: 兼容 JUnit 4 测试与 JUnit 5 测试共存 -->
+        <dependency>
+            <groupId>org.junit.vintage</groupId>
+            <artifactId>junit-vintage-engine</artifactId>
+            <version>5.9.3</version>
+            <scope>test</scope>
+        </dependency>
         <!-- Serialization Support -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>

@@ -12,6 +12,7 @@ import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
 import com.janeluo.luban.rds.core.slowlog.SlowLogManager;
 import com.janeluo.luban.rds.protocol.Command;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
+import com.janeluo.luban.rds.cluster.handler.ClusterCommandHandler;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.slot.SlotManager;
 import com.janeluo.luban.rds.cluster.slot.SlotUtils;
@@ -185,6 +186,9 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     // 复制模式相关字段
     private com.janeluo.luban.rds.replication.handler.ReplicationCommandHandler replicationCommandHandler;
     
+    // 集群命令处理器
+    private ClusterCommandHandler clusterCommandHandler;
+    
     public RedisServerHandler(MemoryStore memoryStore, DefaultCommandHandler commandHandler, RedisProtocolParser protocolParser) {
         this(memoryStore, commandHandler, protocolParser, 0, false, null, null);
     }
@@ -230,6 +234,13 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     public void setReplicationCommandHandler(
             com.janeluo.luban.rds.replication.handler.ReplicationCommandHandler handler) {
         this.replicationCommandHandler = handler;
+    }
+    
+    /**
+     * 设置集群命令处理器
+     */
+    public void setClusterCommandHandler(ClusterCommandHandler handler) {
+        this.clusterCommandHandler = handler;
     }
     
     @Override
@@ -532,6 +543,29 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     ctx.writeAndFlush(responseBuffer);
                 } else if (responseBuffer != null) {
                     responseBuffer.release();
+                }
+                return;
+            } else if ("CLUSTER".equals(commandName)) {
+                // 处理 CLUSTER 命令
+                logger.debug("Handling CLUSTER command");
+                if (clusterCommandHandler != null) {
+                    String[] subArgs = java.util.Arrays.copyOfRange(args, 1, args.length);
+                    String response = clusterCommandHandler.handle(subArgs);
+                    if (response != null) {
+                        ByteBuf responseBuffer = protocolParser.serialize(response);
+                        if (responseBuffer != null && responseBuffer.isReadable()) {
+                            ctx.writeAndFlush(responseBuffer);
+                        } else if (responseBuffer != null) {
+                            responseBuffer.release();
+                        }
+                    }
+                } else {
+                    ByteBuf errorBuffer = protocolParser.serialize("-ERR cluster command not configured\r\n");
+                    if (errorBuffer != null && errorBuffer.isReadable()) {
+                        ctx.writeAndFlush(errorBuffer);
+                    } else if (errorBuffer != null) {
+                        errorBuffer.release();
+                    }
                 }
                 return;
             }
