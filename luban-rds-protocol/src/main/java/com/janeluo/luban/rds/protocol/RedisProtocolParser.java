@@ -475,7 +475,7 @@ public class RedisProtocolParser {
                 buffer.writeBytes(bytes);
                 return buffer;
             }
-            if (str.startsWith("ERR")) {
+            if (isErrorResponse(str)) {
                 return serializeError(str, allocator);
             }
             return serializeBulkString(str, allocator);
@@ -651,6 +651,9 @@ if (response instanceof List) {
                 buffer.writeBytes(bytes);
                 return buffer;
             }
+            if (isErrorResponse(str)) {
+                return serializeError(str, allocator);
+            }
             return serializeBulkString(str, allocator);
         }
 
@@ -763,5 +766,20 @@ if (response instanceof List) {
         sb.setLength(0);
         sb.append(value);
         return sb.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 判断字符串是否为 Redis 错误响应前缀
+     * <p>
+     * 这些是 Redis 协议中标准的错误消息前缀，需要序列化为 RESP Error 类型（-）而非 Bulk String。
+     * </p>
+     */
+    private static boolean isErrorResponse(String str) {
+        return str.startsWith("ERR") || str.startsWith("WRONGTYPE") 
+                || str.startsWith("MOVED") || str.startsWith("ASK") 
+                || str.startsWith("CROSSSLOT") || str.startsWith("CLUSTERDOWN")
+                || str.startsWith("BUSY") || str.startsWith("NOSCRIPT")
+                || str.startsWith("LOADING") || str.startsWith("MASTERDOWN")
+                || str.startsWith("READONLY") || str.startsWith("NOAUTH");
     }
 }

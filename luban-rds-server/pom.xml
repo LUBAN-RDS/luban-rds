@@ -114,6 +114,13 @@
             <version>5.9.3</version>
             <scope>test</scope>
         </dependency>
+        <!-- luban-rds-client: 测试中使用 NettyRedisClient -->
+        <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-client</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
         <!-- Serialization Support -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -145,6 +152,19 @@
                     <source>${maven.compiler.source}</source>
                     <target>${maven.compiler.target}</target>
                 </configuration>
+            </plugin>
+            <!-- 生成 test-jar 供其他模块复用测试基础设施（如 TestCluster） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>test-jar</id>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

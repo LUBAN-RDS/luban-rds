@@ -5,6 +5,7 @@ import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.node.ClusterLink;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
+import io.netty.channel.ChannelFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -280,10 +281,16 @@ public class GossipProtocol {
         logger.info("发送 MEET 消息: target={}:{}", ip, port);
 
         if (busClient != null) {
-            // 先连接再发送
-            String tempNodeId = "temp_" + System.currentTimeMillis();
-            busClient.connect(tempNodeId, ip, port);
-            // 稍后发送消息（实际实现需要等待连接建立）
+            // 先连接目标节点，连接成功后发送 MEET 消息
+            String tempNodeId = "meet_" + myNode.getNodeId() + "_" + System.currentTimeMillis();
+            ChannelFuture connectFuture = busClient.connect(tempNodeId, ip, port);
+            connectFuture.addListener((ChannelFuture future) -> {
+                if (future.isSuccess()) {
+                    busClient.send(tempNodeId, meet);
+                } else {
+                    logger.error("发送 MEET 消息失败: 无法连接到 {}:{}", ip, port, future.cause());
+                }
+            });
         }
     }
 

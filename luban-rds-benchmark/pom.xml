@@ -53,6 +53,30 @@
             <version>4.5.1</version>
             <scope>test</scope>
         </dependency>
+
+        <!-- Luban-RDS modules -->
+        <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-server</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <!-- 复用 luban-rds-server 测试基础设施（TestCluster / TestNode） -->
+        <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-server</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+        </dependency>
+        <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-cluster</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-client</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
 
     <build>

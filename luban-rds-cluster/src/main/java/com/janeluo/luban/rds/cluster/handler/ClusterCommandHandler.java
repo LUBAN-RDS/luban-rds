@@ -551,6 +551,9 @@ public class ClusterCommandHandler {
             // 增加配置纪元
             clusterConfig.incrementEpoch();
 
+            // 更新集群状态（槽位分配可能使集群变为健康）
+            stateManager.updateClusterState();
+
             logger.info("CLUSTER ADDSLOTS: added {} slots", slots.length);
             return "+OK\r\n";
         } catch (Exception e) {
