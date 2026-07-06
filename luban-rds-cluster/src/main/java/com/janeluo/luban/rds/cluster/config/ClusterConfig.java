@@ -262,6 +262,50 @@ public class ClusterConfig implements Serializable {
     }
 
     /**
+     * 基于配置纪元比较，批量同步某节点的槽位归属
+     * <p>
+     * 用于 Gossip 收到对端/第三方节点槽位信息时的同步。仅当本地 slot 无 owner，
+     * 或本地 owner 的配置纪元严格小于提供方的配置纪元时才覆盖，避免循环抢占。
+     * 相等纪元不覆盖，保证 ADDSLOTS/REPLICATE 后 incrementEpoch 的新配置优先。
+     * </p>
+     *
+     * @param nodeId      节点ID
+     * @param slots       该节点拥有的槽位集合
+     * @param configEpoch 该节点的配置纪元（用于冲突裁决）
+     */
+    public void syncSlotsFromNode(String nodeId, BitSet slots, long configEpoch) {
+        if (nodeId == null || slots == null) {
+            return;
+        }
+        ClusterNode node = nodes.get(nodeId);
+        if (node == null) {
+            return;
+        }
+        for (int s = slots.nextSetBit(0); s >= 0; s = slots.nextSetBit(s + 1)) {
+            String curOwner = slotAssignment[s];
+            if (curOwner == null) {
+                setSlotOwner(s, nodeId);
+            } else if (curOwner.equals(nodeId)) {
+                // 已归属该节点，确保 ClusterNode.slots 一致
+                node.addSlot(s);
+            } else {
+                ClusterNode curOwnerNode = nodes.get(curOwner);
+                long curEpoch = curOwnerNode != null ? curOwnerNode.getConfigEpoch() : 0;
+                if (configEpoch > curEpoch) {
+                    // 抢占前先清理旧 owner 的 slot 记录，避免残留
+                    if (curOwnerNode != null) {
+                        curOwnerNode.removeSlot(s);
+                    }
+                    setSlotOwner(s, nodeId);
+                }
+            }
+            if (s == Integer.MAX_VALUE) {
+                break;
+            }
+        }
+    }
+
+    /**
      * 获取槽位的负责节点ID
      *
      * @param slot 槽位号（0-16383）

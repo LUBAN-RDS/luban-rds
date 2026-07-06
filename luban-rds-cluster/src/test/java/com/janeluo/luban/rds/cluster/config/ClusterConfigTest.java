@@ -245,4 +245,99 @@ public class ClusterConfigTest {
 
         assertEquals(2, config.getAllNodes().size());
     }
+
+    @Test
+    public void testSyncSlotsFromNodeAssignsUnownedSlots() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        config.addNode(node1);
+
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(0);
+        slots.set(5460);
+        slots.set(16383);
+
+        config.syncSlotsFromNode(nodeId1, slots, 1L);
+
+        assertEquals(nodeId1, config.getSlotOwner(0));
+        assertEquals(nodeId1, config.getSlotOwner(5460));
+        assertEquals(nodeId1, config.getSlotOwner(16383));
+        assertEquals(3, config.getAssignedSlotCount());
+        assertTrue(node1.hasSlot(0));
+        assertTrue(node1.hasSlot(16383));
+    }
+
+    @Test
+    public void testSyncSlotsFromNodeHigherEpochOverrides() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        node1.setConfigEpoch(1L);
+        config.addNode(node1);
+        config.setSlotOwner(100, nodeId1);
+
+        ClusterNode node2 = new ClusterNode(nodeId2);
+        config.addNode(node2);
+
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(100);
+
+        // node2 纪元更大，应抢占 slot 100
+        config.syncSlotsFromNode(nodeId2, slots, 5L);
+
+        assertEquals(nodeId2, config.getSlotOwner(100));
+        assertFalse(node1.hasSlot(100));
+        assertTrue(node2.hasSlot(100));
+    }
+
+    @Test
+    public void testSyncSlotsFromNodeEqualEpochDoesNotOverride() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        node1.setConfigEpoch(5L);
+        config.addNode(node1);
+        config.setSlotOwner(100, nodeId1);
+
+        ClusterNode node2 = new ClusterNode(nodeId2);
+        node2.setConfigEpoch(5L);
+        config.addNode(node2);
+
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(100);
+
+        // 纪元相等，不抢占
+        config.syncSlotsFromNode(nodeId2, slots, 5L);
+
+        assertEquals(nodeId1, config.getSlotOwner(100));
+    }
+
+    @Test
+    public void testSyncSlotsFromNodeLowerEpochDoesNotOverride() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        node1.setConfigEpoch(10L);
+        config.addNode(node1);
+        config.setSlotOwner(100, nodeId1);
+
+        ClusterNode node2 = new ClusterNode(nodeId2);
+        node2.setConfigEpoch(2L);
+        config.addNode(node2);
+
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(100);
+
+        // node2 纪元更低，不抢占
+        config.syncSlotsFromNode(nodeId2, slots, 2L);
+
+        assertEquals(nodeId1, config.getSlotOwner(100));
+    }
+
+    @Test
+    public void testSyncSlotsFromNodeNullArgs() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        config.addNode(node1);
+
+        // null slots 不应抛异常
+        config.syncSlotsFromNode(nodeId1, null, 1L);
+        // 未知 nodeId 不应抛异常
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(0);
+        config.syncSlotsFromNode("unknown", slots, 1L);
+        assertEquals(0, config.getAssignedSlotCount());
+    }
 }

@@ -1,15 +1,31 @@
 package com.janeluo.luban.rds.cluster.gossip;
 
+import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelPromise;
+import io.netty.channel.DefaultChannelPromise;
+import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * GossipProtocol 单元测试
@@ -146,6 +162,148 @@ class GossipProtocolTest {
         for (GossipNodeInfo info : gossipNodes) {
             assertNotEquals(myNode.getNodeId(), info.getNodeId());
         }
+    }
+
+    @Test
+    @DisplayName("通过 Gossip 发现新节点后应主动发起 connect 与 MEET")
+    void testGossipDiscoveryTriggersMeet() {
+        // 使用 mock 的总线客户端
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        ChannelPromise succeededPromise = new DefaultChannelPromise(channel);
+        succeededPromise.trySuccess();
+        when(mockBusClient.isConnected(anyString())).thenReturn(false);
+        when(mockBusClient.connect(anyString(), anyString(), anyInt())).thenReturn(succeededPromise);
+
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+
+        // 构造一个已知发送方节点（PONG 的发送方），使 updateNodeFromPongMessage 能找到它
+        ClusterNode senderNode = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        senderNode.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(senderNode);
+
+        // 构造 PONG 携带的 Gossip 节点信息：一个本节点未知的第三层节点
+        String discoveredNodeId = "cccccccccccccccccccccccccccccccccccccccc";
+        GossipNodeInfo discoveredInfo = new GossipNodeInfo(discoveredNodeId);
+        discoveredInfo.setIp("127.0.0.1");
+        discoveredInfo.setPort(6381);
+        discoveredInfo.setBusPort(16381);
+        Set<ClusterNodeState> flags = EnumSet.of(ClusterNodeState.MASTER);
+        discoveredInfo.setFlags(flags);
+
+        List<GossipNodeInfo> gossipSection = new ArrayList<>();
+        gossipSection.add(discoveredInfo);
+
+        PongMessage pong = new PongMessage(senderNode.getNodeId(), System.currentTimeMillis());
+        for (GossipNodeInfo info : gossipSection) {
+            pong.addGossipNode(info);
+        }
+
+        protocol.handlePong(pong);
+
+        // 验证：新节点已加入本地配置（HANDSHAKE 状态）
+        ClusterNode discovered = clusterConfig.getNode(discoveredNodeId);
+        assertNotNull(discovered, "通过 Gossip 发现的节点应被加入本地配置");
+        assertTrue(discovered.hasState(ClusterNodeState.HANDSHAKE), "新发现节点应处于 HANDSHAKE 状态");
+
+        // 验证：已对该节点发起 connect（以真实 nodeId）
+        verify(mockBusClient, atLeastOnce()).connect(eq(discoveredNodeId), eq("127.0.0.1"), eq(6381));
+        // 验证：连接成功后发送了 MEET（任意 MeetMessage）
+        verify(mockBusClient, atLeastOnce()).send(eq(discoveredNodeId), any(MeetMessage.class));
+    }
+
+    @Test
+    @DisplayName("已连接的 Gossip 发现节点不应重复发起 MEET")
+    void testGossipDiscoverySkipsWhenConnected() {
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        when(mockBusClient.isConnected(anyString())).thenReturn(true);
+
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+
+        ClusterNode senderNode = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        senderNode.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(senderNode);
+
+        String discoveredNodeId = "cccccccccccccccccccccccccccccccccccccccc";
+        GossipNodeInfo discoveredInfo = new GossipNodeInfo(discoveredNodeId);
+        discoveredInfo.setIp("127.0.0.1");
+        discoveredInfo.setPort(6381);
+        discoveredInfo.setBusPort(16381);
+        discoveredInfo.setFlags(EnumSet.of(ClusterNodeState.MASTER));
+
+        PongMessage pong = new PongMessage(senderNode.getNodeId(), System.currentTimeMillis());
+        pong.addGossipNode(discoveredInfo);
+
+        protocol.handlePong(pong);
+
+        // 节点仍被加入配置
+        assertNotNull(clusterConfig.getNode(discoveredNodeId));
+        // 但因 isConnected 返回 true，不应再次 connect
+        verify(mockBusClient, org.mockito.Mockito.never())
+                .connect(anyString(), anyString(), anyInt());
+    }
+
+    @Test
+    @DisplayName("PONG 携带 senderSlots 时本地应同步发送方槽位归属")
+    void testSenderSlotsSyncOnPong() {
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+
+        // 发送方节点 B，拥有 slot 5461-10922
+        ClusterNode senderNode = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        senderNode.addState(ClusterNodeState.MASTER);
+        senderNode.setConfigEpoch(2L);
+        clusterConfig.addNode(senderNode);
+
+        java.util.BitSet senderSlots = new java.util.BitSet();
+        senderSlots.set(5461, 10923); // 5461-10922
+        senderNode.setSlots(senderSlots);
+
+        PongMessage pong = new PongMessage(senderNode.getNodeId(), System.currentTimeMillis());
+        pong.setSenderSlots(senderSlots);
+
+        protocol.handlePong(pong);
+
+        // 本节点 A 应把 slot 5461-10922 归属设为 B
+        assertEquals(senderNode.getNodeId(), clusterConfig.getSlotOwner(5461));
+        assertEquals(senderNode.getNodeId(), clusterConfig.getSlotOwner(10922));
+        assertNull(clusterConfig.getSlotOwner(0));
+    }
+
+    @Test
+    @DisplayName("Gossip section 中第三方节点 slots 应被同步")
+    void testGossipSectionSlotsSync() {
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        when(mockBusClient.isConnected(anyString())).thenReturn(true);
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+
+        // 发送方节点 B
+        ClusterNode senderNode = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        senderNode.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(senderNode);
+
+        // 第三方节点 C（gossip 携带），拥有 slot 10923-16383
+        String nodeCId = "cccccccccccccccccccccccccccccccccccccccc";
+        GossipNodeInfo nodeCInfo = new GossipNodeInfo(nodeCId);
+        nodeCInfo.setIp("127.0.0.1");
+        nodeCInfo.setPort(6381);
+        nodeCInfo.setBusPort(16381);
+        nodeCInfo.setConfigEpoch(3L);
+        nodeCInfo.setFlags(EnumSet.of(ClusterNodeState.MASTER));
+        java.util.BitSet nodeCSlots = new java.util.BitSet();
+        nodeCSlots.set(10923, 16384); // 10923-16383
+        nodeCInfo.setSlots(nodeCSlots);
+
+        PongMessage pong = new PongMessage(senderNode.getNodeId(), System.currentTimeMillis());
+        pong.addGossipNode(nodeCInfo);
+
+        protocol.handlePong(pong);
+
+        // C 被加入配置，且 slot 10923-16383 归属设为 C
+        ClusterNode nodeC = clusterConfig.getNode(nodeCId);
+        assertNotNull(nodeC);
+        assertEquals(nodeCId, clusterConfig.getSlotOwner(10923));
+        assertEquals(nodeCId, clusterConfig.getSlotOwner(16383));
     }
 
     @Test

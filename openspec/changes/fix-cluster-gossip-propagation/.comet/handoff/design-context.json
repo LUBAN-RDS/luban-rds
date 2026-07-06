@@ -1,0 +1,15 @@
+{
+  "change": "fix-cluster-gossip-propagation",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "96f547ddc74090c976f248266f8a18f234207be65959c97bb165520980fea2ee",
+  "files": [
+    { "path": "openspec/changes/fix-cluster-gossip-propagation/proposal.md", "sha256": "f1733df3c15b85050e316b9b783a33e958f539895847b701bbb48d4cdbeb0947" },
+    { "path": "openspec/changes/fix-cluster-gossip-propagation/design.md", "sha256": "07497bf129ddcd29e150ccf89251bfe431c93ccb579058ec0d1c0f3ae7ae720d" },
+    { "path": "openspec/changes/fix-cluster-gossip-propagation/tasks.md", "sha256": "981f2384287de154de5c11de7869b3336c362d97e292d72687380a935270b8c2" },
+    { "path": "openspec/changes/fix-cluster-gossip-propagation/specs/cluster-commands/spec.md", "sha256": "d7c47df6751818571db6ea4122bf6a21abc1a01ae9a87434aabe8818a67c5a24" },
+    { "path": "openspec/changes/fix-cluster-gossip-propagation/specs/cluster-gossip/spec.md", "sha256": "31f2ab87f352b9eef1a50eb011342958eaaffd49e3e3ee7add16e30665def806" }
+  ]
+}

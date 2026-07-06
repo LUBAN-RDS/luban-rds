@@ -82,16 +82,38 @@ public class GossipTask implements Runnable {
 
     /**
      * 发送心跳到随机选择的节点
+     * <p>
+     * 对于处于 HANDSHAKE 状态的节点，发送 MEET 推动握手完成（对齐 Redis 行为）；
+     * 对于正常节点，随机选择一个发送 PING 心跳。
+     * </p>
      */
     private void sendHeartbeats() {
         Collection<ClusterNode> allNodes = gossipProtocol.getClusterConfig().getAllNodes();
+
+        // 收集 HANDSHAKE 节点：发送 MEET 推动握手完成
+        List<ClusterNode> handshakeNodes = new ArrayList<>();
+        // 收集正常节点（排除本节点、FAIL、HANDSHAKE）：发送 PING 心跳
         List<ClusterNode> candidateNodes = new ArrayList<>();
 
-        // 过滤掉本节点、FAIL状态和HANDSHAKE状态的节点
         for (ClusterNode node : allNodes) {
-            if (!node.isMyself() && !node.isFail() && !node.hasState(ClusterNodeState.HANDSHAKE)) {
+            if (node.isMyself() || node.isFail()) {
+                continue;
+            }
+            if (node.hasState(ClusterNodeState.HANDSHAKE)) {
+                handshakeNodes.add(node);
+            } else {
                 candidateNodes.add(node);
             }
+        }
+
+        // 对 HANDSHAKE 节点发送 MEET 推动握手完成。
+        // 注意：不能调用 sendMeet(ip, port)，因其内部 findNodeByAddress 会因该 HANDSHAKE
+        // 节点已存在而提前返回，导致 MEET 永远不会发出。这里改用 initiateMeetForDiscoveredNode，
+        // 直接以已知真实节点ID建连并发送 MEET。
+        for (ClusterNode handshakeNode : handshakeNodes) {
+            logger.debug("对 HANDSHAKE 节点发送 MEET: nodeId={}, address={}",
+                    handshakeNode.getNodeId(), handshakeNode.getFullAddress());
+            gossipProtocol.initiateMeetForDiscoveredNode(handshakeNode);
         }
 
         if (candidateNodes.isEmpty()) {
