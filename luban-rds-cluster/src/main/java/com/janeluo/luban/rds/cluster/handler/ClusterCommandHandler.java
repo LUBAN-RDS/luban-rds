@@ -172,6 +172,9 @@ public class ClusterCommandHandler {
 
         StringBuilder sb = new StringBuilder();
 
+        // 集群启用标志（ClusterCommandHandler 仅在集群模式下被装配，故恒为 1）
+        sb.append("cluster_enabled:1").append("\r\n");
+
         // 集群状态
         sb.append("cluster_state:").append(stats.getState()).append("\r\n");
 

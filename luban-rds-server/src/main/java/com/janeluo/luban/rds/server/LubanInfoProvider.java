@@ -347,7 +347,7 @@ public class LubanInfoProvider implements InfoProvider {
 
     private Map<String, Object> getClusterInfo() {
         Map<String, Object> info = new HashMap<>();
-        info.put("cluster_enabled", 0);
+        info.put("cluster_enabled", server.isClusterEnabled() ? 1 : 0);
         return info;
     }
 

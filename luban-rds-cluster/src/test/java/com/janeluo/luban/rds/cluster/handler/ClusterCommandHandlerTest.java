@@ -58,6 +58,7 @@ class ClusterCommandHandlerTest {
         String result = handler.handle(new String[]{"INFO"});
 
         assertNotNull(result);
+        assertTrue(result.contains("cluster_enabled:1"));
         assertTrue(result.contains("cluster_state:"));
         assertTrue(result.contains("cluster_slots_assigned:"));
         assertTrue(result.contains("cluster_known_nodes:"));

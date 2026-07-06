@@ -61,10 +61,27 @@ public class LubanInfoProviderTest {
         // assertTrue(!clientsInfo.containsKey("redis_version"));
     }
 
+    @Test
+    public void testClusterInfoDisabled() {
+        server.setClusterEnabled(false);
+        Map<String, Object> clusterInfo = provider.getInfo("cluster");
+        assertNotNull(clusterInfo);
+        assertEquals(0, clusterInfo.get("cluster_enabled"));
+    }
+
+    @Test
+    public void testClusterInfoEnabled() {
+        server.setClusterEnabled(true);
+        Map<String, Object> clusterInfo = provider.getInfo("cluster");
+        assertNotNull(clusterInfo);
+        assertEquals(1, clusterInfo.get("cluster_enabled"));
+    }
+
     // Mock Server
     private static class MockNettyRedisServer extends NettyRedisServer {
         private final MemoryStore memoryStore;
         private final PersistService persistService;
+        private boolean clusterEnabled = false;
 
         public MockNettyRedisServer() {
             super(9736, "rdb", System.getProperty("java.io.tmpdir"), 60, 1); // Use temp dir
@@ -81,10 +98,19 @@ public class LubanInfoProviderTest {
         public PersistService getPersistService() {
             return persistService;
         }
-        
+
         @Override
         public int getPort() {
             return 9736;
+        }
+
+        @Override
+        public boolean isClusterEnabled() {
+            return clusterEnabled;
+        }
+
+        public void setClusterEnabled(boolean clusterEnabled) {
+            this.clusterEnabled = clusterEnabled;
         }
     }
 

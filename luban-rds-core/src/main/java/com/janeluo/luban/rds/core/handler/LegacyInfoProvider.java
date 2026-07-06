@@ -303,6 +303,8 @@ public class LegacyInfoProvider implements InfoProvider {
 
     private Map<String, Object> getClusterInfo() {
         Map<String, Object> info = new HashMap<>();
+        // LegacyInfoProvider 仅作为测试回退使用，不持有 server 引用，无法获取实际集群状态
+        // 生产环境使用 LubanInfoProvider，会输出真实的 cluster_enabled 值
         info.put("cluster_enabled", 0);
         return info;
     }
