@@ -545,7 +545,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     responseBuffer.release();
                 }
                 return;
-            } else if ("CLUSTER".equals(commandName)) {
+            } else if ("CLUSTER".equals(commandName) && clusterEnabled) {
                 // 处理 CLUSTER 命令
                 logger.debug("Handling CLUSTER command");
                 if (clusterCommandHandler != null) {
