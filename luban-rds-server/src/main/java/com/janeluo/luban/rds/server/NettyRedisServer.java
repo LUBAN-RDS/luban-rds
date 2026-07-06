@@ -321,9 +321,12 @@ public class NettyRedisServer implements RedisServer {
                 clusterBusClient, 
                 config.getClusterNodeTimeout());
         
-        // 更新 ClusterBusClient 的 GossipProtocol 引用
-        // 注意：由于构造函数顺序问题，这里需要重新创建或使用 setter
-        // 这里简化处理，GossipProtocol 已经持有正确的引用
+        // 解决构造函数顺序依赖：将 gossipProtocol 注入到 ClusterBusClient，
+        // 确保 ClusterBusClient 创建的 ClusterBusHandler 能正确处理 PONG 等握手响应
+        this.clusterBusClient.setGossipProtocol(gossipProtocol);
+        
+        // 将 clusterStateManager 注入到 GossipProtocol，用于消息计数统计
+        this.gossipProtocol.setClusterStateManager(clusterStateManager);
         
         // 7. 初始化 ClusterCommandHandler
         this.clusterCommandHandler = new ClusterCommandHandler(
@@ -404,6 +407,7 @@ public class NettyRedisServer implements RedisServer {
         ClusterNode myNode = new ClusterNode(nodeId, ip, announcePort, busPort);
         myNode.addState(ClusterNodeState.MYSELF);
         myNode.addState(ClusterNodeState.MASTER);  // 默认为主节点
+        myNode.getLink().setConnected(true);  // 本节点始终为已连接状态
         
         // 添加到集群配置
         clusterConfig.addNode(myNode);

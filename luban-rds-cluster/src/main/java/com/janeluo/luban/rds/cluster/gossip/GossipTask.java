@@ -1,6 +1,7 @@
 package com.janeluo.luban.rds.cluster.gossip;
 
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
+import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,9 +87,9 @@ public class GossipTask implements Runnable {
         Collection<ClusterNode> allNodes = gossipProtocol.getClusterConfig().getAllNodes();
         List<ClusterNode> candidateNodes = new ArrayList<>();
 
-        // 过滤掉本节点和 FAIL 状态的节点
+        // 过滤掉本节点、FAIL状态和HANDSHAKE状态的节点
         for (ClusterNode node : allNodes) {
-            if (!node.isMyself() && !node.isFail()) {
+            if (!node.isMyself() && !node.isFail() && !node.hasState(ClusterNodeState.HANDSHAKE)) {
                 candidateNodes.add(node);
             }
         }

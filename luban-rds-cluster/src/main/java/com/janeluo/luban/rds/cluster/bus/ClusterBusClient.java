@@ -12,6 +12,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.util.AttributeKey;
 import io.netty.handler.codec.serialization.ClassResolvers;
 import io.netty.handler.codec.serialization.ObjectDecoder;
 import io.netty.handler.codec.serialization.ObjectEncoder;
@@ -22,6 +23,7 @@ import java.net.InetSocketAddress;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 集群总线客户端
@@ -32,6 +34,9 @@ import java.util.concurrent.TimeUnit;
 public class ClusterBusClient {
 
     private static final Logger logger = LoggerFactory.getLogger(ClusterBusClient.class);
+
+    static final AttributeKey<AtomicReference<String>> CHANNEL_NODE_ID_KEY =
+            AttributeKey.valueOf("cluster.nodeId");
 
     /**
      * 连接超时时间（毫秒）
@@ -56,7 +61,7 @@ public class ClusterBusClient {
     /**
      * Gossip 协议处理器
      */
-    private final GossipProtocol gossipProtocol;
+    private GossipProtocol gossipProtocol;
 
     /**
      * 客户端是否已关闭
@@ -117,7 +122,10 @@ public class ClusterBusClient {
                         ch.pipeline().addLast(new ObjectEncoder());
                         
                         // 添加业务处理器
-                        ch.pipeline().addLast(new ClusterBusHandler(clusterConfig, gossipProtocol));
+                        // 传入 ClusterBusClient 引用和 nodeId，使处理器能在 MEET 握手完成后
+                        // 将临时节点ID替换为真实节点ID，并更新通道映射
+                        ch.pipeline().addLast(new ClusterBusHandler(clusterConfig, gossipProtocol,
+                                ClusterBusClient.this, nodeId));
                     }
                 });
 
@@ -131,10 +139,14 @@ public class ClusterBusClient {
                 nodeChannels.put(nodeId, channel);
                 logger.info("成功连接节点 {}，地址: {}:{}", nodeId, host, busPort);
 
+                AtomicReference<String> currentNodeId = new AtomicReference<>(nodeId);
+                channel.attr(CHANNEL_NODE_ID_KEY).set(currentNodeId);
+
                 // 添加关闭监听器，连接断开时从映射中移除
                 channel.closeFuture().addListener((closeFuture) -> {
-                    nodeChannels.remove(nodeId, channel);
-                    logger.info("节点 {} 连接已断开", nodeId);
+                    String activeNodeId = currentNodeId.get();
+                    nodeChannels.remove(activeNodeId, channel);
+                    logger.info("节点 {} 连接已断开", activeNodeId);
                 });
             } else {
                 logger.error("连接节点 {} 失败，地址: {}:{}", nodeId, host, busPort, 
@@ -155,6 +167,28 @@ public class ClusterBusClient {
         if (channel != null && channel.isActive()) {
             channel.close();
             logger.info("已断开与节点 {} 的连接", nodeId);
+        }
+    }
+
+    /**
+     * 重命名通道映射的节点ID
+     * <p>
+     * 在 MEET 握手完成时，将临时节点ID替换为真实节点ID，
+     * 使后续 PING/PONG 等消息能通过真实节点ID找到对应通道。
+     * </p>
+     *
+     * @param oldNodeId 旧的临时节点ID
+     * @param newNodeId 真实节点ID
+     */
+    public void renameChannel(String oldNodeId, String newNodeId) {
+        Channel channel = nodeChannels.remove(oldNodeId);
+        if (channel != null) {
+            nodeChannels.put(newNodeId, channel);
+            AtomicReference<String> nodeIdRef = channel.attr(CHANNEL_NODE_ID_KEY).get();
+            if (nodeIdRef != null) {
+                nodeIdRef.set(newNodeId);
+            }
+            logger.info("通道映射已更新: {} -> {}", oldNodeId, newNodeId);
         }
     }
 
@@ -298,6 +332,20 @@ public class ClusterBusClient {
         group.shutdownGracefully(0, 5, TimeUnit.SECONDS);
 
         logger.info("集群总线客户端已关闭");
+    }
+
+    /**
+     * 设置 Gossip 协议处理器
+     * <p>
+     * 用于解决构造函数顺序依赖问题：ClusterBusClient 在 GossipProtocol 之前创建，
+     * 需要在 GossipProtocol 创建后通过此方法注入引用，使 ClusterBusHandler 能正确处理
+     * PING/PONG/MEET 等握手消息。
+     * </p>
+     *
+     * @param gossipProtocol Gossip 协议处理器
+     */
+    public void setGossipProtocol(GossipProtocol gossipProtocol) {
+        this.gossipProtocol = gossipProtocol;
     }
 
     /**

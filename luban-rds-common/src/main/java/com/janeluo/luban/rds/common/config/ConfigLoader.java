@@ -215,6 +215,14 @@ public class ConfigLoader {
                     case "monitor-max-clients":
                         config.setMonitorMaxClients(Integer.parseInt(value));
                         break;
+                    case "maxclients":
+                        config.setMaxclients(Integer.parseInt(value));
+                        break;
+
+                    // 内存池配置
+                    case "leak-detection":
+                        config.setLeakDetection(value);
+                        break;
 
                     // 多线程配置
                     case "io-threads":
@@ -233,6 +241,100 @@ public class ConfigLoader {
                         break;
                     case "memory-frag-threshold":
                         config.setMemoryFragThreshold(Integer.parseInt(value));
+                        break;
+
+                    // 集群配置
+                    case "cluster-enabled":
+                        config.setClusterEnabled("yes".equalsIgnoreCase(value));
+                        break;
+                    case "cluster-config-file":
+                        config.setClusterConfigFile(value);
+                        break;
+                    case "cluster-node-timeout":
+                        config.setClusterNodeTimeout(Long.parseLong(value));
+                        break;
+                    case "cluster-announce-ip":
+                        config.setClusterAnnounceIp(value);
+                        break;
+                    case "cluster-announce-port":
+                        config.setClusterAnnouncePort(Integer.parseInt(value));
+                        break;
+                    case "cluster-announce-bus-port":
+                        config.setClusterAnnounceBusPort(Integer.parseInt(value));
+                        break;
+                    case "cluster-slave-validity-factor":
+                        config.setClusterSlaveValidityFactor(Integer.parseInt(value));
+                        break;
+                    case "cluster-migration-barrier":
+                        config.setClusterMigrationBarrier(Integer.parseInt(value));
+                        break;
+                    case "cluster-require-full-coverage":
+                        config.setClusterRequireFullCoverage("yes".equalsIgnoreCase(value));
+                        break;
+
+                    // 主从复制配置
+                    case "replicaof":
+                    case "slaveof":
+                        config.setReplicaof(value);
+                        break;
+                    case "masterauth":
+                        config.setMasterauth(value);
+                        break;
+                    case "slave-read-only":
+                        config.setSlaveReadOnly("yes".equalsIgnoreCase(value));
+                        break;
+                    case "repl-timeout":
+                        config.setReplTimeout(Integer.parseInt(value));
+                        break;
+                    case "repl-backlog-size":
+                        config.setReplBacklogSize(parseMemorySize(value));
+                        break;
+                    case "repl-backlog-ttl":
+                        config.setReplBacklogTtl(Integer.parseInt(value));
+                        break;
+                    case "repl-ping-slave-period":
+                        config.setReplPingSlavePeriod(Integer.parseInt(value));
+                        break;
+                    case "repl-reconnect-interval":
+                        config.setReplReconnectInterval(Long.parseLong(value));
+                        break;
+                    case "repl-tcp-keepalive":
+                        config.setReplTcpKeepalive(Integer.parseInt(value));
+                        break;
+                    case "repl-disable-tcp-nodelay":
+                        config.setReplDisableTcpNodelay("yes".equalsIgnoreCase(value));
+                        break;
+
+                    // 哨兵配置
+                    case "sentinel-enabled":
+                        config.setSentinelEnabled("yes".equalsIgnoreCase(value));
+                        break;
+                    case "sentinel-port":
+                        config.setSentinelPort(Integer.parseInt(value));
+                        break;
+                    case "sentinel-config-file":
+                        config.setSentinelConfigFile(value);
+                        break;
+                    case "sentinel-monitor":
+                        config.setSentinelMonitor(value);
+                        break;
+                    case "sentinel-down-after-milliseconds":
+                        config.setSentinelDownAfterMilliseconds(Long.parseLong(value));
+                        break;
+                    case "sentinel-failover-timeout":
+                        config.setSentinelFailoverTimeout(Long.parseLong(value));
+                        break;
+                    case "sentinel-parallel-syncs":
+                        config.setSentinelParallelSyncs(Integer.parseInt(value));
+                        break;
+                    case "sentinel-announce-ip":
+                        config.setSentinelAnnounceIp(value);
+                        break;
+                    case "sentinel-announce-port":
+                        config.setSentinelAnnouncePort(Integer.parseInt(value));
+                        break;
+                    case "sentinel-heartbeat-interval":
+                        config.setSentinelHeartbeatInterval(Long.parseLong(value));
                         break;
 
                     // Lua 配置

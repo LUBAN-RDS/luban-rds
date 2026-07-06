@@ -75,6 +75,11 @@ public class FailureDetector {
                 continue;
             }
 
+            // 跳过 HANDSHAKE 状态的节点（握手未完成，不进行故障检测）
+            if (node.hasState(ClusterNodeState.HANDSHAKE)) {
+                continue;
+            }
+
             // 跳过已经标记为 FAIL 的节点
             if (node.isFail()) {
                 continue;

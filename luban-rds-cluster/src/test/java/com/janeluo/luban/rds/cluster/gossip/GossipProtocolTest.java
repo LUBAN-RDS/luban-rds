@@ -97,7 +97,9 @@ class GossipProtocolTest {
         // 验证新节点是否被添加
         ClusterNode newNode = clusterConfig.getNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assertNotNull(newNode);
-        assertTrue(newNode.hasState(ClusterNodeState.HANDSHAKE));
+        // 收到 MEET 后握手完成：HANDSHAKE 被移除，MASTER 被设置
+        assertFalse(newNode.hasState(ClusterNodeState.HANDSHAKE));
+        assertTrue(newNode.isMaster());
     }
 
     @Test

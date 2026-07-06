@@ -1,7 +1,10 @@
 package com.janeluo.luban.rds.cluster.gossip;
 
 import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
+import com.janeluo.luban.rds.cluster.bus.ClusterBusServer;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
+import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
+import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
 import com.janeluo.luban.rds.cluster.node.ClusterLink;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
@@ -74,6 +77,11 @@ public class GossipProtocol {
     private final FailureDetector failureDetector;
 
     /**
+     * 集群状态管理器（用于消息计数统计）
+     */
+    private ClusterStateManager stateManager;
+
+    /**
      * 随机数生成器（ThreadLocal 避免竞争）
      */
     private final ThreadLocal<Random> randomProvider;
@@ -128,6 +136,19 @@ public class GossipProtocol {
         this.started = new AtomicBoolean(false);
         this.lastInteractionTimes = new ConcurrentHashMap<>();
         this.reusableGossipList = ThreadLocal.withInitial(() -> new ArrayList<>(GOSSIP_NODE_COUNT));
+    }
+
+    /**
+     * 设置集群状态管理器（用于消息计数统计）
+     * <p>
+     * 解决构造函数顺序依赖：ClusterStateManager 在 GossipProtocol 之前创建，
+     * 需要在创建后通过此方法注入引用。
+     * </p>
+     *
+     * @param stateManager 集群状态管理器
+     */
+    public void setClusterStateManager(ClusterStateManager stateManager) {
+        this.stateManager = stateManager;
     }
 
     /**
@@ -196,6 +217,9 @@ public class GossipProtocol {
 
         if (busClient != null) {
             busClient.send(node.getNodeId(), ping);
+            if (stateManager != null) {
+                stateManager.incrementMessagesSent(1);
+            }
         }
 
         // 更新最后发送 PING 时间
@@ -211,11 +235,21 @@ public class GossipProtocol {
     public PongMessage handlePing(PingMessage ping) {
         logger.debug("收到 PING 消息: from={}", ping.getSenderNodeId());
 
-        // 更新发送方节点信息
+        if (stateManager != null) {
+            stateManager.incrementMessagesReceived(1);
+        }
+
+        // 更新发送方节点信息（包含握手完成处理）
         updateNodeFromPingMessage(ping);
 
         // 处理 Gossip 信息
         processGossipNodes(ping.getGossipNodes());
+
+        // 更新节点最后通信时间
+        updateNodeLastInteraction(ping.getSenderNodeId());
+
+        // 收到 PING 说明节点存活，清除 FAIL/PFAIL 状态
+        failureDetector.clearNodeFailState(ping.getSenderNodeId());
 
         // 创建 PONG 响应
         ClusterNode myNode = clusterConfig.getMyNode();
@@ -238,6 +272,10 @@ public class GossipProtocol {
     public void handlePong(PongMessage pong) {
         logger.debug("收到 PONG 消息: from={}", pong.getSenderNodeId());
 
+        if (stateManager != null) {
+            stateManager.incrementMessagesReceived(1);
+        }
+
         // 更新发送方节点信息
         updateNodeFromPongMessage(pong);
 
@@ -253,6 +291,10 @@ public class GossipProtocol {
 
     /**
      * 发送 MEET 消息
+     * <p>
+     * 在发送 MEET 消息之前，先将目标节点以临时 ID 添加到本地集群配置中（HANDSHAKE 状态）。
+     * 当目标节点响应 PONG 时，ClusterBusHandler 会将临时 ID 替换为真实节点 ID。
+     * </p>
      *
      * @param ip   目标节点IP
      * @param port 目标节点端口
@@ -263,6 +305,22 @@ public class GossipProtocol {
             logger.warn("无法发送 MEET: 当前节点信息不存在");
             return;
         }
+
+        int targetBusPort = port + ClusterBusServer.BUS_PORT_OFFSET;
+
+        // 检查是否已存在同地址的节点
+        ClusterNode existingNode = findNodeByAddress(ip, port);
+        if (existingNode != null) {
+            logger.info("目标节点已在集群中: address={}:{}, nodeId={}", ip, port, existingNode.getNodeId());
+            return;
+        }
+
+        // 生成临时节点ID（40字符十六进制），用于在 PONG 响应前占位
+        String tempNodeId = ClusterConfigPersister.generateNodeId();
+        ClusterNode targetNode = new ClusterNode(tempNodeId, ip, port, targetBusPort);
+        targetNode.addState(ClusterNodeState.HANDSHAKE);
+        clusterConfig.addNode(targetNode);
+        logger.info("添加目标节点到本地配置（HANDSHAKE）: tempNodeId={}, address={}:{}", tempNodeId, ip, port);
 
         MeetMessage meet = new MeetMessage();
         meet.setSenderNodeId(myNode.getNodeId());
@@ -281,16 +339,59 @@ public class GossipProtocol {
         logger.info("发送 MEET 消息: target={}:{}", ip, port);
 
         if (busClient != null) {
-            // 先连接目标节点，连接成功后发送 MEET 消息
-            String tempNodeId = "meet_" + myNode.getNodeId() + "_" + System.currentTimeMillis();
+            // 连接目标节点，连接成功后发送 MEET 消息
+            // 使用临时节点ID作为通道映射的key，PONG 响应时会替换为真实节点ID
             ChannelFuture connectFuture = busClient.connect(tempNodeId, ip, port);
             connectFuture.addListener((ChannelFuture future) -> {
                 if (future.isSuccess()) {
                     busClient.send(tempNodeId, meet);
+                    if (stateManager != null) {
+                        stateManager.incrementMessagesSent(1);
+                    }
                 } else {
                     logger.error("发送 MEET 消息失败: 无法连接到 {}:{}", ip, port, future.cause());
                 }
             });
+        }
+    }
+
+    /**
+     * 根据IP和端口查找已存在的节点
+     *
+     * @param ip   节点IP
+     * @param port 节点服务端口
+     * @return 匹配的节点，未找到返回 null
+     */
+    private ClusterNode findNodeByAddress(String ip, int port) {
+        for (ClusterNode node : clusterConfig.getAllNodes()) {
+            if (ip.equals(node.getIp()) && port == node.getPort()) {
+                return node;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 移除同地址的 HANDSHAKE 临时节点
+     * <p>
+     * 当通过 MEET/PONG/Gossip 获得节点的真实 ID 时，清理之前通过 sendMeet() 创建的
+     * 临时 HANDSHAKE 节点（如果 MEET 连接失败，临时节点不会被 PONG 解析，需要在此清理）。
+     * </p>
+     *
+     * @param ip           节点IP
+     * @param port         节点服务端口
+     * @param excludeNodeId 排除的节点ID（真实节点的ID，不会被移除）
+     */
+    private void removeHandshakeNodeByAddress(String ip, int port, String excludeNodeId) {
+        for (ClusterNode node : clusterConfig.getAllNodes()) {
+            if (node.hasState(ClusterNodeState.HANDSHAKE)
+                    && !node.getNodeId().equals(excludeNodeId)
+                    && ip.equals(node.getIp())
+                    && port == node.getPort()) {
+                clusterConfig.removeNode(node.getNodeId());
+                logger.info("清理同地址的临时 HANDSHAKE 节点: tempNodeId={}, address={}:{}",
+                        node.getNodeId(), ip, port);
+            }
         }
     }
 
@@ -302,9 +403,16 @@ public class GossipProtocol {
     public void handleMeet(MeetMessage meet) {
         logger.info("收到 MEET 消息: from={}", meet.getSenderNodeId());
 
+        if (stateManager != null) {
+            stateManager.incrementMessagesReceived(1);
+        }
+
         // 检查发送方节点是否已存在
         ClusterNode senderNode = clusterConfig.getNode(meet.getSenderNodeId());
         if (senderNode == null) {
+            // 清理同地址的临时 HANDSHAKE 节点（MEET 连接失败时的残留）
+            removeHandshakeNodeByAddress(meet.getSenderIp(), meet.getSenderPort(), meet.getSenderNodeId());
+
             // 创建新节点并添加到集群
             senderNode = new ClusterNode(
                     meet.getSenderNodeId(),
@@ -316,9 +424,16 @@ public class GossipProtocol {
             clusterConfig.addNode(senderNode);
             logger.info("新节点加入集群: nodeId={}, address={}",
                     meet.getSenderNodeId(), senderNode.getFullAddress());
+
+            // 建立到发送方的出站连接，确保双向 Gossip 通信
+            if (busClient != null && !busClient.isConnected(meet.getSenderNodeId())) {
+                logger.info("建立到 MEET 发送方的出站连接: nodeId={}, address={}:{}",
+                        meet.getSenderNodeId(), meet.getSenderIp(), meet.getSenderPort());
+                busClient.connect(meet.getSenderNodeId(), meet.getSenderIp(), meet.getSenderPort());
+            }
         }
 
-        // 更新节点信息
+        // 更新节点信息（包含握手完成处理）
         updateNodeFromMeetMessage(meet);
 
         // 处理 Gossip 信息
@@ -397,7 +512,7 @@ public class GossipProtocol {
         // 快速过滤：如果节点数少于等于 GOSSIP_NODE_COUNT，直接处理
         if (allNodes.size() <= GOSSIP_NODE_COUNT) {
             for (ClusterNode node : allNodes) {
-                if (!node.isMyself() && !node.isFail()) {
+                if (!node.isMyself() && !node.isFail() && !node.hasState(ClusterNodeState.HANDSHAKE)) {
                     result.add(convertToGossipNodeInfo(node));
                 }
             }
@@ -407,7 +522,7 @@ public class GossipProtocol {
         // 使用数组避免多次遍历
         List<ClusterNode> candidateNodes = new ArrayList<>(allNodes.size());
         for (ClusterNode node : allNodes) {
-            if (!node.isMyself() && !node.isFail()) {
+            if (!node.isMyself() && !node.isFail() && !node.hasState(ClusterNodeState.HANDSHAKE)) {
                 candidateNodes.add(node);
             }
         }
@@ -451,12 +566,19 @@ public class GossipProtocol {
 
     /**
      * 从 PING 消息更新节点信息
+     * <p>
+     * 如果节点处于 HANDSHAKE 状态，收到 PING 表示握手完成，
+     * 移除 HANDSHAKE 标志并添加 MASTER 标志（默认为主节点）。
+     * </p>
      */
     private void updateNodeFromPingMessage(PingMessage ping) {
         String senderNodeId = ping.getSenderNodeId();
         ClusterNode senderNode = clusterConfig.getNode(senderNodeId);
 
         if (senderNode != null) {
+            // 握手完成：移除 HANDSHAKE，设置 MASTER
+            completeHandshake(senderNode);
+
             senderNode.updateLastPongTime();
             ClusterLink link = senderNode.getLink();
             if (link != null) {
@@ -468,18 +590,45 @@ public class GossipProtocol {
 
     /**
      * 从 PONG 消息更新节点信息
+     * <p>
+     * 如果节点处于 HANDSHAKE 状态，收到 PONG 表示握手完成，
+     * 移除 HANDSHAKE 标志并添加 MASTER 标志（默认为主节点）。
+     * </p>
      */
     private void updateNodeFromPongMessage(PongMessage pong) {
         String senderNodeId = pong.getSenderNodeId();
         ClusterNode senderNode = clusterConfig.getNode(senderNodeId);
 
         if (senderNode != null) {
+            // 握手完成：移除 HANDSHAKE，设置 MASTER
+            completeHandshake(senderNode);
+
             senderNode.updateLastPongTime();
             ClusterLink link = senderNode.getLink();
             if (link != null) {
                 link.setConnected(true);
                 link.updateInteractionTime();
             }
+        }
+    }
+
+    /**
+     * 完成握手：移除 HANDSHAKE 状态，设置 MASTER 状态
+     * <p>
+     * 当收到 PING/PONG/MEET 响应时调用，表示节点握手已完成。
+     * 默认将节点设为主节点，如果后续收到 REPLICATE 命令会改为从节点。
+     * </p>
+     *
+     * @param node 要完成握手的节点
+     */
+    private void completeHandshake(ClusterNode node) {
+        if (node.hasState(ClusterNodeState.HANDSHAKE)) {
+            node.removeState(ClusterNodeState.HANDSHAKE);
+            // 默认设为主节点（如果尚未设置 MASTER 或 SLAVE）
+            if (!node.isMaster() && !node.isSlave()) {
+                node.addState(ClusterNodeState.MASTER);
+            }
+            logger.info("握手完成: nodeId={}, address={}", node.getNodeId(), node.getFullAddress());
         }
     }
 
@@ -491,6 +640,9 @@ public class GossipProtocol {
         ClusterNode senderNode = clusterConfig.getNode(senderNodeId);
 
         if (senderNode != null) {
+            // 握手完成：移除 HANDSHAKE，设置 MASTER
+            completeHandshake(senderNode);
+
             senderNode.setConfigEpochIfGreater(meet.getSenderConfigEpoch());
             clusterConfig.setEpochIfGreater(meet.getCurrentEpoch());
             senderNode.updateLastPongTime();
@@ -522,13 +674,28 @@ public class GossipProtocol {
             }
 
             if (node == null) {
-                // 发现新节点
+                ClusterNode existingByAddr = findNodeByAddress(nodeInfo.getIp(), nodeInfo.getPort());
+                if (existingByAddr != null) {
+                    if (existingByAddr.hasState(ClusterNodeState.HANDSHAKE)
+                            && !existingByAddr.getNodeId().equals(nodeId)) {
+                        clusterConfig.removeNode(existingByAddr.getNodeId());
+                        logger.info("清理同地址的临时 HANDSHAKE 节点: tempNodeId={}, realNodeId={}, address={}:{}",
+                                existingByAddr.getNodeId(), nodeId, nodeInfo.getIp(), nodeInfo.getPort());
+                    } else {
+                        logger.debug("已存在同地址节点，跳过 Gossip 发现的节点: existingId={}, gossipId={}, address={}:{}",
+                                existingByAddr.getNodeId(), nodeId, nodeInfo.getIp(), nodeInfo.getPort());
+                        continue;
+                    }
+                }
+
+                // 发现新节点，初始标记为 HANDSHAKE
                 node = new ClusterNode(
                         nodeId,
                         nodeInfo.getIp(),
                         nodeInfo.getPort(),
                         nodeInfo.getBusPort()
                 );
+                node.addState(ClusterNodeState.HANDSHAKE);
                 clusterConfig.addNode(node);
                 logger.info("通过 Gossip 发现新节点: nodeId={}, address={}",
                         nodeId, node.getFullAddress());

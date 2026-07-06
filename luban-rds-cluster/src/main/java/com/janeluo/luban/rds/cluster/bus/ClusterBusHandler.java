@@ -8,6 +8,7 @@ import com.janeluo.luban.rds.cluster.gossip.MeetMessage;
 import com.janeluo.luban.rds.cluster.gossip.PingMessage;
 import com.janeluo.luban.rds.cluster.gossip.PongMessage;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
+import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import org.slf4j.Logger;
@@ -36,19 +37,49 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
     private final GossipProtocol gossipProtocol;
 
     /**
+     * 集群总线客户端引用（仅出站连接的处理器有值，用于 MEET 握手后更新通道映射）
+     */
+    private final ClusterBusClient busClient;
+
+    /**
+     * 期望的节点ID（出站连接时为临时节点ID，收到 PONG 后替换为真实节点ID）
+     */
+    private final String expectedNodeId;
+
+    /**
      * 远程节点ID（连接建立后设置）
      */
     private String remoteNodeId;
 
     /**
-     * 构造方法
+     * 临时节点ID是否已解析为真实节点ID
+     */
+    private volatile boolean tempIdResolved;
+
+    /**
+     * 构造方法（用于 ClusterBusServer 的入站连接）
      *
      * @param clusterConfig   集群配置
      * @param gossipProtocol  Gossip 协议处理器
      */
     public ClusterBusHandler(ClusterConfig clusterConfig, GossipProtocol gossipProtocol) {
+        this(clusterConfig, gossipProtocol, null, null);
+    }
+
+    /**
+     * 完整构造方法（用于 ClusterBusClient 的出站连接）
+     *
+     * @param clusterConfig   集群配置
+     * @param gossipProtocol  Gossip 协议处理器
+     * @param busClient       集群总线客户端（可为 null）
+     * @param expectedNodeId  期望的节点ID（临时ID，可为 null）
+     */
+    public ClusterBusHandler(ClusterConfig clusterConfig, GossipProtocol gossipProtocol,
+                             ClusterBusClient busClient, String expectedNodeId) {
         this.clusterConfig = clusterConfig;
         this.gossipProtocol = gossipProtocol;
+        this.busClient = busClient;
+        this.expectedNodeId = expectedNodeId;
     }
 
     /**
@@ -104,6 +135,13 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
 
         logger.debug("收到 Gossip 消息: {}", message);
 
+        // MEET 握手响应处理：将临时节点ID替换为真实节点ID（仅执行一次）
+        if (busClient != null && expectedNodeId != null && remoteNodeId != null
+                && !expectedNodeId.equals(remoteNodeId) && !tempIdResolved) {
+            tempIdResolved = true;
+            resolveTempNodeId(remoteNodeId);
+        }
+
         try {
             // 根据消息类型分发处理
             GossipMessage response = handleMessage(message);
@@ -115,6 +153,51 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
         } catch (Exception e) {
             logger.error("处理 Gossip 消息失败: {}", message, e);
         }
+    }
+
+    /**
+     * 将临时节点ID替换为真实节点ID
+     * <p>
+     * 在 CLUSTER MEET 流程中，发送方用临时ID在本地配置中占位。
+     * 当收到目标节点的 PONG 响应时，通过此方法将临时ID替换为真实节点ID，
+     * 并更新 ClusterBusClient 的通道映射。
+     * </p>
+     *
+     * @param realNodeId 真实节点ID
+     */
+    private void resolveTempNodeId(String realNodeId) {
+        ClusterNode tempNode = clusterConfig.getNode(expectedNodeId);
+        if (tempNode == null) {
+            // 临时节点不存在，可能已被解析
+            return;
+        }
+
+        // 如果真实节点已存在，移除临时节点即可
+        if (clusterConfig.getNode(realNodeId) != null) {
+            clusterConfig.removeNode(expectedNodeId);
+            busClient.renameChannel(expectedNodeId, realNodeId);
+            logger.info("节点ID解析完成（真实节点已存在）: tempId={} -> realId={}", expectedNodeId, realNodeId);
+            return;
+        }
+
+        // 创建真实节点，复制临时节点的地址信息
+        ClusterNode realNode = new ClusterNode(
+                realNodeId,
+                tempNode.getIp(),
+                tempNode.getPort(),
+                tempNode.getBusPort()
+        );
+        realNode.addState(ClusterNodeState.HANDSHAKE);
+
+        // 移除临时节点，添加真实节点
+        clusterConfig.removeNode(expectedNodeId);
+        clusterConfig.addNode(realNode);
+
+        // 更新通道映射
+        busClient.renameChannel(expectedNodeId, realNodeId);
+
+        logger.info("节点ID解析完成: tempId={} -> realId={}, address={}",
+                expectedNodeId, realNodeId, realNode.getFullAddress());
     }
 
     /**

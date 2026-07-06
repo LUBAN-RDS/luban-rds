@@ -79,14 +79,19 @@ public class ClusterConfigPersister {
             writer.newLine();
             writer.newLine();
 
-            // 写入每个节点
+            // 写入每个节点（跳过 HANDSHAKE 和 NOADDR 状态的临时节点）
+            int savedCount = 0;
             for (ClusterNode node : config.getAllNodes()) {
+                if (node.hasState(ClusterNodeState.HANDSHAKE) || node.hasState(ClusterNodeState.NOADDR)) {
+                    continue;
+                }
                 String line = formatNodeLine(node, config.getMyNodeId());
                 writer.write(line);
                 writer.newLine();
+                savedCount++;
             }
 
-            logger.info("集群配置保存成功，节点数: {}", config.getNodeCount());
+            logger.info("集群配置保存成功，节点数: {}", savedCount);
         }
     }
 
@@ -136,6 +141,12 @@ public class ClusterConfigPersister {
                 try {
                     ClusterNode node = parseNodeLine(line);
                     if (node != null) {
+                        if (node.hasState(ClusterNodeState.HANDSHAKE)
+                                || node.hasState(ClusterNodeState.NOADDR)) {
+                            logger.debug("跳过加载临时节点: {}", node.getNodeId());
+                            continue;
+                        }
+
                         config.addNode(node);
                         
                         // 如果是 myself 节点，设置 myNodeId
