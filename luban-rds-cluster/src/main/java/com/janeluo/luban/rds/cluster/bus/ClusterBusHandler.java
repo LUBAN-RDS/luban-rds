@@ -133,7 +133,9 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
         GossipMessage message = (GossipMessage) msg;
         remoteNodeId = message.getSenderNodeId();
 
-        logger.debug("收到 Gossip 消息: {}", message);
+        if (logger.isTraceEnabled()) {
+            logger.trace("收到 Gossip 消息: {}", message);
+        }
 
         // MEET 握手响应处理：将临时节点ID替换为真实节点ID（仅执行一次）
         if (busClient != null && expectedNodeId != null && remoteNodeId != null
@@ -254,7 +256,9 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
      * @param pong PONG 消息
      */
     private void handlePong(PongMessage pong) {
-        logger.debug("收到 PONG 消息，来自节点: {}", pong.getSenderNodeId());
+        if (logger.isTraceEnabled()) {
+            logger.trace("收到 PONG 消息，来自节点: {}", pong.getSenderNodeId());
+        }
 
         if (gossipProtocol != null) {
             gossipProtocol.handlePong(pong);

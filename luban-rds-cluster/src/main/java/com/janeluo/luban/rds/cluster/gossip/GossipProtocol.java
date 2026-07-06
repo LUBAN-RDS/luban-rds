@@ -215,7 +215,9 @@ public class GossipProtocol {
             ping.addGossipNode(gossipNode);
         }
 
-        logger.debug("发送 PING 到节点: {}, gossipCount={}", node.getNodeId(), gossipNodes.size());
+        if (logger.isTraceEnabled()) {
+            logger.trace("发送 PING 到节点: {}, gossipCount={}", node.getNodeId(), gossipNodes.size());
+        }
 
         if (busClient != null) {
             busClient.send(node.getNodeId(), ping);
@@ -235,7 +237,9 @@ public class GossipProtocol {
      * @return PONG 响应消息
      */
     public PongMessage handlePing(PingMessage ping) {
-        logger.debug("收到 PING 消息: from={}", ping.getSenderNodeId());
+        if (logger.isTraceEnabled()) {
+            logger.trace("收到 PING 消息: from={}", ping.getSenderNodeId());
+        }
 
         if (stateManager != null) {
             stateManager.incrementMessagesReceived(1);
@@ -274,7 +278,9 @@ public class GossipProtocol {
      * @param pong 收到的 PONG 消息
      */
     public void handlePong(PongMessage pong) {
-        logger.debug("收到 PONG 消息: from={}", pong.getSenderNodeId());
+        if (logger.isTraceEnabled()) {
+            logger.trace("收到 PONG 消息: from={}", pong.getSenderNodeId());
+        }
 
         if (stateManager != null) {
             stateManager.incrementMessagesReceived(1);

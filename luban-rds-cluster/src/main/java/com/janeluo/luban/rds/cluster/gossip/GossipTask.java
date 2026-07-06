@@ -128,7 +128,9 @@ public class GossipTask implements Runnable {
             int index = random.nextInt(candidateNodes.size());
             ClusterNode targetNode = candidateNodes.get(index);
 
-            logger.debug("发送心跳到节点: nodeId={}", targetNode.getNodeId());
+            if (logger.isTraceEnabled()) {
+                logger.trace("发送心跳到节点: nodeId={}", targetNode.getNodeId());
+            }
             gossipProtocol.sendPing(targetNode);
 
             // 移除已选择的节点，避免重复选择
