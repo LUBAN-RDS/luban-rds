@@ -3,6 +3,7 @@ package com.janeluo.luban.rds.cluster.gossip;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 
 import java.io.Serializable;
+import java.util.BitSet;
 import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Set;
@@ -22,6 +23,11 @@ public class GossipNodeInfo implements Serializable {
      * 节点ID长度（40字符十六进制）
      */
     public static final int NODE_ID_LENGTH = 40;
+
+    /**
+     * 空字节数组常量（slots 为 null 时使用）
+     */
+    private static final byte[] EMPTY_BYTES = new byte[0];
 
     /**
      * 节点ID（40字符十六进制字符串）
@@ -52,6 +58,15 @@ public class GossipNodeInfo implements Serializable {
      * 节点状态标志集合（使用 EnumSet 提高性能）
      */
     private Set<ClusterNodeState> flags;
+
+    /**
+     * 节点拥有的槽位集合（16384 bit）
+     * <p>
+     * 用于在 Gossip 消息中携带槽位所有权，使各节点对全局槽位分配达成一致。
+     * 可为 null 表示未知或不携带。
+     * </p>
+     */
+    private BitSet slots;
 
     /**
      * 默认构造方法
@@ -159,6 +174,24 @@ public class GossipNodeInfo implements Serializable {
         this.flags = flags != null ? EnumSet.copyOf(flags) : EnumSet.noneOf(ClusterNodeState.class);
     }
 
+    /**
+     * 获取节点拥有的槽位集合
+     *
+     * @return 槽位集合，可能为 null
+     */
+    public BitSet getSlots() {
+        return slots;
+    }
+
+    /**
+     * 设置节点拥有的槽位集合
+     *
+     * @param slots 槽位集合，null 表示未知
+     */
+    public void setSlots(BitSet slots) {
+        this.slots = slots;
+    }
+
     // ==================== 状态管理方法 ====================
 
     /**
@@ -237,6 +270,7 @@ public class GossipNodeInfo implements Serializable {
      * - 总线端口（4字节，大端序）
      * - 配置纪元（8字节，大端序）
      * - 状态标志数量（1字节）+ 状态标志（每个2字节）
+     * - 槽位字节数（4字节，大端序）+ 槽位位图（变长，BitSet.toByteArray）
      * </p>
      *
      * @return 编码后的字节数组
@@ -245,7 +279,9 @@ public class GossipNodeInfo implements Serializable {
         // 计算总长度
         int ipBytesLength = ip != null ? ip.getBytes(java.nio.charset.StandardCharsets.UTF_8).length : 0;
         int flagsCount = flags.size();
-        int totalLength = NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2;
+        byte[] slotsBytes = slots != null ? slots.toByteArray() : EMPTY_BYTES;
+        int totalLength = NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2
+                + 4 + slotsBytes.length;
 
         byte[] data = new byte[totalLength];
         int offset = 0;
@@ -295,6 +331,16 @@ public class GossipNodeInfo implements Serializable {
             short flagCode = (short) flag.ordinal();
             data[offset++] = (byte) (flagCode >> 8);
             data[offset++] = (byte) flagCode;
+        }
+
+        // 写入槽位字节数（4字节，大端序）+ 槽位位图
+        data[offset++] = (byte) (slotsBytes.length >> 24);
+        data[offset++] = (byte) (slotsBytes.length >> 16);
+        data[offset++] = (byte) (slotsBytes.length >> 8);
+        data[offset++] = (byte) slotsBytes.length;
+        if (slotsBytes.length > 0) {
+            System.arraycopy(slotsBytes, 0, data, offset, slotsBytes.length);
+            offset += slotsBytes.length;
         }
 
         return data;
@@ -358,6 +404,20 @@ public class GossipNodeInfo implements Serializable {
             }
         }
 
+        // 读取槽位字节数（4字节，大端序）+ 槽位位图
+        int slotsBytesLength = ((data[offset++] & 0xFF) << 24) |
+                ((data[offset++] & 0xFF) << 16) |
+                ((data[offset++] & 0xFF) << 8) |
+                (data[offset++] & 0xFF);
+        if (slotsBytesLength > 0) {
+            byte[] slotsBytes = new byte[slotsBytesLength];
+            System.arraycopy(data, offset, slotsBytes, 0, slotsBytesLength);
+            this.slots = BitSet.valueOf(slotsBytes);
+            offset += slotsBytesLength;
+        } else {
+            this.slots = null;
+        }
+
         return offset;
     }
 
@@ -369,7 +429,9 @@ public class GossipNodeInfo implements Serializable {
     public int getEncodedLength() {
         int ipBytesLength = ip != null ? ip.getBytes(java.nio.charset.StandardCharsets.UTF_8).length : 0;
         int flagsCount = flags.size();
-        return NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2;
+        int slotsBytesLength = slots != null ? slots.toByteArray().length : 0;
+        return NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2
+                + 4 + slotsBytesLength;
     }
 
     // ==================== 工具方法 ====================
@@ -418,6 +480,7 @@ public class GossipNodeInfo implements Serializable {
                 ", busPort=" + busPort +
                 ", configEpoch=" + configEpoch +
                 ", flags=" + flags +
+                ", slotsCount=" + (slots != null ? slots.cardinality() : 0) +
                 '}';
     }
 }

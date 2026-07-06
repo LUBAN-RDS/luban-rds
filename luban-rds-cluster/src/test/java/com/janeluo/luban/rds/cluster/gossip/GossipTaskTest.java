@@ -1,13 +1,26 @@
 package com.janeluo.luban.rds.cluster.gossip;
 
+import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
+import io.netty.channel.ChannelPromise;
+import io.netty.channel.DefaultChannelPromise;
+import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * GossipTask 单元测试
@@ -62,6 +75,58 @@ class GossipTaskTest {
 
         // 停止协议
         gossipProtocol.stop();
+    }
+
+    @Test
+    @DisplayName("测试 Gossip 任务对 HANDSHAKE 节点发送 MEET 推动握手")
+    void testRunSendsMeetToHandshakeNodes() {
+        // 使用 mock 总线客户端
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        ChannelPromise succeededPromise = new DefaultChannelPromise(channel);
+        succeededPromise.trySuccess();
+        when(mockBusClient.isConnected(anyString())).thenReturn(false);
+        when(mockBusClient.connect(anyString(), anyString(), anyInt())).thenReturn(succeededPromise);
+
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+        GossipTask task = new GossipTask(protocol, protocol.getFailureDetector());
+
+        // 添加一个 HANDSHAKE 状态的节点
+        ClusterNode handshakeNode = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        handshakeNode.addState(ClusterNodeState.HANDSHAKE);
+        clusterConfig.addNode(handshakeNode);
+
+        protocol.start();
+        task.run();
+        protocol.stop();
+
+        // 验证：对 HANDSHAKE 节点以真实 nodeId 发起了 connect
+        verify(mockBusClient, atLeastOnce())
+                .connect(eq(handshakeNode.getNodeId()), eq("127.0.0.1"), eq(6380));
+        // 验证：发送了 MEET 消息
+        verify(mockBusClient, atLeastOnce())
+                .send(eq(handshakeNode.getNodeId()), any(MeetMessage.class));
+    }
+
+    @Test
+    @DisplayName("测试 Gossip 任务不对已连接的 HANDSHAKE 节点重复发起 MEET")
+    void testRunSkipsConnectedHandshakeNodes() {
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        when(mockBusClient.isConnected(anyString())).thenReturn(true);
+
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+        GossipTask task = new GossipTask(protocol, protocol.getFailureDetector());
+
+        ClusterNode handshakeNode = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        handshakeNode.addState(ClusterNodeState.HANDSHAKE);
+        clusterConfig.addNode(handshakeNode);
+
+        protocol.start();
+        task.run();
+        protocol.stop();
+
+        // 已连接则不应再次 connect
+        verify(mockBusClient, never()).connect(anyString(), anyString(), anyInt());
     }
 
     @Test

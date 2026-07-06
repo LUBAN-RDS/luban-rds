@@ -2,6 +2,7 @@ package com.janeluo.luban.rds.cluster.gossip;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 
 /**
@@ -29,6 +30,15 @@ public class PongMessage extends GossipMessage {
      * Gossip 节点信息列表
      */
     private List<GossipNodeInfo> gossipNodes;
+
+    /**
+     * 发送方（myNode）拥有的槽位集合
+     * <p>
+     * 由于 {@code selectGossipNodes} 排除本节点，发送方自己的槽位无法经 gossip section 传播，
+     * 因此在消息头显式携带，使接收方能同步发送方的槽位归属。
+     * </p>
+     */
+    private BitSet senderSlots;
 
     /**
      * 默认构造方法
@@ -79,6 +89,24 @@ public class PongMessage extends GossipMessage {
 
     public void setGossipNodes(List<GossipNodeInfo> gossipNodes) {
         this.gossipNodes = gossipNodes != null ? new ArrayList<>(gossipNodes) : new ArrayList<>();
+    }
+
+    /**
+     * 获取发送方拥有的槽位集合
+     *
+     * @return 槽位集合，可能为 null
+     */
+    public BitSet getSenderSlots() {
+        return senderSlots;
+    }
+
+    /**
+     * 设置发送方拥有的槽位集合
+     *
+     * @param senderSlots 槽位集合
+     */
+    public void setSenderSlots(BitSet senderSlots) {
+        this.senderSlots = senderSlots;
     }
 
     // ==================== 节点管理方法 ====================

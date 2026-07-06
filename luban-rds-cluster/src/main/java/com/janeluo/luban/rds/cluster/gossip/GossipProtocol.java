@@ -206,6 +206,8 @@ public class GossipProtocol {
                 myNode.getNodeId(),
                 System.currentTimeMillis()
         );
+        // 携带发送方槽位，使对端能同步槽位归属
+        ping.setSenderSlots(myNode.getSlots());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -254,6 +256,8 @@ public class GossipProtocol {
         // 创建 PONG 响应
         ClusterNode myNode = clusterConfig.getMyNode();
         PongMessage pong = new PongMessage(myNode.getNodeId(), System.currentTimeMillis());
+        // 携带发送方槽位，使对端能同步槽位归属
+        pong.setSenderSlots(myNode.getSlots());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -329,6 +333,8 @@ public class GossipProtocol {
         meet.setSenderBusPort(myNode.getBusPort());
         meet.setSenderConfigEpoch(myNode.getConfigEpoch());
         meet.setCurrentEpoch(clusterConfig.getCurrentEpoch());
+        // 携带发送方槽位，使对端能同步槽位归属
+        meet.setSenderSlots(myNode.getSlots());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -585,6 +591,10 @@ public class GossipProtocol {
                 link.setConnected(true);
                 link.updateInteractionTime();
             }
+
+            // 同步发送方槽位归属（基于发送方已记录的配置纪元裁决冲突）
+            clusterConfig.syncSlotsFromNode(senderNodeId, ping.getSenderSlots(),
+                    senderNode.getConfigEpoch());
         }
     }
 
@@ -609,6 +619,10 @@ public class GossipProtocol {
                 link.setConnected(true);
                 link.updateInteractionTime();
             }
+
+            // 同步发送方槽位归属（基于发送方已记录的配置纪元裁决冲突）
+            clusterConfig.syncSlotsFromNode(senderNodeId, pong.getSenderSlots(),
+                    senderNode.getConfigEpoch());
         }
     }
 
@@ -651,6 +665,10 @@ public class GossipProtocol {
                 link.setConnected(true);
                 link.updateInteractionTime();
             }
+
+            // 同步发送方槽位归属（使用 MEET 携带的发送方配置纪元裁决冲突）
+            clusterConfig.syncSlotsFromNode(senderNodeId, meet.getSenderSlots(),
+                    meet.getSenderConfigEpoch());
         }
     }
 
@@ -699,6 +717,11 @@ public class GossipProtocol {
                 clusterConfig.addNode(node);
                 logger.info("通过 Gossip 发现新节点: nodeId={}, address={}",
                         nodeId, node.getFullAddress());
+
+                // 主动发起总线连接并发送 MEET，推动握手完成。
+                // 否则该节点会永久停留在 HANDSHAKE 状态，Gossip 拓扑无法收敛
+                // （redis-cli --cluster create 会因此卡在 "Waiting for the cluster to join"）。
+                initiateMeetForDiscoveredNode(node);
             }
 
             // 更新配置纪元
@@ -717,7 +740,77 @@ public class GossipProtocol {
                     }
                 }
             }
+
+            // 同步该节点拥有的槽位归属（基于其配置纪元裁决冲突）
+            clusterConfig.syncSlotsFromNode(nodeId, nodeInfo.getSlots(), nodeInfo.getConfigEpoch());
         }
+    }
+
+    /**
+     * 对通过 Gossip 发现的 HANDSHAKE 节点发起 MEET 握手
+     * <p>
+     * 与 {@link #sendMeet(String, int)} 不同，此处目标节点已通过 Gossip 携带的真实节点ID
+     * 加入本地配置（HANDSHAKE 状态），因此直接以该真实节点ID建连并发送 MEET，
+     * 无需再生成临时ID并依赖 PONG 响应替换。
+     * </p>
+     * <p>
+     * 幂等保护：
+     * <ul>
+     *   <li>已存在连接时跳过（由 {@link ClusterBusClient#isConnected(String)} 判断）；</li>
+     *   <li>{@link ClusterBusClient#connect(String, String, int)} 在通道活跃时复用现有连接。</li>
+     * </ul>
+     * </p>
+     *
+     * @param node 新发现的 HANDSHAKE 节点（已携带真实节点ID与地址）
+     */
+    public void initiateMeetForDiscoveredNode(ClusterNode node) {
+        if (busClient == null) {
+            return;
+        }
+
+        // 已有连接则无需再次 MEET
+        if (busClient.isConnected(node.getNodeId())) {
+            return;
+        }
+
+        ClusterNode myNode = clusterConfig.getMyNode();
+        if (myNode == null) {
+            logger.warn("无法对 Gossip 发现的节点发起 MEET: 当前节点信息不存在");
+            return;
+        }
+
+        logger.info("通过 Gossip 发现新节点并发起 MEET: nodeId={}, address={}",
+                node.getNodeId(), node.getFullAddress());
+
+        MeetMessage meet = new MeetMessage();
+        meet.setSenderNodeId(myNode.getNodeId());
+        meet.setSenderIp(myNode.getIp());
+        meet.setSenderPort(myNode.getPort());
+        meet.setSenderBusPort(myNode.getBusPort());
+        meet.setSenderConfigEpoch(myNode.getConfigEpoch());
+        meet.setCurrentEpoch(clusterConfig.getCurrentEpoch());
+        // 携带发送方槽位，使对端能同步槽位归属
+        meet.setSenderSlots(myNode.getSlots());
+
+        // 携带 Gossip 节点信息，便于对端同步拓扑
+        List<GossipNodeInfo> gossipNodes = selectGossipNodes();
+        for (GossipNodeInfo gossipNode : gossipNodes) {
+            meet.addGossipNode(gossipNode);
+        }
+
+        // 以真实节点ID建连，连接成功后发送 MEET
+        ChannelFuture connectFuture = busClient.connect(node.getNodeId(), node.getIp(), node.getPort());
+        connectFuture.addListener((ChannelFuture future) -> {
+            if (future.isSuccess()) {
+                busClient.send(node.getNodeId(), meet);
+                if (stateManager != null) {
+                    stateManager.incrementMessagesSent(1);
+                }
+            } else {
+                logger.error("对 Gossip 发现的节点发送 MEET 失败: nodeId={}, address={}",
+                        node.getNodeId(), node.getFullAddress(), future.cause());
+            }
+        });
     }
 
     /**
@@ -749,6 +842,9 @@ public class GossipProtocol {
             flags.add(ClusterNodeState.PFAIL);
         }
         info.setFlags(flags);
+
+        // 携带节点拥有的槽位集合，使对端能同步槽位归属
+        info.setSlots(node.getSlots());
 
         return info;
     }
