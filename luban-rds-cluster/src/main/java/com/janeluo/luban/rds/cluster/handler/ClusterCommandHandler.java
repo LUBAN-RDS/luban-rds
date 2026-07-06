@@ -261,7 +261,11 @@ public class ClusterCommandHandler {
                 sb.append(formatSlots(node.getSlots()));
             }
 
-            sb.append("\r\n");
+            // 行尾使用裸 \n，对齐真实 Redis CLUSTER NODES bulk payload 行为
+            // （clusterGenNodesDescription 中 sdscatlen(ni,"\n",1)）。
+            // 若用 \r\n，客户端（如 Redisson ClusterNodesDecoder 用 split("\n") 切行）
+            // 会在每行末尾残留 \r，导致末尾 slot 字段解析为 "0-5460\r" 抛 NumberFormatException。
+            sb.append("\n");
         }
 
         return sb.toString();

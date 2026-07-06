@@ -1,0 +1,14 @@
+workflow: hotfix
+phase: build
+build_mode: direct
+isolation: branch
+verify_mode: light
+base_ref: cb08c98cf527e727e57fd64c4e251908ceef8472
+design_doc: null
+plan: null
+verify_result: pending
+verification_report: null
+branch_status: pending
+created_at: 2026-07-07
+verified_at: null
+archived: false

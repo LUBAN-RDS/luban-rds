@@ -68,12 +68,51 @@ class ClusterCommandHandlerTest {
     @Test
     @DisplayName("测试 CLUSTER NODES 命令")
     void testClusterNodes() {
+        // 为当前 master 节点分配槽位区间
+        handler.handle(new String[]{"ADDSLOTS", "0", "1", "2", "3", "4", "5"});
+
         String result = handler.handle(new String[]{"NODES"});
 
         assertNotNull(result);
         assertTrue(result.contains(NODE_ID_1));
         assertTrue(result.contains("127.0.0.1:7000@17000"));
         assertTrue(result.contains("myself,master"));
+        // 行尾必须为裸 \n，不得残留 \r，否则集群客户端（如 Redisson）
+        // 用 split("\n") 切行后末尾 slot 字段会变成 "0-5\r" 导致 NumberFormatException
+        assertFalse(result.contains("\r"), "CLUSTER NODES payload 不得包含 \\r");
+        assertTrue(result.endsWith("\n"), "CLUSTER NODES 应以 \\n 结尾");
+        assertTrue(result.contains("0-5"), "应显示连续 slot 区间 0-5");
+    }
+
+    @Test
+    @DisplayName("CLUSTER NODES 非连续 slot 多段区间无 \\r 残留")
+    void testClusterNodesNonContiguousSlots() {
+        // 分配非连续 slot：0 和 100，应输出 "0 100"
+        handler.handle(new String[]{"ADDSLOTS", "0", "100"});
+
+        String result = handler.handle(new String[]{"NODES"});
+
+        assertNotNull(result);
+        assertFalse(result.contains("\r"), "CLUSTER NODES payload 不得包含 \\r");
+        assertTrue(result.endsWith("\n"), "CLUSTER NODES 应以 \\n 结尾");
+        assertTrue(result.contains("0 100"), "非连续 slot 应以空格分隔多段区间");
+
+        // 模拟 Redisson ClusterNodesDecoder 的切行方式，验证每段 slot 可被 Integer.parseInt 解析
+        for (String line : result.split("\n")) {
+            if (line.isEmpty()) {
+                continue;
+            }
+            String[] params = line.split(" ");
+            if (params.length > 8) {
+                for (int i = 8; i < params.length; i++) {
+                    String slot = params[i];
+                    String[] parts = slot.contains("-") ? slot.split("-") : new String[]{slot};
+                    for (String part : parts) {
+                        Integer.parseInt(part); // 不抛异常即通过
+                    }
+                }
+            }
+        }
     }
 
     @Test
