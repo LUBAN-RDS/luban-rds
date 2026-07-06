@@ -114,6 +114,8 @@ public class ClusterCommandHandler {
                     return clusterInfo();
                 case "NODES":
                     return clusterNodes();
+                case "SLOTS":
+                    return clusterSlots();
                 case "MEET":
                     return clusterMeet(args);
                 case "FORGET":
@@ -206,6 +208,10 @@ public class ClusterCommandHandler {
         StringBuilder sb = new StringBuilder();
 
         for (ClusterNode node : clusterConfig.getAllNodes()) {
+            if (node.hasState(ClusterNodeState.HANDSHAKE) || node.hasState(ClusterNodeState.NOADDR)) {
+                continue;
+            }
+
             // 节点ID
             sb.append(node.getNodeId());
 
@@ -256,6 +262,100 @@ public class ClusterCommandHandler {
         }
 
         return sb.toString();
+    }
+
+    /**
+     * CLUSTER SLOTS 命令
+     * 返回槽位分配信息，格式为嵌套数组：
+     * [startSlot, endSlot, [ip, port, nodeId], [replica-ip, replica-port, replica-nodeId], ...]
+     *
+     * @return RESP 格式的槽位信息
+     */
+    private String clusterSlots() {
+        List<SlotRange> ranges = buildSlotRanges();
+
+        if (ranges.isEmpty()) {
+            return "*0\r\n";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(ranges.size()).append("\r\n");
+        for (SlotRange range : ranges) {
+            ClusterNode master = clusterConfig.getNode(range.ownerId);
+            if (master == null) {
+                continue;
+            }
+
+            List<ClusterNode> replicas = new ArrayList<>();
+            for (ClusterNode node : clusterConfig.getAllNodes()) {
+                if (node.isSlave() && range.ownerId.equals(node.getMasterNodeId())
+                        && !node.hasState(ClusterNodeState.HANDSHAKE)
+                        && !node.isFail() && !node.isPfail()) {
+                    replicas.add(node);
+                }
+            }
+
+            int entryLen = 3 + replicas.size();
+            sb.append("*").append(entryLen).append("\r\n");
+            sb.append(":").append(range.start).append("\r\n");
+            sb.append(":").append(range.end).append("\r\n");
+            appendNodeEndpoint(sb, master);
+            for (ClusterNode replica : replicas) {
+                appendNodeEndpoint(sb, replica);
+            }
+        }
+
+        return sb.toString();
+    }
+
+    private List<SlotRange> buildSlotRanges() {
+        List<SlotRange> ranges = new ArrayList<>();
+        String currentOwner = null;
+        int rangeStart = -1;
+
+        for (int i = 0; i < SlotUtils.CLUSTER_SLOTS; i++) {
+            String owner = clusterConfig.getSlotOwner(i);
+            if (owner == null) {
+                if (currentOwner != null) {
+                    ranges.add(new SlotRange(rangeStart, i - 1, currentOwner));
+                    currentOwner = null;
+                    rangeStart = -1;
+                }
+            } else if (currentOwner == null) {
+                currentOwner = owner;
+                rangeStart = i;
+            } else if (!owner.equals(currentOwner)) {
+                ranges.add(new SlotRange(rangeStart, i - 1, currentOwner));
+                currentOwner = owner;
+                rangeStart = i;
+            }
+        }
+        if (currentOwner != null) {
+            ranges.add(new SlotRange(rangeStart, SlotUtils.CLUSTER_SLOTS - 1, currentOwner));
+        }
+        return ranges;
+    }
+
+    private static class SlotRange {
+        final int start;
+        final int end;
+        final String ownerId;
+
+        SlotRange(int start, int end, String ownerId) {
+            this.start = start;
+            this.end = end;
+            this.ownerId = ownerId;
+        }
+    }
+
+    private void appendNodeEndpoint(StringBuilder sb, ClusterNode node) {
+        String ip = node.getIp();
+        int port = node.getPort();
+        String nodeId = node.getNodeId();
+        sb.append("*3\r\n");
+        sb.append("$").append(ip.length()).append("\r\n").append(ip).append("\r\n");
+        sb.append(":").append(port).append("\r\n");
+        sb.append("$").append(nodeId.length()).append("\r\n").append(nodeId).append("\r\n");
     }
 
     /**
