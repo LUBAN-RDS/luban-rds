@@ -2,6 +2,8 @@
 comet_change: fix-cluster-gossip-propagation
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-06-fix-cluster-gossip-propagation
+status: final
 ---
 
 # Design Doc — fix-cluster-gossip-propagation
