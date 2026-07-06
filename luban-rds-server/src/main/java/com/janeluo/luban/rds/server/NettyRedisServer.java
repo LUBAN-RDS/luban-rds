@@ -489,8 +489,15 @@ public class NettyRedisServer implements RedisServer {
                      ChannelPipeline pipeline = ch.pipeline();
                      // Pass timeout config
                      // Use businessGroup for command processing to avoid blocking I/O threads
-                     pipeline.addLast(businessGroup, "handler", 
-                             new RedisServerHandler(memoryStore, commandHandler, protocolParser, config.getTimeout()));
+                     // 集群模式：通过完整构造方法注入 clusterConfig/slotManager，并注入 clusterCommandHandler，
+                     // 使 CLUSTER 命令（如 CLUSTER MEET）能正确路由到 ClusterCommandHandler
+                     RedisServerHandler handler = new RedisServerHandler(
+                             memoryStore, commandHandler, protocolParser, config.getTimeout(),
+                             clusterEnabled, clusterConfig, slotManager);
+                     if (clusterEnabled && clusterCommandHandler != null) {
+                         handler.setClusterCommandHandler(clusterCommandHandler);
+                     }
+                     pipeline.addLast(businessGroup, "handler", handler);
                  }
              });
             
