@@ -637,4 +637,89 @@ class DefaultSlotManagerTest {
             assertEquals(0, errors.get());
         }
     }
+
+    // ==================== 重启恢复（从 ClusterConfig 重建 SlotManager）测试 ====================
+
+    /**
+     * 回归测试：模拟全集群重启后，从已恢复的 ClusterConfig 重建 SlotManager 槽位表。
+     * <p>
+     * 重启路径 {@code NettyRedisServer.restoreClusterFromConfig} 只写 ClusterConfig，
+     * 命令路由 {@code RedisServerHandler.checkSlotAndRedirect} 只读 SlotManager。
+     * 修复方案 {@code seedSlotManagerFromConfig} 对每个已分配槽位调用
+     * {@code slotManager.setSlotOwner(slot, owner)} 重建 SlotManager。
+     * 此测试直接验证该 seed 逻辑的正确性。
+     * </p>
+     */
+    @Nested
+    @DisplayName("重启恢复：从 ClusterConfig 重建 SlotManager")
+    class RestartSeedTest {
+
+        /**
+         * 模拟 seedSlotManagerFromConfig 的核心逻辑：
+         * 遍历 0..16383，对每个已分配槽位调用 setSlotOwner(slot, owner)。
+         */
+        private void seedFromConfig(DefaultSlotManager manager,
+                                    String[] slotAssignment, String myNodeId) {
+            for (int i = 0; i < SlotUtils.CLUSTER_SLOTS; i++) {
+                String owner = slotAssignment[i];
+                if (owner != null) {
+                    manager.setSlotOwner(i, owner);
+                }
+            }
+            // myNodeId 仅用于断言，setSlotOwner 内部已据此区分 mySlots
+            assertEquals(myNodeId, manager.getMyNodeId());
+        }
+
+        @Test
+        @DisplayName("重启后本节点拥有的槽位判定为本地，其他节点槽位判定为已分配")
+        void testSeedFromRecoveredConfig() {
+            // 模拟从 nodes.conf 恢复的 ClusterConfig.slotAssignment
+            // 本节点 MY_NODE_ID 拥有 0-5460，OTHER_NODE_ID 拥有 5461-10922，
+            // 第三个节点拥有 10923-16383
+            String thirdNodeId = "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0";
+            String[] slotAssignment = new String[SlotUtils.CLUSTER_SLOTS];
+            for (int i = 0; i <= 5460; i++) {
+                slotAssignment[i] = MY_NODE_ID;
+            }
+            for (int i = 5461; i <= 10922; i++) {
+                slotAssignment[i] = OTHER_NODE_ID;
+            }
+            for (int i = 10923; i <= 16383; i++) {
+                slotAssignment[i] = thirdNodeId;
+            }
+
+            // 新建空的 SlotManager（模拟 initClusterMode 中 new DefaultSlotManager(nodeId)）
+            DefaultSlotManager recovered = new DefaultSlotManager(MY_NODE_ID);
+            // 重启前 slotManager 全空
+            assertEquals(0, recovered.getMySlotCount());
+            assertFalse(recovered.isSlotAssigned(0));
+
+            // 执行 seed
+            seedFromConfig(recovered, slotAssignment, MY_NODE_ID);
+
+            // 验证：本节点槽位判定为本地（命令路由 isSlotLocal 返回 true，不重定向）
+            assertTrue(recovered.isSlotLocal(0));
+            assertTrue(recovered.isSlotLocal(5460));
+            assertEquals(5461, recovered.getMySlotCount());
+
+            // 验证：其他节点槽位判定为已分配但非本地（路由可给出正确 MOVED 目标）
+            assertTrue(recovered.isSlotAssigned(5461));
+            assertFalse(recovered.isSlotLocal(5461));
+            assertEquals(OTHER_NODE_ID, recovered.getSlotOwner(5461));
+            assertEquals(thirdNodeId, recovered.getSlotOwner(16383));
+
+            // 验证：全部 16384 槽位已分配（isAllSlotsAssigned 为 true）
+            assertTrue(recovered.isAllSlotsAssigned());
+        }
+
+        @Test
+        @DisplayName("seed 前空 SlotManager 对本节点槽位返回未分配（重现 bug 现象）")
+        void testEmptySlotManagerBeforeSeedReturnsUnassigned() {
+            // 重现 bug：未 seed 时本节点槽位被判定为未分配 → 命令返回 CLUSTERDOWN
+            DefaultSlotManager empty = new DefaultSlotManager(MY_NODE_ID);
+            assertFalse(empty.isSlotAssigned(0));
+            assertFalse(empty.isSlotLocal(0));
+            assertFalse(empty.isAllSlotsAssigned());
+        }
+    }
 }

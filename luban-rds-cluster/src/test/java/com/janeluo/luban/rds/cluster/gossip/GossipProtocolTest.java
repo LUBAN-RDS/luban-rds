@@ -319,6 +319,87 @@ class GossipProtocolTest {
     }
 
     /**
+     * 回归测试：集群重启后从 nodes.conf 恢复的已知节点必须在 Gossip 启动时被主动连接。
+     * <p>
+     * 场景：全集群停止后重启，nodes.conf 里的对端节点以 MASTER 状态（非 HANDSHAKE）
+     * 加载，link 为 disconnected。若 start() 不主动 connect，sendPing 只 warn 不连接，
+     * PING 永远发不出去，PFAIL 无法清除，集群成孤岛、状态恢复不了。
+     * 对齐 Redis clusterConnectAllNodes。
+     * </p>
+     */
+    @Test
+    @DisplayName("start() 应主动连接从 nodes.conf 恢复的已知节点")
+    void testStartConnectsRecoveredKnownNodes() {
+        // 使用 mock 的总线客户端
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        ChannelPromise succeededPromise = new DefaultChannelPromise(channel);
+        succeededPromise.trySuccess();
+        when(mockBusClient.isConnected(anyString())).thenReturn(false);
+        when(mockBusClient.connect(anyString(), anyString(), anyInt())).thenReturn(succeededPromise);
+
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+
+        // 添加 2 个已知的 master 节点（模拟从 nodes.conf 恢复，非 HANDSHAKE）
+        ClusterNode peer1 = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "192.168.8.161", 9737, 19737);
+        peer1.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(peer1);
+        ClusterNode peer2 = createTestNode("cccccccccccccccccccccccccccccccccccccccc", "192.168.8.161", 9738, 19738);
+        peer2.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(peer2);
+
+        try {
+            protocol.start();
+
+            // 验证：对两个非本节点都调用了 connect(nodeId, ip, port)
+            verify(mockBusClient, atLeastOnce()).connect(eq(peer1.getNodeId()), eq("192.168.8.161"), eq(9737));
+            verify(mockBusClient, atLeastOnce()).connect(eq(peer2.getNodeId()), eq("192.168.8.161"), eq(9738));
+            // 验证：没有对本节点调用 connect
+            verify(mockBusClient, org.mockito.Mockito.never())
+                    .connect(eq(myNode.getNodeId()), anyString(), anyInt());
+        } finally {
+            protocol.stop();
+        }
+    }
+
+    /**
+     * 回归测试：FAIL 节点在 start() 时不应被主动连接。
+     * <p>
+     * 已下线节点不应建立总线连接（对齐 Redis：link 节点排除 FAIL）。
+     * 注：HANDSHAKE 节点会由 GossipTask 的 initiateMeetForDiscoveredNode 流程处理，
+     * 属独立的 MEET 握手路径，不在本断言范围内。
+     * </p>
+     */
+    @Test
+    @DisplayName("start() 不应连接 FAIL 节点")
+    void testStartSkipsFailNodes() {
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        ChannelPromise succeededPromise = new DefaultChannelPromise(channel);
+        succeededPromise.trySuccess();
+        when(mockBusClient.isConnected(anyString())).thenReturn(false);
+        when(mockBusClient.connect(anyString(), anyString(), anyInt())).thenReturn(succeededPromise);
+
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+
+        // FAIL 节点（持有槽位，模拟一个已下线的主节点）
+        ClusterNode failNode = createTestNode("cccccccccccccccccccccccccccccccccccccccc", "127.0.0.1", 6381, 16381);
+        failNode.addState(ClusterNodeState.MASTER);
+        failNode.addState(ClusterNodeState.FAIL);
+        clusterConfig.addNode(failNode);
+
+        try {
+            protocol.start();
+
+            // 验证：没有对 FAIL 节点调用 connect（connectKnownNodes 与 GossipTask 都应跳过 FAIL）
+            verify(mockBusClient, org.mockito.Mockito.never())
+                    .connect(eq(failNode.getNodeId()), anyString(), anyInt());
+        } finally {
+            protocol.stop();
+        }
+    }
+
+    /**
      * 创建测试节点
      */
     private ClusterNode createTestNode(String nodeId, String ip, int port, int busPort) {

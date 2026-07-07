@@ -181,11 +181,53 @@ public class GossipProtocol {
             logger.info("启动 Gossip 协议, nodeTimeout={}ms, gossipInterval={}ms",
                     nodeTimeout, gossipInterval);
 
+            // 启动前主动连接所有从 nodes.conf 恢复的已知节点（对齐 Redis clusterConnectAllNodes）。
+            // 否则恢复的 master 节点 link 为 disconnected，sendPing 只 warn 不连接，
+            // PING 永远发不出去，PFAIL 无法清除，集群重启后成孤岛、节点状态无法恢复。
+            connectKnownNodes();
+
             // 启动定时 Gossip 任务
             GossipTask gossipTask = new GossipTask(this, failureDetector);
             scheduler.scheduleAtFixedRate(gossipTask, 0, gossipInterval, TimeUnit.MILLISECONDS);
 
             logger.info("Gossip 协议已启动");
+        }
+    }
+
+    /**
+     * 主动连接所有已知的非本节点（启动/恢复时调用）
+     * <p>
+     * 对齐 Redis clusterConnectAllNodes：从 nodes.conf 恢复的节点 link 为 disconnected，
+     * 必须主动建立总线连接，后续 Gossip PING 才能发出，故障检测器才能在收到 PONG 后
+     * 清除 PFAIL 状态。否则全集群重启后节点间互为孤岛，状态永远恢复不了。
+     * </p>
+     * <p>
+     * 跳过 HANDSHAKE 节点（由 {@link #initiateMeetForDiscoveredNode} 处理）和 FAIL 节点
+     * （不应连接已下线节点）。{@link ClusterBusClient#connect} 内部幂等，已连接则复用。
+     * 连接异步且失败只记日志，不影响其他节点或启动流程。
+     * </p>
+     */
+    private void connectKnownNodes() {
+        if (busClient == null) {
+            return;
+        }
+        int count = 0;
+        for (ClusterNode node : clusterConfig.getAllNodes()) {
+            if (node.isMyself() || node.hasState(ClusterNodeState.HANDSHAKE) || node.isFail()) {
+                continue;
+            }
+            // 节点地址从 nodes.conf 恢复；缺失地址的节点跳过（防御）
+            if (node.getIp() == null || node.getPort() <= 0) {
+                continue;
+            }
+            if (busClient.isConnected(node.getNodeId())) {
+                continue;
+            }
+            busClient.connect(node.getNodeId(), node.getIp(), node.getPort());
+            count++;
+        }
+        if (count > 0) {
+            logger.info("启动时主动连接已知节点: 数量={}", count);
         }
     }
 

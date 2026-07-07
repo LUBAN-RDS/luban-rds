@@ -249,11 +249,19 @@ public class ClusterConfigPersisterTest {
 
         // 保存和加载
         persister.save(config, tempFile.getAbsolutePath());
+        // 验证 nodes.conf 中不包含 fail 标志（FAIL 是运行时瞬时状态，不应落盘）
+        String persisted = new String(Files.readAllBytes(tempFile.toPath()));
+        assertFalse("nodes.conf 不应持久化 fail 标志", persisted.contains("fail"));
+        assertFalse("nodes.conf 不应持久化 fail? 标志", persisted.contains("fail?"));
+
         ClusterConfig loadedConfig = persister.load(tempFile.getAbsolutePath());
 
         ClusterNode loadedNode = loadedConfig.getNode(node.getNodeId());
         assertNotNull(loadedNode);
-        assertTrue(loadedNode.isFail());
+        // FAIL 状态不应在往返后保留（对齐 Redis：重启后由故障检测器重新判定）
+        assertFalse("FAIL 状态不应被持久化恢复", loadedNode.isFail());
+        // MASTER 等持久状态仍应保留
+        assertTrue(loadedNode.isMaster());
     }
 
     @Test
@@ -270,11 +278,57 @@ public class ClusterConfigPersisterTest {
 
         // 保存和加载
         persister.save(config, tempFile.getAbsolutePath());
+        // 验证 nodes.conf 中不包含 fail? 标志（PFAIL 是运行时瞬时状态，不应落盘）
+        String persisted = new String(Files.readAllBytes(tempFile.toPath()));
+        assertFalse("nodes.conf 不应持久化 fail? 标志", persisted.contains("fail?"));
+
         ClusterConfig loadedConfig = persister.load(tempFile.getAbsolutePath());
 
         ClusterNode loadedNode = loadedConfig.getNode(node.getNodeId());
         assertNotNull(loadedNode);
-        assertTrue(loadedNode.isPfail());
+        // PFAIL 状态不应在往返后保留
+        assertFalse("PFAIL 状态不应被持久化恢复", loadedNode.isPfail());
+        assertTrue(loadedNode.isMaster());
+    }
+
+    /**
+     * 回归测试：兼容修复前落盘的旧 nodes.conf（含 fail/fail? 标志）
+     * <p>
+     * 全集群停止前对端节点可能被标记为 FAIL/PFAIL，旧版本会把 fail 标志写入 nodes.conf。
+     * 加载时必须忽略这些瞬时状态标志，否则重启后对端节点以 FAIL 状态加载且永远无法恢复
+     * （无人发 PING 触发 clearNodeFailState），集群状态恒为 fail。
+     * </p>
+     */
+    @Test
+    public void testLoadLegacyFailStateCleared() throws IOException {
+        // 模拟修复前版本落盘的 nodes.conf：含 fail 和 fail? 标志
+        String content = "# Legacy nodes.conf with fail flags\n" +
+                "# Current Epoch: 5\n" +
+                "# My Config Epoch: 3\n" +
+                "\n" +
+                "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0 127.0.0.1:7000@17000 myself,master - 0 1234567890 3 connected 0-5460\n" +
+                "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0 127.0.0.1:7001@17001 master,fail - 0 1234567890 2 disconnected 5461-10922\n" +
+                "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0 127.0.0.1:7002@17002 master,fail? - 0 1234567890 1 disconnected 10923-16383\n";
+
+        Files.write(tempFile.toPath(), content.getBytes());
+
+        // 加载配置
+        ClusterConfig config = persister.load(tempFile.getAbsolutePath());
+
+        // 验证：所有节点加载后都不应携带 FAIL/PFAIL 状态
+        ClusterNode failNode = config.getNode("b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0");
+        assertNotNull(failNode);
+        assertFalse("旧 fail 标志应被清除", failNode.isFail());
+        assertTrue(failNode.isMaster());
+
+        ClusterNode pfailNode = config.getNode("c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0");
+        assertNotNull(pfailNode);
+        assertFalse("旧 fail? 标志应被清除", pfailNode.isPfail());
+        assertTrue(pfailNode.isMaster());
+
+        // 验证：槽位分配仍应正确恢复
+        assertEquals("b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0", config.getSlotOwner(5461));
+        assertEquals("c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0", config.getSlotOwner(10923));
     }
 
     /**

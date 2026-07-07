@@ -273,6 +273,9 @@ public class ClusterConfigPersister {
         }
 
         // 添加状态标志
+        // 注意：FAIL/PFAIL 是运行时瞬时状态，不持久化到 nodes.conf。
+        // 对齐 Redis 行为（clusterSaveConfig 不写 fail/fail?），重启后由故障检测器重新判定，
+        // 否则全集群停止后重启，对端节点会以 FAIL 状态加载且永远无法恢复（无人发 PING 触发清除）。
         for (ClusterNodeState state : node.getState()) {
             switch (state) {
                 case MASTER:
@@ -280,12 +283,6 @@ public class ClusterConfigPersister {
                     break;
                 case SLAVE:
                     flags.add("slave");
-                    break;
-                case FAIL:
-                    flags.add("fail");
-                    break;
-                case PFAIL:
-                    flags.add("fail?");
                     break;
                 case HANDSHAKE:
                     flags.add("handshake");
@@ -296,6 +293,7 @@ public class ClusterConfigPersister {
                 case NOFLAGS:
                     flags.add("noflags");
                     break;
+                // FAIL / PFAIL 故意不写入：运行时瞬时状态，不落盘
                 default:
                     break;
             }
@@ -484,11 +482,12 @@ public class ClusterConfigPersister {
                 case "slave":
                     node.addState(ClusterNodeState.SLAVE);
                     break;
+                // fail / fail? 是运行时瞬时状态，不应从 nodes.conf 恢复。
+                // 兼容修复前落盘的旧文件：忽略这两个标志，让故障检测器在运行时重新判定，
+                // 避免全集群重启后对端节点以 FAIL 状态加载导致死锁。
                 case "fail":
-                    node.addState(ClusterNodeState.FAIL);
-                    break;
                 case "fail?":
-                    node.addState(ClusterNodeState.PFAIL);
+                    logger.debug("忽略历史 nodes.conf 中的瞬时状态标志: {}, nodeId={}", flag, node.getNodeId());
                     break;
                 case "handshake":
                     node.addState(ClusterNodeState.HANDSHAKE);

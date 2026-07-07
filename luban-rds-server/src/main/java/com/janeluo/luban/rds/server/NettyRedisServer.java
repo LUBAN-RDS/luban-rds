@@ -321,6 +321,13 @@ public class NettyRedisServer implements RedisServer {
         
         // 5. 初始化 SlotManager
         this.slotManager = new DefaultSlotManager(nodeId);
+        // 从已恢复的 ClusterConfig 重建 SlotManager 槽位表。
+        // restoreClusterFromConfig() 只写了 clusterConfig.slotAssignment，而命令路由
+        // (RedisServerHandler.checkSlotAndRedirect) 只读 slotManager。若不 seed，重启后
+        // slotManager 全空，本节点拥有的槽位会返回 CLUSTERDOWN，集群无法对外服务。
+        if (loadedConfig != null) {
+            seedSlotManagerFromConfig();
+        }
         
         // 6. 初始化 ClusterStateManager
         this.clusterStateManager = new ClusterStateManager(clusterConfig);
@@ -427,6 +434,40 @@ public class NettyRedisServer implements RedisServer {
         
         logger.info("从配置文件恢复集群状态: 节点数={}, 槽位数={}, currentEpoch={}, configEpoch={}",
                 loaded.getNodeCount(), restoredSlots, loaded.getCurrentEpoch(), loaded.getConfigEpoch());
+    }
+
+    /**
+     * 从已恢复的 ClusterConfig 重建 SlotManager 槽位表
+     * <p>
+     * 命令路由（{@code RedisServerHandler.checkSlotAndRedirect}）只读 {@link SlotManager}，
+     * 而 {@link #restoreClusterFromConfig(ClusterConfig)} 只写了 {@link ClusterConfig} 的槽位分配表。
+     * 重启恢复后必须把 ClusterConfig 中的槽位归属同步到 SlotManager，否则本节点拥有的槽位
+     * 会被判定为"未分配"而返回 {@code -CLUSTERDOWN Hash slot not served}。
+     * </p>
+     * <p>
+     * 对每个已分配槽位调用 {@code slotManager.setSlotOwner(slot, owner)}：
+     * owner 为本节点时设置 mySlots（使 isSlotLocal 返回 true），owner 为其他节点时
+     * 仅记录 slotOwners（使 isSlotAssigned 返回 true 并能给出正确的 MOVED 目标）。
+     * </p>
+     */
+    private void seedSlotManagerFromConfig() {
+        if (clusterConfig == null || slotManager == null) {
+            return;
+        }
+        int localSlots = 0;
+        int remoteSlots = 0;
+        for (int i = 0; i < ClusterNode.CLUSTER_SLOTS; i++) {
+            String owner = clusterConfig.getSlotOwner(i);
+            if (owner != null) {
+                slotManager.setSlotOwner(i, owner);
+                if (owner.equals(clusterConfig.getMyNodeId())) {
+                    localSlots++;
+                } else {
+                    remoteSlots++;
+                }
+            }
+        }
+        logger.info("从集群配置重建 SlotManager: 本节点槽位={}, 其他节点槽位={}", localSlots, remoteSlots);
     }
 
     /**
