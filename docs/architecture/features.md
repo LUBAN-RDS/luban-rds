@@ -392,10 +392,11 @@ Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
 |------|----------|
 | ClusterNode | 节点数据模型，包含 ID、地址、状态、槽位分配 |
 | SlotManager | 槽位管理，支持 16384 槽位分配和查询 |
-| ClusterConfig | 集群配置管理，节点列表和槽位分配表 |
-| GossipProtocol | Gossip 协议实现，心跳检测和故障发现 |
+| ClusterConfig | 集群配置管理，节点列表和槽位分配表；支持脏标记（dirty flag）追踪拓扑变更 |
+| ClusterConfigPersister | 集群配置持久化器，将 `ClusterConfig` 同步到 `nodes.conf` 并兼容旧版含 `fail` 标志的格式 |
+| GossipProtocol | Gossip 协议实现，心跳检测和故障发现；节点变更时主动触发配置持久化 |
 | ClusterBusServer | 集群总线服务器，端口 = 服务端口 + 10000 |
-| ClusterCommandHandler | CLUSTER 命令处理器 |
+| ClusterCommandHandler | CLUSTER 命令处理器；处理 MEET/FORGET/ADDSLOTS 等命令时通知拓扑变更 |
 
 ### 17.3 槽位管理
 
@@ -456,7 +457,53 @@ Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
 - Redisson Cluster（完整兼容，`CLUSTER NODES` 行尾修复后）
 - `redis-cli --cluster create`（v1.0.2+ 完整兼容，不再卡在 `Waiting for the cluster to join`）
 
-### 17.8 集群一键搭建 CLI（v1.0.3+）
+### 17.8 集群配置持久化与节点状态恢复（v1.0.4+）
+
+v1.0.4 实现了对标 Redis 7 的集群配置持久化与节点状态恢复机制，节点重启后无需重新执行 `MEET`/`ADDSLOTS` 等初始化操作。
+
+**核心机制**：
+
+| 机制 | 描述 |
+|------|------|
+| `nodes.conf` 持久化 | `ClusterConfigPersister` 在拓扑变更时将集群配置同步到 `cluster-config-file` 指定路径 |
+| 脏标记（dirty flag） | `ClusterConfig.markDirty` / `isDirty` / `clearDirty` 仅在发生实际变更时触发落盘，避免频繁 I/O |
+| 自动持久化触发 | `ClusterCommandHandler` 处理命令时主动标记 dirty；`GossipProtocol` 在节点变更时也触发持久化 |
+| 周期性检查 | 类 Redis 7 `clusterSaveConfigIfNeeded` 的周期任务，兜底刷新未及时落盘的脏配置 |
+| 状态恢复加载 | 启动时从 `nodes.conf` 加载节点列表、槽位分配与 config epoch，复用已有节点 ID |
+| 槽位表重建 | 从恢复的 `ClusterConfig` 重建 `SlotManager` 槽位表，重启即可正常服务请求 |
+| 启动期连接 | 启动时主动 `MEET` 已知节点，避免全集群重启后节点成孤岛 |
+| 兼容旧版格式 | 解析时忽略 `fail` 标志，对 v1.0.0 ~ v1.0.3 已生成的 `nodes.conf` 完全兼容 |
+
+**持久化触发点**：
+
+| 来源 | 场景 |
+|------|------|
+| `CLUSTER MEET` | 加入新节点 |
+| `CLUSTER FORGET` | 移除节点 |
+| `CLUSTER ADDSLOTS` / `DELSLOTS` / `SETSLOT` | 槽位分配变更 |
+| `CLUSTER REPLICATE` | 主从关系变更 |
+| Gossip 协议 | 节点发现 / 失效传播 |
+| 周期任务 | 兜底刷新未及时落盘的 dirty 配置 |
+
+**`nodes.conf` 示例**：
+
+```
+vars currentEpoch 6 currentMyEpoch 1
+vars myId a1b2c3d4e5f6...
+slots 0-5460
+slots 5461-10922
+slots 10923-16383
+a1b2c3d4e5f6 192.168.8.161:9736@19736 master - 0 1234567890 1 connected
+f6e5d4c3b2a1 192.168.8.161:9739@19739 master - 0 1234567890 2 connected
+```
+
+> 运行时状态 `fail` / `fail?` 标志不会被持久化，避免重启后误判节点状态。
+
+**运维建议**：
+- 升级到 v1.0.4 后无需手动干预，旧版 `nodes.conf` 会被自动迁移
+- 全集群同时重启时建议保持 `cluster-node-timeout` 内的时钟同步，避免节点孤立超时
+
+### 17.9 集群一键搭建 CLI（v1.0.3+）
 
 `luban-rds-client` 模块自带 `RedisCliMain`，对齐 `redis-cli --cluster create` 子集，可在不引入外部编排脚本的情况下远程搭建集群。
 

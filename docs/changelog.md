@@ -1,11 +1,44 @@
 ---
 title: 更新日志
-last_updated: 2026-07-07
-version: 1.0.3
+last_updated: 2026-07-08
+version: 1.0.4
 ---
 # 更新日志
 
 Luban-RDS 是一款轻量级、高性能、完全兼容 RESP 协议的 Java 内存数据库，易于嵌入和扩展。
+
+## [1.0.4] - 2026-07-08
+
+### 新增功能
+
+- **集群配置持久化与节点状态恢复**
+  - 启动时自动从 `nodes.conf`（`cluster-config-file`）加载已有集群配置，恢复节点列表、槽位分配和配置纪元信息
+  - 优先复用已存在的节点 ID，避免重启后节点 ID 漂移导致拓扑分裂
+  - 重启后保留节点状态，仅更新可能变化的 IP/端口网络地址信息
+  - 优化集群初始化流程，增加配置文件加载和状态恢复步骤
+  - 详细日志记录配置加载与状态恢复过程，便于运维排查
+  - 保持 `MYSELF` 节点的连接状态和其它重要属性在重启后不变
+- **集群配置自动持久化机制**
+  - 引入脏标记（dirty flag）追踪集群拓扑变更，避免每次操作都同步刷盘
+  - `ClusterConfig` 新增 `markDirty`、`isDirty`、`clearDirty` 方法，供命令处理器在拓扑变更时主动标记
+  - 通过 Gossip 协议在节点变更时自动触发配置持久化
+  - `ClusterCommandHandler` 在处理 MEET/FORGET/ADDSLOTS 等命令时通知拓扑变更
+  - 实现类 Redis 7 `clusterSaveConfigIfNeeded` 的周期性检查机制，定时刷新脏配置
+  - 优化启动流程，移除重复的配置保存调用
+
+### 修复
+
+- **集群重启后节点状态和槽位分配恢复问题**
+  - 移除 `FAIL`/`PFAIL` 状态的持久化，这些是运行时瞬时状态，不应写入 `nodes.conf`
+  - 添加启动时主动连接已知节点功能，避免全集群重启后节点成孤岛无法恢复
+  - 实现从恢复的 `ClusterConfig` 重建 `SlotManager` 槽位表，确保重启后能正常服务请求
+  - 添加兼容旧版 `nodes.conf` 含 `fail` 标志的处理逻辑，避免升级后启动失败
+  - 增加相关单元测试验证重启恢复场景的正确性
+
+### 兼容性
+
+- 与 v1.0.0 ~ v1.0.3 已生成的 `nodes.conf` 保持向后兼容（自动忽略 `fail` 标志）
+- 与 Jedis / Lettuce / Redisson / `redis-cli --cluster create` 验证通过
 
 ## [1.0.3] - 2026-07-07
 

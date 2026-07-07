@@ -57,7 +57,7 @@ title: 故障排查
    ```
 
 **解决方案**：
-- 启动服务：`java -jar luban-rds-bin-1.0.3.jar`
+- 启动服务：`java -jar luban-rds-bin-1.0.4.jar`
 - 修正端口配置：确保端口未被占用
 - 修正绑定地址：设置为 `0.0.0.0` 允许所有地址访问
 - 配置防火墙：开放 9736 端口
@@ -199,7 +199,7 @@ title: 故障排查
 
 **解决方案**：
 - 增加系统内存
-- 调整 JVM 堆内存：`java -Xms4g -Xmx8g -jar luban-rds-bin-1.0.3.jar`
+- 调整 JVM 堆内存：`java -Xms4g -Xmx8g -jar luban-rds-bin-1.0.4.jar`
 - 减少数据量：删除不必要的数据
 - 调整 `maxmemory` 限制：设置为系统内存的 70-80%
 
@@ -419,7 +419,7 @@ title: 故障排查
 - 增加内存：避免内存溢出
 - 升级版本：修复已知 bug
 - 检查硬件：确保硬件正常
-- 重启服务：`java -jar luban-rds-bin-1.0.3.jar`
+- 重启服务：`java -jar luban-rds-bin-1.0.4.jar`
 
 ### 5.2 服务启动失败
 
@@ -692,12 +692,12 @@ tail -f /var/log/syslog | grep luban-rds
 **从 RDB 文件恢复**：
 1. **停止服务**：`redis-cli -h localhost -p 9736 SHUTDOWN`
 2. **复制 RDB 文件**：`cp /path/to/backup/dump.rdb /data/`
-3. **启动服务**：`java -jar luban-rds-bin-1.0.3.jar`
+3. **启动服务**：`java -jar luban-rds-bin-1.0.4.jar`
 
 **从 AOF 文件恢复**：
 1. **停止服务**：`redis-cli -h localhost -p 9736 SHUTDOWN`
 2. **复制 AOF 文件**：`cp /path/to/backup/appendonly.aof /data/`
-3. **启动服务**：`java -jar luban-rds-bin-1.0.3.jar`
+3. **启动服务**：`java -jar luban-rds-bin-1.0.4.jar`
 
 ### 9.2 服务恢复
 
@@ -707,14 +707,14 @@ tail -f /var/log/syslog | grep luban-rds
    ```bash
    rm -f /data/dump.rdb /data/appendonly.aof
    ```
-3. **启动服务**：`java -jar luban-rds-bin-1.0.3.jar`
+3. **启动服务**：`java -jar luban-rds-bin-1.0.4.jar`
 4. **导入数据**：从备份或其他来源导入数据
 
 **常规恢复**：
 1. **停止服务**：`redis-cli -h localhost -p 9736 SHUTDOWN`
 2. **检查配置**：确保配置正确
 3. **检查持久化文件**：确保文件完整
-4. **启动服务**：`java -jar luban-rds-bin-1.0.3.jar`
+4. **启动服务**：`java -jar luban-rds-bin-1.0.4.jar`
 5. **验证服务**：`redis-cli -h localhost -p 9736 PING`
 
 ## 10. 预防措施

@@ -41,6 +41,7 @@ Luban-RDS 是一款完全兼容 Redis 协议的轻量级高性能内存数据库
 - **Stream 数据类型**：完整支持 Stream 相关命令（XADD、XLEN、XRANGE、XREVRANGE、XREAD、XGROUP、XREADGROUP 等）
 - **Redis Cluster 集群**：完整实现 Redis Cluster 协议，支持 16384 槽位分配、MOVED/ASK 重定向、Gossip 协议、故障检测
 - **集群一键搭建**：内置 `redis-cli --cluster create` 兼容的 CLI 工具 `RedisCliMain`，一行命令完成多节点集群创建与主从划分
+- **集群配置持久化与节点恢复（v1.0.4）**：`nodes.conf` 自动持久化、节点 ID 复用、槽位表重建、启动主动建连，避免全集群重启后节点成孤岛
 - **主从复制**：完整支持主从复制功能，包括全量同步和增量同步
 - **健壮的网络层**：NETTY 客户端与服务端协议解析器均修复了 TCP 半包/粘包问题，能够正确处理跨段 RESP 响应与多响应合包
 
@@ -112,7 +113,7 @@ OK
 <dependency>
     <groupId>com.janeluo.luban</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.3</version>
+    <version>1.0.4</version>
 </dependency>
 ```
 
@@ -624,7 +625,7 @@ docker-compose down
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.3 .
+docker build -t luban-rds:1.0.4 .
 
 # 基础运行
 docker run -d \
@@ -634,7 +635,7 @@ docker run -d \
   -e LUBAN_RDS_PORT=9736 \
   -e LUBAN_RDS_PERSIST_MODE=rdb \
   -e JAVA_OPTS="-Xms256m -Xmx512m" \
-  luban-rds:1.0.3
+  luban-rds:1.0.4
 
 # 带密码运行
 docker run -d \
@@ -642,7 +643,7 @@ docker run -d \
   -p 9736:9736 \
   -v luban-rds-data:/data \
   -e LUBAN_RDS_REQUIREPASS=your-secure-password \
-  luban-rds:1.0.3
+  luban-rds:1.0.4
 ```
 
 #### Docker 环境变量
@@ -831,6 +832,15 @@ luban.rds.server.data-dir=./data
 |---------|---------|
 | **集群一键搭建 CLI** | 新增 `RedisCliMain`（`--cluster create ... --cluster-replicas N`），对齐 `redis-cli --cluster create`，支持程序化嵌入与静默模式 |
 | **TCP 半包/粘包** | `RedisProtocolParser` 修复半包回退、CRLF 检测与解析死循环；`NettyRedisClient` 引入累积缓冲与循环解析，正确处理跨段 RESP 与多响应合包 |
+
+### v1.0.4（已发布）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **集群配置持久化** | `ClusterConfigPersister` 在拓扑变更（MEET/FORGET/ADDSLOTS 等）时自动同步 `nodes.conf`；引入 dirty flag 机制与类 Redis 7 `clusterSaveConfigIfNeeded` 周期任务，避免频繁 I/O |
+| **节点状态恢复** | 节点启动时从 `nodes.conf` 加载节点列表、槽位分配与 config epoch，复用已有节点 ID；从恢复的 `ClusterConfig` 重建 `SlotManager` 槽位表 |
+| **主动建连** | 启动时主动 `MEET` 已知节点，避免全集群重启后节点成孤岛无法恢复 |
+| **版本兼容** | 解析 `nodes.conf` 时忽略 `fail` 标志，v1.0.0 ~ v1.0.3 已生成的配置文件可平滑升级 |
 
 ### 开发中
 

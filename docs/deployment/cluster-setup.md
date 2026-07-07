@@ -1,7 +1,7 @@
 ---
 title: 集群部署
-last_updated: 2026-07-07
-version: 1.0.3
+last_updated: 2026-07-08
+version: 1.0.4
 ---
 
 # 集群部署
@@ -301,13 +301,27 @@ Lettuce、Redisson 同样原生支持，详细参见 [功能架构 17.7](../arch
 - NAT 环境下确认 `cluster-announce-bus-port` 配置正确
 - 通过 `CLUSTER INFO` 中 `cluster_stats_messages_sent` 与 `received` 是否增长判断 Gossip 是否正常
 
-### 8.3 nodes.conf 恢复
+### 8.3 nodes.conf 恢复（v1.0.4+）
 
-`cluster-config-file` 在每次集群状态变更时自动持久化。节点重启时自动加载：
+v1.0.4 起，`cluster-config-file`（默认 `nodes.conf`）由 `ClusterConfigPersister` 在拓扑变更时自动持久化，节点重启时自动加载：
 
-- **健康重启**：节点重启后自动重新加入集群
-- **磁盘损坏**：删除 `nodes.conf` 后重启会以新节点 ID 启动，需 `CLUSTER MEET` 与 `CLUSTER NODES` 重新加入
+- **健康重启**：节点自动从 `nodes.conf` 加载节点列表、槽位分配、config epoch，复用已有节点 ID，重建 `SlotManager`，启动即可正常服务
+- **全集群重启**：节点启动时主动 `MEET` 已知节点，避免全集群重启后节点成孤岛无法恢复
+- **磁盘损坏**：删除 `nodes.conf` 后重启会以新节点 ID 启动，需重新执行 `CLUSTER MEET` 与 `CLUSTER ADDSLOTS`
 - **脑裂恢复**：多数派节点选举新纪元（`config-epoch`），少数派重启后被 `FORGET` 重新加入
+- **版本兼容**：v1.0.0 ~ v1.0.3 生成的含 `fail` 标志的 `nodes.conf` 可平滑升级，解析时会忽略 `fail` 标志
+
+**持久化触发点**：
+
+| 来源 | 触发场景 |
+|------|----------|
+| `ClusterCommandHandler` | 处理 MEET / FORGET / ADDSLOTS / DELSLOTS / SETSLOT / REPLICATE 等命令 |
+| `GossipProtocol` | 节点变更、Gossip 拓扑更新 |
+| 周期任务 | 兜底刷新 dirty 配置（类 Redis 7 `clusterSaveConfigIfNeeded`） |
+
+**运维建议**：
+- 升级到 v1.0.4 后无需手动迁移，旧版 `nodes.conf` 会被自动兼容
+- 全集群同时重启时建议保持节点时钟同步（< `cluster-node-timeout`），避免节点孤立超时
 
 ### 8.4 跨机房部署
 

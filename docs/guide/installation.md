@@ -48,10 +48,10 @@ mvn clean package -DskipTests
 
 ```bash
 # 下载最新版本
-wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.3/luban-rds-bin-1.0.3.jar
+wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.4/luban-rds-bin-1.0.4.jar
 
 # 启动服务器
-java -jar luban-rds-bin-1.0.3.jar
+java -jar luban-rds-bin-1.0.4.jar
 ```
 
 ## 配置选项
@@ -92,13 +92,13 @@ Luban-RDS 使用 `luban-rds.conf` 配置文件，默认位于 `luban-rds-server/
 
 ```bash
 # 指定端口
-java -jar luban-rds-bin-1.0.3.jar --port 6380
+java -jar luban-rds-bin-1.0.4.jar --port 6380
 
 # 指定配置文件
-java -jar luban-rds-bin-1.0.3.jar --config /path/to/luban-rds.conf
+java -jar luban-rds-bin-1.0.4.jar --config /path/to/luban-rds.conf
 
 # 后台运行（Linux/Mac）
-nohup java -jar luban-rds-bin-1.0.3.jar > luban-rds.log 2>&1 &
+nohup java -jar luban-rds-bin-1.0.4.jar > luban-rds.log 2>&1 &
 ```
 
 ### 2. 环境变量

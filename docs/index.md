@@ -1,7 +1,7 @@
 ---
 title: Luban-RDS 文档
-last_updated: 2026-07-07
-version: 1.0.3
+last_updated: 2026-07-08
+version: 1.0.4
 ---
 
 <div align="center">
@@ -74,6 +74,18 @@ version: 1.0.3
 ---
 
 ## ✨ 版本特性
+
+### v1.0.4 (已发布)
+
+#### 🛠️ 集群配置持久化与节点恢复
+- ✅ **nodes.conf 自动持久化**: 集群拓扑变更（MEET/FORGET/ADDSLOTS 等）后自动落盘
+  - 引入 dirty flag 机制，避免每次操作都同步刷盘
+  - 实现类 Redis 7 `clusterSaveConfigIfNeeded` 的周期性检查机制
+- ✅ **节点状态恢复**: 节点重启后从 `nodes.conf` 加载完整集群拓扑
+  - 复用已有节点 ID，避免重启后拓扑分裂
+  - 自动重建 `SlotManager` 槽位表，启动后即可正常服务
+  - 启动时主动连接已知节点，避免全集群重启后节点成孤岛
+  - 兼容旧版含 `fail` 标志的 `nodes.conf` 文件
 
 ### v1.0.3 (已发布)
 

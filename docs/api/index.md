@@ -28,7 +28,7 @@ Luban-RDS 采用 Maven 多模块结构，主要模块包括：
 
 | 项目 | 版本 |
 |------|------|
-| **当前版本** | 1.0.3 |
+| **当前版本** | 1.0.4 |
 | **Java 版本要求** | JDK 17+ |
 | **兼容 Redis 版本** | 6.0+ |
 
@@ -60,7 +60,7 @@ client.close();
 // <dependency>
 //     <groupId>com.janeluo.luban</groupId>
 //     <artifactId>luban-rds-spring-boot-starter</artifactId>
-//     <version>1.0.3</version>
+//     <version>1.0.4</version>
 // </dependency>
 
 // 使用 RedisTemplate

@@ -8,7 +8,19 @@
 
 ## 2. 项目状态
 
-### 2.1 v1.0.3 已发布功能（最新）
+### 2.1 v1.0.4 已发布功能（最新）
+
+#### 分布式特性 - 集群高可用与运维友好
+- [x] **集群配置持久化与节点状态恢复 (v1.0.4)**:
+  - `ClusterConfigPersister` 在拓扑变更时自动同步 `nodes.conf`（`cluster-config-file`）
+  - 脏标记（dirty flag）机制避免每次操作都同步刷盘；类 Redis 7 `clusterSaveConfigIfNeeded` 周期任务兜底刷新
+  - 启动时从 `nodes.conf` 加载节点列表、槽位分配与 config epoch，复用已有节点 ID
+  - 从恢复的 `ClusterConfig` 重建 `SlotManager` 槽位表，重启即可正常服务
+  - 启动时主动 `MEET` 已知节点，避免全集群重启后节点成孤岛
+  - 兼容旧版含 `fail` 标志的 `nodes.conf`，平滑升级
+- [x] **移除 FAIL/PFAIL 状态持久化 (v1.0.4)**: 运行时瞬时状态不应写入 `nodes.conf`，避免重启后误判节点状态
+
+### 2.2 v1.0.3 已发布功能
 
 #### 分布式特性 - 集群兼容性与可靠性
 - [x] **集群一键搭建 CLI (v1.0.3)**: `RedisCliMain` 对齐 `redis-cli --cluster create`，支持 `--cluster-replicas N`、`verbose` 静默模式与 Java 程序化调用 (`ClusterSetupCommand.createCluster(...)`)
