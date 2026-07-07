@@ -152,12 +152,16 @@ public class RedisProtocolParser {
      * 批量字符串是二进制安全的，直接返回原始字节不做任何编码转换
      */
     private byte[] parseBulkStringBytes(ByteBuf buffer) {
+        // 调用方（parseResp 的 '$' 分支或 parseArray 的元素解析）已在进入本方法前 markReaderIndex。
         int length = parseInteger(buffer);
         if (length < 0) {
+            // $-1 表示 RESP null bulk，属合法完整响应，字节已完整消费，不回退。
             return null;
         }
 
         if (buffer.readableBytes() < length + 2) {
+            // 内容或尾随 CRLF 尚未到齐（半包），回退到调用方的 mark 点，等待累积后重试。
+            buffer.resetReaderIndex();
             return null;
         }
 
@@ -196,30 +200,68 @@ public class RedisProtocolParser {
         byte firstByte = buffer.readByte();
 
         switch (firstByte) {
-            case '+':
-                return parseSimpleString(buffer);
-            case '-':
-                return parseError(buffer);
+            case '+': {
+                // parseLineUtf8 半包（CRLF 未到）时不消费字节，返回 null；
+                // reset 回类型字节 '+' 之前，等待累积后重试。
+                String value = parseSimpleString(buffer);
+                if (value == null) {
+                    buffer.resetReaderIndex();
+                }
+                return value;
+            }
+            case '-': {
+                String value = parseError(buffer);
+                if (value == null) {
+                    buffer.resetReaderIndex();
+                }
+                return value;
+            }
             case ':':
+                // 整数行 ':n\r\n' 通常很小，不易半包；保持原 parseInteger 行为。
                 return parseInteger(buffer);
             case '$':
+                // parseBulkStringBytes 已区分：$-1 合法 null（字节已完整消费，不回退）与
+                // 半包（已 reset 到 '$' 之前）。parseResp 不再 reset，避免把 $-1\r\n 回退导致死循环。
                 return parseBulkString(buffer);
             case '*':
+                // parseArrayValues：*-1 合法 null（已消费），半包已内部 reset 到 '*' 之前。
                 return parseArrayValues(buffer);
-            case '%':
-                return parseMapValues(buffer);
-            case '~':
-                return parseSetValues(buffer);
+            case '%': {
+                Map<Object, Object> value = parseMapValues(buffer);
+                if (value == null) {
+                    buffer.resetReaderIndex();
+                }
+                return value;
+            }
+            case '~': {
+                Set<Object> value = parseSetValues(buffer);
+                if (value == null) {
+                    buffer.resetReaderIndex();
+                }
+                return value;
+            }
             case '|':
                 return parseAttributeValues(buffer);
             case '_':
+                // parseNull 已自行处理：合法 _\r\n 不 reset，半包已 reset。
                 return parseNull(buffer);
-            case ',':
-                return parseDouble(buffer);
+            case ',': {
+                Double value = parseDouble(buffer);
+                if (value == null) {
+                    buffer.resetReaderIndex();
+                }
+                return value;
+            }
             case '#':
+                // parseBoolean 已自行处理 reset。
                 return parseBoolean(buffer);
-            case '(':
-                return parseBigNumber(buffer);
+            case '(': {
+                String value = parseBigNumber(buffer);
+                if (value == null) {
+                    buffer.resetReaderIndex();
+                }
+                return value;
+            }
             default:
                 buffer.resetReaderIndex();
                 return null;
@@ -257,6 +299,8 @@ public class RedisProtocolParser {
         }
 
         if (crlfIndex == -1) {
+            // CRLF 尚未到齐（半包）。本方法在找到 CRLF 后才读取字节，故此处未消费任何字节；
+            // 由调用方 parseResp 在 null 返回时 resetReaderIndex 回退类型字节，等待累积后重试。
             return null;
         }
 
