@@ -8,7 +8,25 @@
 
 ## 2. 项目状态
 
-### 2.1 v1.0.1 已发布功能
+### 2.1 v1.0.3 已发布功能（最新）
+
+#### 分布式特性 - 集群兼容性与可靠性
+- [x] **集群一键搭建 CLI (v1.0.3)**: `RedisCliMain` 对齐 `redis-cli --cluster create`，支持 `--cluster-replicas N`、`verbose` 静默模式与 Java 程序化调用 (`ClusterSetupCommand.createCluster(...)`)
+- [x] **TCP 半包/粘包修复 (v1.0.3)**:
+  - `RedisProtocolParser` 增加 reader index 回退机制、所有 RESP 分支 null 检查与解析失败重置
+  - `NettyRedisClient` 引入累积缓冲 + 循环解析，处理跨 TCP 段的 RESP 响应与多响应合包
+- [x] **CLUSTER SLOTS (v1.0.2)**: 完整实现，返回当前槽位分布数组
+- [x] **集群 Gossip & 拓扑修复 (v1.0.2)**:
+  - Gossip 发现新节点后主动建连 / `MEET`
+  - `GossipTask` 不再跳过 `HANDSHAKE` 状态节点
+  - Gossip 消息携带槽位所有权（`cluster_state` 才能正确转 `ok`）
+- [x] **`CLUSTER NODES` 行尾符修复 (v1.0.2)**: 改用裸 `\n`，Redisson 解析不再抛 `NumberFormatException`
+- [x] **集群握手协议修复 (v1.0.2)**: 修复 `CLUSTER MEET` 装配缺陷与临时 ID 解析
+- [x] **`cluster_enabled` 字段补全 (v1.0.2)**: `CLUSTER INFO` / `INFO` 同步返回
+- [x] **非集群模式跳过 CLUSTER 拦截 (v1.0.2)**: 行为更明确，便于排查
+- [x] **集群调试日志降级 (v1.0.2)**: Gossip 调试日志调整为 `TRACE` 级，降低生产环境开销
+
+### 2.2 v1.0.1 已发布功能
 
 #### 分布式特性
 - [x] **Redis Cluster 集群**: 完整实现 Redis Cluster 协议，支持 16384 槽位、MOVED/ASK 重定向、Gossip 心跳。

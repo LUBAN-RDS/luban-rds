@@ -86,7 +86,7 @@ mvn clean package -DskipTests
 cd luban-rds-bin/target/
 
 # 启动服务
-java -jar luban-rds-bin-1.0.0.jar
+java -jar luban-rds-bin-1.0.3.jar
 
 # 或使用启动脚本
 chmod +x start.sh
@@ -98,12 +98,12 @@ chmod +x start.sh
 **步骤 1：下载预编译包**
 从 GitHub Releases 页面下载最新的预编译包：
 ```bash
-wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.1/luban-rds-bin-1.0.1.jar
+wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.3/luban-rds-bin-1.0.3.jar
 ```
 
 **步骤 2：启动服务**
 ```bash
-java -jar luban-rds-bin-1.0.1.jar
+java -jar luban-rds-bin-1.0.3.jar
 ```
 
 ### 2.3 Docker 部署
@@ -150,26 +150,26 @@ redis-cli -h localhost -p 9736 PING
 **步骤 1：构建镜像**
 ```bash
 # 在项目根目录执行
-docker build -t luban-rds:1.0.1 .
+docker build -t luban-rds:1.0.3 .
 ```
 
 **步骤 2：运行容器**
 ```bash
 # 基本运行
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.1
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.3
 
 # 带持久化存储
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v luban-rds-data:/data \
-  luban-rds:1.0.1
+  luban-rds:1.0.3
 
 # 带自定义配置
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v /path/to/luban-rds.conf:/app/config/luban-rds.conf:ro \
   -v luban-rds-data:/data \
-  luban-rds:1.0.1
+  luban-rds:1.0.3
 
 # 带密码认证
 docker run -d --name luban-rds \
@@ -378,7 +378,7 @@ spec:
     spec:
       containers:
         - name: luban-rds
-          image: luban-rds:1.0.1
+          image: luban-rds:1.0.3
           ports:
             - containerPort: 9736
           volumeMounts:
@@ -424,7 +424,7 @@ kubectl get events -n luban-rds --sort-by='.lastTimestamp'
 <dependency>
     <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.3</version>
 </dependency>
 ```
 
@@ -497,7 +497,7 @@ Luban-RDS 支持嵌入到应用中使用，无需单独部署服务：
 <dependency>
     <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-server</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.3</version>
 </dependency>
 ```
 
@@ -561,22 +561,22 @@ Luban-RDS 支持通过命令行参数配置服务：
 
 ```bash
 # 基本启动
-java -jar luban-rds-bin-1.0.1.jar
+java -jar luban-rds-bin-1.0.3.jar
 
 # 带端口和主机
-java -jar luban-rds-bin-1.0.1.jar --port 9736 --host 0.0.0.0
+java -jar luban-rds-bin-1.0.3.jar --port 9736 --host 0.0.0.0
 
 # 带密码
-java -jar luban-rds-bin-1.0.1.jar --password your-secure-password
+java -jar luban-rds-bin-1.0.3.jar --password your-secure-password
 
 # 带持久化配置
-java -jar luban-rds-bin-1.0.1.jar \
+java -jar luban-rds-bin-1.0.3.jar \
   --rdb-enabled true \
   --rdb-filename dump.rdb \
   --rdb-save 900 1 300 10 60 10000
 
 # 带 AOF 配置
-java -jar luban-rds-bin-1.0.1.jar \
+java -jar luban-rds-bin-1.0.3.jar \
   --aof-enabled true \
   --aof-filename appendonly.aof \
   --aof-sync always
@@ -645,7 +645,7 @@ export LUBAN_RDS_PASSWORD=your-secure-password
 export LUBAN_RDS_RDB_ENABLED=true
 
 # 启动服务
-java -jar luban-rds-bin-1.0.0.jar
+java -jar luban-rds-bin-1.0.3.jar
 ```
 
 ## 5. 服务验证

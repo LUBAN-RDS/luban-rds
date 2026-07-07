@@ -35,10 +35,10 @@ redis-cli -h localhost -p 9736 PING
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.1 .
+docker build -t luban-rds:1.0.3 .
 
 # 运行容器
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.1
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.3
 
 # 验证服务
 redis-cli -h localhost -p 9736 PING
@@ -85,7 +85,7 @@ start.bat
 ### 使用 Java 命令
 
 ```bash
-java -jar luban-rds-bin/target/luban-rds-bin-1.0.1.jar
+java -jar luban-rds-bin/target/luban-rds-bin-1.0.3.jar
 ```
 
 服务器默认监听 **9736** 端口。

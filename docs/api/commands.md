@@ -551,6 +551,26 @@ CLUSTER SETSLOT 1000 NODE abc123...
 
 # 故障转移
 CLUSTER FAILOVER
+
+# 查看槽位分布数组（v1.0.2+ 完整实现，对齐 Redis 官方格式）
+CLUSTER SLOTS
+# 返回示例：
+# 1) 1) (integer) 0
+#    2) (integer) 5460
+#    3) 1) "<ip>"
+#       2) (integer) 9736
+#       3) "<node-id>"
+# 2) 1) (integer) 5461
+#    2) (integer) 10922
+#    ...
+
+# 一键搭建集群（CLI，v1.0.3+）：对齐 redis-cli --cluster create
+java -cp luban-rds-client.jar \
+     com.janeluo.luban.rds.client.cli.RedisCliMain \
+     --cluster create \
+     127.0.0.1:9736 127.0.0.1:9737 127.0.0.1:9738 \
+     127.0.0.1:9739 127.0.0.1:9740 127.0.0.1:9741 \
+     --cluster-replicas 1
 ```
 
 ### 槽位计算

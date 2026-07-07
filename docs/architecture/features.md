@@ -413,15 +413,16 @@ Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
 
 | 命令 | 功能描述 |
 |------|----------|
-| CLUSTER INFO | 集群状态信息 |
-| CLUSTER NODES | 节点列表和槽位分配 |
-| CLUSTER MEET ip port | 添加节点到集群 |
+| CLUSTER INFO | 集群状态信息（含 `cluster_enabled`） |
+| CLUSTER NODES | 节点列表和槽位分配（裸 `\n` 行尾，兼容 Redisson） |
+| CLUSTER MEET ip port | 添加节点到集群（v1.0.2 修复装配缺陷与临时 ID 解析） |
 | CLUSTER FORGET nodeid | 从集群移除节点 |
 | CLUSTER ADDSLOTS slot [...] | 分配槽位 |
 | CLUSTER SETSLOT slot NODE nodeid | 设置槽位归属 |
 | CLUSTER KEYSLOT key | 计算键的槽位 |
 | CLUSTER REPLICATE nodeid | 配置为从节点 |
 | CLUSTER FAILOVER | 手动故障转移 |
+| CLUSTER SLOTS | 返回当前槽位分布数组（v1.0.2 完整实现） |
 
 ### 17.5 重定向机制
 
@@ -452,7 +453,32 @@ Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
 **已测试客户端**：
 - Jedis Cluster（完整兼容）
 - Lettuce Cluster（完整兼容）
-- Redisson Cluster（完整兼容）
+- Redisson Cluster（完整兼容，`CLUSTER NODES` 行尾修复后）
+- `redis-cli --cluster create`（v1.0.2+ 完整兼容，不再卡在 `Waiting for the cluster to join`）
+
+### 17.8 集群一键搭建 CLI（v1.0.3+）
+
+`luban-rds-client` 模块自带 `RedisCliMain`，对齐 `redis-cli --cluster create` 子集，可在不引入外部编排脚本的情况下远程搭建集群。
+
+**关键组件**：
+
+| 组件 | 功能 |
+|------|------|
+| `RedisCliMain` | CLI 入口，支持 `--cluster create ... --cluster-replicas N` 参数解析 |
+| `ClusterSetupCommand` | 编排 MEET → 主从划分 → 槽位均分 → 状态校验；提供 `createCluster(...)` 静态方法供程序化调用 |
+| `NodeAddress` | 解析 `host:port` 地址格式 |
+| `ReplySupport` | RESP 协议回复判定工具 |
+| `ClusterSetupException` | 统一异常类型 |
+
+**关键修复（v1.0.2 → v1.0.3）**：
+
+| 修复 | 影响 |
+|------|------|
+| Gossip 发现新节点后主动建连 / MEET | 解决 `--cluster create` 拓扑不收敛 |
+| `GossipTask` 不再跳过 HANDSHAKE 节点 | 握手流程正常推进 |
+| Gossip 消息携带槽位所有权 | `cluster_state` 正确转为 `ok` |
+| `CLUSTER NODES` 行尾改裸 `\n` | Redisson `ClusterNodesDecoder` 不再抛 `NumberFormatException` |
+| `ClusterSetupCommand` 静默模式 | 进度输出可控，便于批量部署 |
 
 ## 18. 总结
 

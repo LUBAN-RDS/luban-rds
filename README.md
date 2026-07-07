@@ -40,7 +40,9 @@ Luban-RDS 是一款完全兼容 Redis 协议的轻量级高性能内存数据库
 - **分布式追踪**：内置 TraceId 全链路追踪能力，自动注入日志，多线程环境下自动传递
 - **Stream 数据类型**：完整支持 Stream 相关命令（XADD、XLEN、XRANGE、XREVRANGE、XREAD、XGROUP、XREADGROUP 等）
 - **Redis Cluster 集群**：完整实现 Redis Cluster 协议，支持 16384 槽位分配、MOVED/ASK 重定向、Gossip 协议、故障检测
+- **集群一键搭建**：内置 `redis-cli --cluster create` 兼容的 CLI 工具 `RedisCliMain`，一行命令完成多节点集群创建与主从划分
 - **主从复制**：完整支持主从复制功能，包括全量同步和增量同步
+- **健壮的网络层**：NETTY 客户端与服务端协议解析器均修复了 TCP 半包/粘包问题，能够正确处理跨段 RESP 响应与多响应合包
 
 ## 🚀 快速开始
 
@@ -110,7 +112,7 @@ OK
 <dependency>
     <groupId>com.janeluo.luban</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.3</version>
 </dependency>
 ```
 
@@ -313,6 +315,47 @@ luban-rds/
 
 ### 集群命令
 `CLUSTER INFO` `CLUSTER NODES` `CLUSTER MEET` `CLUSTER FORGET` `CLUSTER ADDSLOTS` `CLUSTER DELSLOTS` `CLUSTER SETSLOT` `CLUSTER KEYSLOT` `CLUSTER COUNTKEYSINSLOT` `CLUSTER GETKEYSINSLOT` `CLUSTER REPLICATE` `CLUSTER FAILOVER` `CLUSTER RESET` `CLUSTER SAVECONFIG` `CLUSTER SLAVES` `CLUSTER REPLICAS` `CLUSTER MYID` `CLUSTER SLOTS` `CLUSTER COUNTFAILUREREPORTS` `ASKING` `READONLY` `READWRITE`
+
+#### 集群一键搭建 CLI（v1.0.3+）
+
+Luban-RDS 自带 `RedisCliMain`，对齐 `redis-cli --cluster create` 子集，可一键完成多节点集群创建、主从划分与槽位分配：
+
+```bash
+# 启动 6 个独立节点（端口 9736–9741，均启用 cluster-enabled yes）
+
+# 一键创建 3 主 3 从集群
+java -cp luban-rds-client.jar com.janeluo.luban.rds.client.cli.RedisCliMain \
+     --cluster create \
+     192.168.8.161:9736 192.168.8.161:9737 192.168.8.161:9738 \
+     192.168.8.161:9739 192.168.8.161:9740 192.168.8.161:9741 \
+     --cluster-replicas 1
+
+# 仅创建 3 主 0 从
+java -cp luban-rds-client.jar com.janeluo.luban.rds.client.cli.RedisCliMain \
+     --cluster create \
+     127.0.0.1:9736 127.0.0.1:9737 127.0.0.1:9738
+
+# 帮助信息
+java -cp luban-rds-client.jar com.janeluo.luban.rds.client.cli.RedisCliMain --help
+```
+
+也可在 Java 代码中以编程方式调用：
+
+```java
+import com.janeluo.luban.rds.client.cli.ClusterSetupCommand;
+import com.janeluo.luban.rds.client.cli.NodeAddress;
+
+List<NodeAddress> nodes = List.of(
+    new NodeAddress("127.0.0.1", 9736),
+    new NodeAddress("127.0.0.1", 9737),
+    new NodeAddress("127.0.0.1", 9738),
+    new NodeAddress("127.0.0.1", 9739),
+    new NodeAddress("127.0.0.1", 9740),
+    new NodeAddress("127.0.0.1", 9741)
+);
+// verbose=false 进入静默模式；适用于脚本/批量部署
+ClusterSetupCommand.createCluster(nodes, /*replicas*/ 1, /*verbose*/ false);
+```
 
 ### 复制命令
 `SLAVEOF` `PSYNC` `REPLCONF` `ROLE`
@@ -581,7 +624,7 @@ docker-compose down
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.1 .
+docker build -t luban-rds:1.0.3 .
 
 # 基础运行
 docker run -d \
@@ -591,7 +634,7 @@ docker run -d \
   -e LUBAN_RDS_PORT=9736 \
   -e LUBAN_RDS_PERSIST_MODE=rdb \
   -e JAVA_OPTS="-Xms256m -Xmx512m" \
-  luban-rds:1.0.0
+  luban-rds:1.0.3
 
 # 带密码运行
 docker run -d \
@@ -599,7 +642,7 @@ docker run -d \
   -p 9736:9736 \
   -v luban-rds-data:/data \
   -e LUBAN_RDS_REQUIREPASS=your-secure-password \
-  luban-rds:1.0.0
+  luban-rds:1.0.3
 ```
 
 #### Docker 环境变量
@@ -765,13 +808,29 @@ luban.rds.server.data-dir=./data
 | **阻塞命令** | BLPOP/BRPOP 多键等待、超时设置 |
 | **Docker 支持** | Dockerfile、Docker Compose、Kubernetes |
 
-### v1.0.1-SNAPSHOT 新增功能
+### v1.0.1（已发布）
 
 | 功能模块 | 详细说明 |
 |---------|---------|
 | **Redis Cluster** | 16384 槽位分配、MOVED/ASK 重定向、Gossip 协议、故障检测、槽位迁移、Hash Tag 支持 |
 | **主从复制** | 全量同步（RDB 传输）、增量同步（复制积压缓冲区）、复制状态管理、从节点只读模式 |
 | **哨兵模式** | 哨兵模式核心功能实现 |
+
+### v1.0.2（已发布）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **CLUSTER SLOTS** | 完整实现 `CLUSTER SLOTS` 命令，并优化节点列表的过滤逻辑 |
+| **集群 Gossip & 拓扑** | 修复 `redis-cli --cluster create` 卡在 `Waiting for the cluster to join` 的三处叠加根因（Gossip 发现后建连、`GossipTask` 不再跳过 HANDSHAKE、Gossip 携带槽位所有权） |
+| **握手协议** | 修复 `CLUSTER MEET` 命令装配缺陷与临时 ID 解析机制 |
+| **兼容性** | `CLUSTER NODES` 改用裸 `\n` 行尾，Redisson 解析正常；`cluster_enabled` 字段补全；非集群模式下跳过 CLUSTER 拦截 |
+
+### v1.0.3（已发布）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **集群一键搭建 CLI** | 新增 `RedisCliMain`（`--cluster create ... --cluster-replicas N`），对齐 `redis-cli --cluster create`，支持程序化嵌入与静默模式 |
+| **TCP 半包/粘包** | `RedisProtocolParser` 修复半包回退、CRLF 检测与解析死循环；`NettyRedisClient` 引入累积缓冲与循环解析，正确处理跨段 RESP 与多响应合包 |
 
 ### 开发中
 

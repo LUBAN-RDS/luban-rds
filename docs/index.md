@@ -1,7 +1,7 @@
 ---
 title: Luban-RDS 文档
-last_updated: 2026-03-24
-version: 1.0.1
+last_updated: 2026-07-07
+version: 1.0.3
 ---
 
 <div align="center">
@@ -74,6 +74,32 @@ version: 1.0.1
 ---
 
 ## ✨ 版本特性
+
+### v1.0.3 (已发布)
+
+#### 🛠️ 集群一键搭建 CLI
+- ✅ **`RedisCliMain`**: 内置 `redis-cli --cluster create` 兼容 CLI
+  - 多节点一行命令完成集群创建、主从划分、16384 槽位均分
+  - 支持 `verbose` 静默模式，便于脚本化部署
+  - Java 程序化嵌入调用：`ClusterSetupCommand.createCluster(...)`
+
+#### 🔧 网络层健壮性
+- ✅ **TCP 半包/粘包修复**: `RedisProtocolParser` + `NettyRedisClient` 共同修复
+  - 半包回退机制、CRLF 检测与解析死循环防护
+  - 累积缓冲 + 循环解析，处理跨段 RESP 与多响应合包
+
+### v1.0.2 (已发布)
+
+#### 🔧 集群兼容性与可靠性
+- ✅ **`CLUSTER SLOTS`**: 完整实现，返回当前槽位分布数组
+- ✅ **Gossip 拓扑修复**: 解决 `redis-cli --cluster create` 卡在 `Waiting for the cluster to join`
+  - Gossip 发现节点后主动建连 / `MEET`
+  - `GossipTask` 不再跳过 `HANDSHAKE` 状态节点
+  - Gossip 消息携带槽位所有权
+- ✅ **`CLUSTER NODES` 行尾**: 改用裸 `\n`，Redisson 解析不再抛 `NumberFormatException`
+- ✅ **`CLUSTER MEET` 装配**: 修复握手协议与临时 ID 解析
+- ✅ **`cluster_enabled` 字段**: `CLUSTER INFO` / `INFO` 同步返回
+- ✅ **非集群模式**: 正确跳过 `CLUSTER` 命令拦截
 
 ### v1.0.1 (已发布)
 

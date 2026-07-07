@@ -1,11 +1,66 @@
 ---
 title: 更新日志
-last_updated: 2026-03-24
-version: 1.0.1
+last_updated: 2026-07-07
+version: 1.0.3
 ---
 # 更新日志
 
 Luban-RDS 是一款轻量级、高性能、完全兼容 RESP 协议的 Java 内存数据库，易于嵌入和扩展。
+
+## [1.0.3] - 2026-07-07
+
+### 新增功能
+
+- **Redis 集群创建 CLI 工具**（`RedisCliMain`）
+  - 模仿 `redis-cli --cluster create` 子集，支持远程编排集群搭建
+  - 通过 `--cluster create <host:port> ... [--cluster-replicas N]` 参数创建 3 主 + N 从的集群
+  - 自动完成 `CLUSTER MEET`、主从划分、16384 槽位均分、状态校验
+  - 提供 `ClusterSetupCommand` 静态方法 `createCluster(...)` 便于程序化嵌入调用
+  - 新增 `verbose` 参数支持静默模式（用于脚本/批量场景）
+
+### 修复
+
+- **客户端半包/粘包问题**（`NettyRedisClient`）
+  - 添加 `ByteBuf` 累积缓冲区，正确处理跨 TCP 段的 RESP 响应
+  - 实现循环解析机制，处理同一 TCP 段中的多个完整响应
+  - 通过 `readerIndex` 标记区分半包与完整响应的解析状态
+  - 连接关闭时正确释放累积缓冲区，避免内存泄漏
+- **协议解析器半包处理逻辑**（`RedisProtocolParser`）
+  - `parseBulkStringBytes` 方法添加 reader index 回退机制处理半包
+  - 为所有解析分支（简单字符串、错误、整数、批量字符串、数组、映射、集合等）统一添加 null 检查
+  - 解析失败时重置缓冲区读取索引，避免协议解析死循环
+  - 完善 CRLF 检测逻辑，确保半包数据能正确等待后续字节
+  - 优化 `parseResp` 错误处理流程，提升解析稳定性
+
+### 兼容性
+
+- 与 Jedis / Lettuce / Redisson / `redis-cli --cluster create` 全流程验证通过
+- `CLUSTER NODES` / `CLUSTER SLOTS` / `CLUSTER INFO` 输出格式与 Redis 官方一致
+
+## [1.0.2] - 2026-07-07
+
+### 新增功能
+
+- **CLUSTER SLOTS 命令**：完整实现 Redis `CLUSTER SLOTS` 命令，返回当前槽位分布数组
+- **集群节点过滤优化**：在节点列表中过滤下线/未握手节点，避免返回陈旧拓扑
+
+### 修复
+
+- **修复 `redis-cli --cluster create` 卡在 "Waiting for the cluster to join"**
+  - Gossip 发现新节点后主动建连/`MEET`，保证拓扑收敛
+  - `GossipTask` 心跳不再跳过 `HANDSHAKE` 状态节点，握手流程正常推进
+  - Gossip 消息携带槽位所有权信息，`cluster_state` 能够正确转为 `ok`
+- **修复 CLUSTER NODES 行尾符导致 Redisson 解析异常**
+  - `ClusterCommandHandler.clusterNodes()` 每行改用裸 `\n` 结尾（对齐真实 Redis 行为）
+  - 解决 Redisson `ClusterNodesDecoder` 因残留 `\r` 而抛 `NumberFormatException` 导致集群初始化失败的问题
+- **修复 `CLUSTER MEET` 命令在集群模式下装配缺陷**：在集群模式下正确路由 `CLUSTER MEET` 到集群命令处理器
+- **修复集群节点握手协议和临时 ID 解析机制**：`MEET` 消息识别握手阶段返回的临时 ID，避免误判为已知节点
+- **补全 `CLUSTER INFO` 与 `INFO` 的 `cluster_enabled` 字段**：使第三方监控/健康检查能正确判定集群模式开关
+- **禁用集群模式时跳过 CLUSTER 命令拦截**：避免 `cluster-enabled=no` 时仍拦截 CLUSTER 命令带来的语义混淆
+
+### 优化
+
+- 集群调试日志级别调整为 `TRACE`，降低生产环境日志开销
 
 ## [1.0.1] - 2026-03-24
 

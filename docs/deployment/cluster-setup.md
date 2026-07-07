@@ -1,10 +1,14 @@
 ---
 title: 集群部署
+last_updated: 2026-07-07
+version: 1.0.3
 ---
 
 # 集群部署
 
 本指南介绍如何部署、初始化、扩缩容和运维 Luban-RDS 集群模式（Redis Cluster 协议）。协议层组件、槽位算法与重定向语义参见 [功能架构 - Redis Cluster 集群](../architecture/features.md#17-redis-cluster-集群)；配置项参考参见 [配置指南 - 集群模式配置](./configuration.md#95-集群模式配置)。
+
+> **v1.0.3 新增**：Luban-RDS 自带 `redis-cli --cluster create` 兼容 CLI，可一键完成集群搭建，跳过下文的 `MEET` + `ADDSLOTS` 手动编排（详见 [§2.5 一键搭建集群](#25-一键搭建集群-v103)）。
 
 ## 1. 前置要求
 
@@ -100,6 +104,70 @@ cluster_slots_assigned:16384
 cluster_known_nodes:3
 cluster_size:3
 ```
+
+### 2.5 一键搭建集群 (v1.0.3+)
+
+Luban-RDS 自带 `RedisCliMain`，对齐 `redis-cli --cluster create` 子集，能一次性完成第 2.2–2.4 节的所有步骤，适合自动化部署。
+
+**前置条件**：所有节点都已启动且启用了 `cluster-enabled yes`（`MEET` 与槽位分配会自动完成）。
+
+#### 命令行使用
+
+```bash
+# 启动 6 个节点（端口 9736–9741），分别使用各自配置文件
+
+# 创建 3 主 + 3 从集群
+java -cp luban-rds-client.jar com.janeluo.luban.rds.client.cli.RedisCliMain \
+     --cluster create \
+     192.168.8.161:9736 192.168.8.161:9737 192.168.8.161:9738 \
+     192.168.8.161:9739 192.168.8.161:9740 192.168.8.161:9741 \
+     --cluster-replicas 1
+```
+
+CLI 会按顺序执行：
+
+1. `CLUSTER MEET`：全连接所有节点
+2. 主从划分：按 `--cluster-replicas` 交错分配 slave
+3. 槽位分配：16384 槽均分给所有 master
+4. `CLUSTER INFO` 校验：`cluster_state:ok` 且 `cluster_slots_assigned:16384`
+
+**常用参数**：
+
+| 参数 | 含义 | 默认值 |
+|------|------|--------|
+| `--cluster create` | 子命令（当前唯一支持的子命令） | 必填 |
+| `--cluster-replicas N` | 每个主节点的从节点数量 | `0` |
+| `-h` / `--help` | 打印使用说明 | - |
+
+#### Java 代码嵌入调用
+
+```java
+import com.janeluo.luban.rds.client.cli.ClusterSetupCommand;
+import com.janeluo.luban.rds.client.cli.NodeAddress;
+import java.util.List;
+
+List<NodeAddress> nodes = List.of(
+    new NodeAddress("127.0.0.1", 9736),
+    new NodeAddress("127.0.0.1", 9737),
+    new NodeAddress("127.0.0.1", 9738),
+    new NodeAddress("127.0.0.1", 9739),
+    new NodeAddress("127.0.0.1", 9740),
+    new NodeAddress("127.0.0.1", 9741)
+);
+// verbose = true（默认）打印每步进度；false 用于批量/脚本静默执行
+ClusterSetupCommand.createCluster(nodes, /*replicas*/ 1, /*verbose*/ false);
+```
+
+#### 常见错误
+
+| 错误 | 原因 | 处理 |
+|------|------|------|
+| `节点连接失败` | 节点未启动或 `port` / `requirepass` 与配置不一致 | 检查 `port`、`requirepass` 是否生效；防火墙是否放行 |
+| `集群状态校验失败: cluster_state=ok 但 cluster_slots_assigned < 16384` | Gossip 拓扑未收敛 | v1.0.2 已修复，升级到 1.0.2+ 即可 |
+| `--cluster-replicas 的值必须为整数` | 参数格式错误 | 传整数 N |
+| `节点数 (N) 与 replicas (M) 不匹配` | N ≤ M 或 (N - M*master) ≠ 0 | 调整节点数，确保 `N / (1 + M) ≥ 3` |
+
+> v1.0.2 之前版本在 `redis-cli --cluster create` 场景下会卡在 `Waiting for the cluster to join`。v1.0.2+ 通过三项修复（Gossip 主动建连、`GossipTask` 不再跳过 HANDSHAKE、Gossip 携带槽位所有权）彻底解决。
 
 ## 3. 添加从节点
 
