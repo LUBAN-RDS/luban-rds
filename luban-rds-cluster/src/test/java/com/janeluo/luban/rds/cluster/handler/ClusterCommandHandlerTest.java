@@ -48,8 +48,8 @@ class ClusterCommandHandlerTest {
         // 创建状态管理器
         stateManager = new ClusterStateManager(clusterConfig);
 
-        // 创建命令处理器（不使用 Gossip 协议）
-        handler = new ClusterCommandHandler(clusterConfig, slotManager, stateManager, null);
+        // 创建命令处理器（不使用 Gossip 协议，不配置持久化路径）
+        handler = new ClusterCommandHandler(clusterConfig, slotManager, stateManager, null, null);
     }
 
     @Test
@@ -498,10 +498,46 @@ class ClusterCommandHandlerTest {
     }
 
     @Test
-    @DisplayName("测试 CLUSTER SAVECONFIG 命令")
-    void testClusterSaveconfig() {
-        String result = handler.handle(new String[]{"SAVECONFIG"});
-        assertEquals("+OK\r\n", result);
+    @DisplayName("测试 CLUSTER SAVECONFIG 命令 - 路径为 null 时返回错误")
+    void testClusterSaveconfigNullPath() {
+        // handler 创建时传入 null 路径
+        ClusterCommandHandler nullPathHandler = new ClusterCommandHandler(
+                clusterConfig, slotManager, stateManager, null, null);
+        String result = nullPathHandler.handle(new String[]{"SAVECONFIG"});
+        assertTrue(result.contains("-ERR"), "路径为 null 时应返回错误");
+        assertTrue(result.contains("not configured"));
+    }
+
+    @Test
+    @DisplayName("测试 CLUSTER SAVECONFIG 命令 - 正常保存到临时文件")
+    void testClusterSaveconfigWithTempFile() throws Exception {
+        // 创建临时文件路径
+        java.nio.file.Path tempDir = java.nio.file.Files.createTempDirectory("luban-test-");
+        String tempFilePath = tempDir.resolve("nodes.conf").toAbsolutePath().toString();
+        try {
+            // 创建带文件路径的 handler
+            ClusterCommandHandler persistHandler = new ClusterCommandHandler(
+                    clusterConfig, slotManager, stateManager, null, tempFilePath);
+            String result = persistHandler.handle(new String[]{"SAVECONFIG"});
+            assertEquals("+OK\r\n", result);
+
+            // 验证文件确实被创建
+            java.io.File savedFile = new java.io.File(tempFilePath);
+            assertTrue(savedFile.exists(), "nodes.conf 文件应该被创建");
+            assertTrue(savedFile.length() > 0, "nodes.conf 文件不应为空");
+
+            // 验证文件内容包含节点信息
+            String content = new String(java.nio.file.Files.readAllBytes(savedFile.toPath()));
+            assertTrue(content.contains(NODE_ID_1), "应包含节点ID");
+            assertTrue(content.contains("myself,master"), "应包含节点状态");
+        } finally {
+            // 清理临时文件
+            java.io.File savedFile = new java.io.File(tempFilePath);
+            if (savedFile.exists()) {
+                savedFile.delete();
+            }
+            tempDir.toFile().delete();
+        }
     }
 
     @Test

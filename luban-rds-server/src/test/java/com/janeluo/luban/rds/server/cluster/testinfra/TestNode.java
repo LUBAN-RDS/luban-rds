@@ -56,7 +56,7 @@ public class TestNode {
 
         this.gossipProtocol = new GossipProtocol(clusterConfig, null, 15000);
         this.clusterCommandHandler = new ClusterCommandHandler(
-                clusterConfig, slotManager, stateManager, gossipProtocol);
+                clusterConfig, slotManager, stateManager, gossipProtocol, null);
         this.clusterBusServer = new ClusterBusServer(
                 config.getPort(), clusterConfig, gossipProtocol);
 

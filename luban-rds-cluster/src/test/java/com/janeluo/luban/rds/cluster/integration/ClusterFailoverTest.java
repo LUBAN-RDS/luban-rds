@@ -43,7 +43,7 @@ class ClusterFailoverTest {
         config = new ClusterConfig();
         slotManager = new DefaultSlotManager();
         stateManager = new ClusterStateManager(config);
-        commandHandler = new ClusterCommandHandler(config, slotManager, stateManager, null);
+        commandHandler = new ClusterCommandHandler(config, slotManager, stateManager, null, null);
         failureDetector = new FailureDetector(config, NODE_TIMEOUT);
     }
 

@@ -40,7 +40,7 @@ class ClusterIntegrationTest {
         config = new ClusterConfig();
         slotManager = new DefaultSlotManager();
         stateManager = new ClusterStateManager(config);
-        commandHandler = new ClusterCommandHandler(config, slotManager, stateManager, null);
+        commandHandler = new ClusterCommandHandler(config, slotManager, stateManager, null, null);
     }
 
     @AfterEach
@@ -228,7 +228,7 @@ class ClusterIntegrationTest {
         SlotManager targetSlotManager = new DefaultSlotManager(nodeId2);
         ClusterStateManager targetStateManager = new ClusterStateManager(targetConfig);
         ClusterCommandHandler targetHandler = new ClusterCommandHandler(
-                targetConfig, targetSlotManager, targetStateManager, null);
+                targetConfig, targetSlotManager, targetStateManager, null, null);
 
         
         ClusterNode targetNode = createMasterNode(nodeId2, "127.0.0.1", 7001);

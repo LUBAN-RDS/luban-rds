@@ -238,6 +238,7 @@ public class NettyRedisServer implements RedisServer {
         // 初始化集群模式
         if (config.isClusterEnabled()) {
             initClusterMode();
+            saveClusterConfig();
         }
         
         // 初始化哨兵模式
@@ -329,11 +330,13 @@ public class NettyRedisServer implements RedisServer {
         this.gossipProtocol.setClusterStateManager(clusterStateManager);
         
         // 7. 初始化 ClusterCommandHandler
+        String clusterConfigFilePath = new File(config.getDir(), config.getClusterConfigFile()).getAbsolutePath();
         this.clusterCommandHandler = new ClusterCommandHandler(
                 clusterConfig, 
                 slotManager, 
                 clusterStateManager, 
-                gossipProtocol);
+                gossipProtocol,
+                clusterConfigFilePath);
         
         // 8. 初始化 ClusterBusServer
         this.clusterBusServer = new ClusterBusServer(port, clusterConfig, gossipProtocol);
@@ -415,6 +418,27 @@ public class NettyRedisServer implements RedisServer {
         
         logger.info("当前节点初始化完成: nodeId={}, address={}", 
                 nodeId, myNode.getFullAddress());
+    }
+
+    /**
+     * 保存集群配置到 nodes.conf 文件
+     * <p>
+     * 在启动时、CLUSTER SAVECONFIG 命令调用时、以及优雅关闭时写入。
+     * </p>
+     */
+    private void saveClusterConfig() {
+        if (clusterConfig != null && config.getClusterConfigFile() != null) {
+            try {
+                ClusterConfigPersister persister = new ClusterConfigPersister();
+                File configFile = new File(config.getDir(), config.getClusterConfigFile());
+                // 确保目录存在
+                configFile.getParentFile().mkdirs();
+                persister.save(clusterConfig, configFile.getAbsolutePath());
+                logger.info("集群配置已保存到: {}", configFile.getAbsolutePath());
+            } catch (IOException e) {
+                logger.error("保存集群配置失败", e);
+            }
+        }
     }
     
     /**
@@ -593,18 +617,7 @@ public class NettyRedisServer implements RedisServer {
             }
             
             // 保存集群配置
-            if (clusterConfig != null && config.getClusterConfigFile() != null) {
-                try {
-                    ClusterConfigPersister persister = new ClusterConfigPersister();
-                    File configFile = new File(config.getDir(), config.getClusterConfigFile());
-                    // 确保目录存在
-                    configFile.getParentFile().mkdirs();
-                    persister.save(clusterConfig, configFile.getAbsolutePath());
-                    logger.info("集群配置已保存到: {}", configFile.getAbsolutePath());
-                } catch (IOException e) {
-                    logger.error("保存集群配置失败", e);
-                }
-            }
+            saveClusterConfig();
             
             // 停止定期持久化任务
             persistExecutor.shutdown();

@@ -60,7 +60,7 @@ class RedisCliCompatibilityTest {
         ClusterStateManager stateManager = new ClusterStateManager(clusterConfig);
 
         // 创建命令处理器
-        handler = new ClusterCommandHandler(clusterConfig, slotManager, stateManager, null);
+        handler = new ClusterCommandHandler(clusterConfig, slotManager, stateManager, null, null);
     }
 
     @Test

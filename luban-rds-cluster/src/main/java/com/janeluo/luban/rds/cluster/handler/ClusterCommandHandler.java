@@ -1,6 +1,7 @@
 package com.janeluo.luban.rds.cluster.handler;
 
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
+import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
 import com.janeluo.luban.rds.cluster.config.ClusterStats;
 import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
@@ -12,6 +13,8 @@ import com.janeluo.luban.rds.cluster.slot.SlotUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collection;
@@ -51,6 +54,11 @@ public class ClusterCommandHandler {
     private final GossipProtocol gossipProtocol;
 
     /**
+     * 集群配置文件路径（用于 CLUSTER SAVECONFIG 持久化）
+     */
+    private final String clusterConfigFilePath;
+
+    /**
      * 槽位迁移状态
      * key: 槽位号
      * value: 迁移状态（IMPORTING/MIGRATING/NODE_ID）
@@ -79,17 +87,20 @@ public class ClusterCommandHandler {
     /**
      * 构造方法
      *
-     * @param clusterConfig  集群配置
-     * @param slotManager    槽位管理器
-     * @param stateManager   集群状态管理器
-     * @param gossipProtocol Gossip 协议
+     * @param clusterConfig           集群配置
+     * @param slotManager             槽位管理器
+     * @param stateManager            集群状态管理器
+     * @param gossipProtocol          Gossip 协议
+     * @param clusterConfigFilePath   集群配置文件路径（用于 CLUSTER SAVECONFIG 持久化，可为 null）
      */
     public ClusterCommandHandler(ClusterConfig clusterConfig, SlotManager slotManager,
-                                  ClusterStateManager stateManager, GossipProtocol gossipProtocol) {
+                                  ClusterStateManager stateManager, GossipProtocol gossipProtocol,
+                                  String clusterConfigFilePath) {
         this.clusterConfig = clusterConfig;
         this.slotManager = slotManager;
         this.stateManager = stateManager;
         this.gossipProtocol = gossipProtocol;
+        this.clusterConfigFilePath = clusterConfigFilePath;
         this.slotMigrationState = new ConcurrentHashMap<>();
         this.slotMigrationTarget = new ConcurrentHashMap<>();
         this.forgetNodes = new ConcurrentHashMap<>();
@@ -1165,14 +1176,30 @@ public class ClusterCommandHandler {
 
     /**
      * CLUSTER SAVECONFIG 命令
-     * 保存集群配置
+     * 保存集群配置到 nodes.conf 文件
      *
      * @return 响应
      */
     private String clusterSaveconfig() {
-        // TODO: 实现配置持久化
-        logger.info("CLUSTER SAVECONFIG: configuration saved");
-        return "+OK\r\n";
+        if (clusterConfigFilePath == null || clusterConfigFilePath.isEmpty()) {
+            logger.warn("CLUSTER SAVECONFIG: cluster-config-file not configured, cannot persist");
+            return "-ERR cluster-config-file not configured\r\n";
+        }
+        try {
+            ClusterConfigPersister persister = new ClusterConfigPersister();
+            // 确保父目录存在
+            File configFile = new File(clusterConfigFilePath);
+            File parentDir = configFile.getParentFile();
+            if (parentDir != null && !parentDir.exists()) {
+                parentDir.mkdirs();
+            }
+            persister.save(clusterConfig, clusterConfigFilePath);
+            logger.info("CLUSTER SAVECONFIG: configuration saved to {}", clusterConfigFilePath);
+            return "+OK\r\n";
+        } catch (IOException e) {
+            logger.error("CLUSTER SAVECONFIG: failed to save configuration", e);
+            return "-ERR failed to save configuration: " + e.getMessage() + "\r\n";
+        }
     }
 
     /**
