@@ -278,6 +278,52 @@ class RedisCliMainArgsTest {
         assertThrows(ClusterSetupException.class, () -> ReplySupport.requireLong("abc", "test"));
     }
 
+    // ============ 静态便捷 API ============
+
+    @Test
+    @DisplayName("createCluster 校验空节点列表")
+    void testCreateClusterEmptyNodes() {
+        assertThrows(ClusterSetupException.class,
+                () -> ClusterSetupCommand.createCluster(new String[0], 1, false));
+        assertThrows(ClusterSetupException.class,
+                () -> ClusterSetupCommand.createCluster(null, 1, false));
+    }
+
+    @Test
+    @DisplayName("createCluster 校验节点数与 replicas 不匹配")
+    void testCreateClusterInvalidCount() {
+        // 5 个节点, replicas=1 => 需要 2 的倍数
+        assertThrows(ClusterSetupException.class, () -> ClusterSetupCommand.createCluster(
+                new String[] {"127.0.0.1:9736", "127.0.0.1:9737", "127.0.0.1:9738",
+                        "127.0.0.1:9739", "127.0.0.1:9740"}, 1, false));
+    }
+
+    @Test
+    @DisplayName("createCluster 校验非法地址格式")
+    void testCreateClusterInvalidAddress() {
+        assertThrows(ClusterSetupException.class, () -> ClusterSetupCommand.createCluster(
+                new String[] {"127.0.0.1:9736", "noport"}, 0, false));
+    }
+
+    @Test
+    @DisplayName("RedisCliMain.run 解析失败抛异常（不调用 System.exit）")
+    void testRunInvalidArgsThrows() {
+        // 节点数与 replicas 不匹配，应在解析阶段抛异常而非 System.exit
+        assertThrows(ClusterSetupException.class, () -> RedisCliMain.run(new String[] {
+                "--cluster", "create",
+                "127.0.0.1:9736", "127.0.0.1:9737", "127.0.0.1:9738",
+                "127.0.0.1:9739", "127.0.0.1:9740",
+                "--cluster-replicas", "1"
+        }));
+    }
+
+    @Test
+    @DisplayName("RedisCliMain.run 无参数打印帮助正常返回")
+    void testRunNoArgsReturnsNormally() {
+        // 不抛异常即通过
+        RedisCliMain.run(new String[0]);
+    }
+
     // ============ 辅助方法 ============
 
     private static List<NodeAddress> buildNodes(int count) {

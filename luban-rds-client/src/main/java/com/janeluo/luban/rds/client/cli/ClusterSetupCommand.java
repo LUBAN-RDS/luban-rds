@@ -52,14 +52,70 @@ public class ClusterSetupCommand {
 
     private final List<NodeAddress> nodes;
     private final int replicas;
+    private final boolean verbose;
 
     /**
      * @param nodes    全部节点地址列表，前 {@code masters} 个为主节点，其余为从节点
      * @param replicas 每个主节点的从节点数量（≥0）
      */
     public ClusterSetupCommand(List<NodeAddress> nodes, int replicas) {
+        this(nodes, replicas, true);
+    }
+
+    /**
+     * @param nodes    全部节点地址列表，前 {@code masters} 个为主节点，其余为从节点
+     * @param replicas 每个主节点的从节点数量（≥0）
+     * @param verbose  是否向标准输出打印进度信息
+     */
+    public ClusterSetupCommand(List<NodeAddress> nodes, int replicas, boolean verbose) {
         this.nodes = nodes;
         this.replicas = replicas;
+        this.verbose = verbose;
+    }
+
+    /**
+     * 通过代码调用创建集群的便捷 API（带进度输出）
+     * <p>
+     * 等价于命令行：
+     * </p>
+     * <pre>
+     * RedisCliMain --cluster create &lt;addr1&gt; &lt;addr2&gt; ... --cluster-replicas &lt;n&gt;
+     * </pre>
+     *
+     * <pre>
+     * ClusterSetupCommand.createCluster(
+     *     new String[] {"127.0.0.1:9736", "127.0.0.1:9737", "127.0.0.1:9738",
+     *                   "127.0.0.1:9739", "127.0.0.1:9740", "127.0.0.1:9741"},
+     *     1);
+     * </pre>
+     *
+     * @param nodeAddresses 节点地址数组，形如 {@code "host:port"}
+     * @param replicas      每个主节点的从节点数量（≥0）
+     * @throws ClusterSetupException 任一步骤失败时抛出
+     */
+    public static void createCluster(String[] nodeAddresses, int replicas) {
+        createCluster(nodeAddresses, replicas, true);
+    }
+
+    /**
+     * 通过代码调用创建集群的便捷 API（可控制进度输出）
+     *
+     * @param nodeAddresses 节点地址数组，形如 {@code "host:port"}
+     * @param replicas      每个主节点的从节点数量（≥0）
+     * @param verbose       是否向标准输出打印进度信息
+     * @throws ClusterSetupException 任一步骤失败时抛出
+     */
+    public static void createCluster(String[] nodeAddresses, int replicas, boolean verbose) {
+        if (nodeAddresses == null || nodeAddresses.length == 0) {
+            throw new ClusterSetupException("节点地址列表不能为空");
+        }
+        List<NodeAddress> nodes = new ArrayList<>(nodeAddresses.length);
+        for (String addr : nodeAddresses) {
+            nodes.add(NodeAddress.parse(addr));
+        }
+        // 校验节点数与 replicas 的关系
+        computeMasterCount(nodes.size(), replicas);
+        new ClusterSetupCommand(nodes, replicas, verbose).execute();
     }
 
     /**
@@ -77,34 +133,45 @@ public class ClusterSetupCommand {
         Map<NodeAddress, String> nodeIdMap = new LinkedHashMap<>();
         List<String> masterIds = new ArrayList<>();
 
-        System.out.println(">>> Performing hash slots allocation on " + total + " nodes...");
+        log(">>> Performing hash slots allocation on " + total + " nodes...");
         printAllocationPlan(masters);
 
         // 1. 探测每个节点的 nodeId
-        System.out.println(">>> Fetching node ids from each node...");
+        log(">>> Fetching node ids from each node...");
         fetchNodeIds(nodeIdMap, masterIds, masters);
 
         // 2. MEET 组建拓扑
-        System.out.println(">>> Trying to connect each node via CLUSTER MEET ...");
+        log(">>> Trying to connect each node via CLUSTER MEET ...");
         meetAllNodes(nodeIdMap);
-        System.out.println("[OK] All nodes joined the cluster.");
+        log("[OK] All nodes joined the cluster.");
 
         // 3. 分配槽位
-        System.out.println(">>> Assign slots to masters ...");
+        log(">>> Assign slots to masters ...");
         assignSlots(masterIds);
-        System.out.println("[OK] All slots assigned.");
+        log("[OK] All slots assigned.");
 
         // 4. 配置从节点
         if (replicas > 0) {
-            System.out.println(">>> Configure replicas ...");
+            log(">>> Configure replicas ...");
             configureReplicas(nodeIdMap, masterIds, masters);
-            System.out.println("[OK] All replicas configured.");
+            log("[OK] All replicas configured.");
         }
 
         // 5. 校验
-        System.out.println(">>> Check cluster state ...");
+        log(">>> Check cluster state ...");
         verifyCluster(nodeIdMap);
-        System.out.println("[OK] All " + CLUSTER_SLOTS + " slots covered.");
+        log("[OK] All " + CLUSTER_SLOTS + " slots covered.");
+    }
+
+    /**
+     * 在 verbose 模式下向标准输出打印一行进度信息
+     *
+     * @param message 消息内容
+     */
+    private void log(String message) {
+        if (verbose) {
+            System.out.println(message);
+        }
     }
 
     /**
@@ -117,12 +184,12 @@ public class ClusterSetupCommand {
         for (int i = 0; i < masters; i++) {
             int start = slotRanges[i * 2];
             int end = slotRanges[i * 2 + 1];
-            System.out.println("Master[" + i + "] -> " + nodes.get(i) + " (slots " + start + "-" + end + ")");
+            log("Master[" + i + "] -> " + nodes.get(i) + " (slots " + start + "-" + end + ")");
         }
         if (replicas > 0) {
             for (int i = 0; i < masters; i++) {
                 for (int replicaIdx : replicaGroups.get(i)) {
-                    System.out.println("Adding replica " + nodes.get(replicaIdx) + " to " + nodes.get(i));
+                    log("Adding replica " + nodes.get(replicaIdx) + " to " + nodes.get(i));
                 }
             }
         }
@@ -139,7 +206,7 @@ public class ClusterSetupCommand {
             if (i < masters) {
                 masterIds.add(nodeId);
             }
-            System.out.println("  " + addr + " -> " + nodeId);
+            log("  " + addr + " -> " + nodeId);
         }
     }
 
@@ -308,8 +375,8 @@ public class ClusterSetupCommand {
             Map<String, String> infoMap = parseClusterInfo(info);
             String state = infoMap.get("cluster_state");
             String slotsAssigned = infoMap.get("cluster_slots_assigned");
-            System.out.println("cluster_state:" + state);
-            System.out.println("cluster_slots_assigned:" + slotsAssigned);
+            log("cluster_state:" + state);
+            log("cluster_slots_assigned:" + slotsAssigned);
 
             if (!"ok".equals(state)) {
                 throw new ClusterSetupException("集群状态不为 ok: " + state);

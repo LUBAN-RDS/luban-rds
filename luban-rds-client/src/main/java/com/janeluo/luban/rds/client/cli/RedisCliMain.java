@@ -33,18 +33,7 @@ public class RedisCliMain {
 
     public static void main(String[] args) {
         try {
-            CliOptions options = parseArgs(args);
-            if (options == null) {
-                // 已打印帮助信息
-                System.exit(EXIT_OK);
-                return;
-            }
-            if (options.nodes.isEmpty()) {
-                printUsage();
-                System.exit(EXIT_ERROR);
-                return;
-            }
-            new ClusterSetupCommand(options.nodes, options.replicas).execute();
+            run(args);
             System.exit(EXIT_OK);
         } catch (ClusterSetupException e) {
             System.err.println("[ERR] " + e.getMessage());
@@ -54,6 +43,38 @@ public class RedisCliMain {
             e.printStackTrace();
             System.exit(EXIT_ERROR);
         }
+    }
+
+    /**
+     * 通过代码调用执行 CLI（不调用 {@code System.exit}，便于嵌入）
+     * <p>
+     * 解析参数并执行 {@code --cluster create}，任一步骤失败抛出
+     * {@link ClusterSetupException}。仅打印帮助时正常返回。
+     * </p>
+     *
+     * <pre>
+     * RedisCliMain.run(new String[] {
+     *     "--cluster", "create",
+     *     "127.0.0.1:9736", "127.0.0.1:9737", "127.0.0.1:9738",
+     *     "127.0.0.1:9739", "127.0.0.1:9740", "127.0.0.1:9741",
+     *     "--cluster-replicas", "1"
+     * });
+     * </pre>
+     *
+     * @param args 命令行参数
+     * @throws ClusterSetupException 任一步骤失败时抛出
+     */
+    public static void run(String[] args) {
+        CliOptions options = parseArgs(args);
+        if (options == null) {
+            // 已打印帮助信息
+            return;
+        }
+        if (options.nodes.isEmpty()) {
+            printUsage();
+            return;
+        }
+        new ClusterSetupCommand(options.nodes, options.replicas).execute();
     }
 
     /**
