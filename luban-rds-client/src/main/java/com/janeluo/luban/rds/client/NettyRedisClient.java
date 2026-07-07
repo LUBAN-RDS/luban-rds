@@ -2,6 +2,7 @@ package com.janeluo.luban.rds.client;
 
 import com.janeluo.luban.rds.protocol.RedisProtocolParser;
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
@@ -375,29 +376,84 @@ public class NettyRedisClient implements RedisClient {
     private static class RedisClientHandler extends ChannelInboundHandlerAdapter {
         private final BlockingQueue<Object> responseQueue;
         private final RedisProtocolParser protocolParser;
-        
+
+        /**
+         * 累积入站字节的缓冲区。
+         * <p>
+         * RESP 响应可能跨越多个 TCP 段（半包），单次 channelRead 拿到的 ByteBuf
+         * 未必包含完整响应。本缓冲区累积入站字节，配合 parseResp 的 mark/reset
+         * 语义循环解析：完整响应入队，不完整则保留等待下次 channelRead。
+         * </p>
+         */
+        private ByteBuf accumulationBuf;
+
         public RedisClientHandler(BlockingQueue<Object> responseQueue, RedisProtocolParser protocolParser) {
             this.responseQueue = responseQueue;
             this.protocolParser = protocolParser;
         }
-        
+
+        @Override
+        public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+            // 用 channel 的分配器创建累积缓冲，对齐服务端 RedisServerHandler.ClientInfo.initInboundBuf 的做法
+            accumulationBuf = ctx.alloc().buffer(1024);
+        }
+
+        @Override
+        public void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+            releaseAccumulationBuf();
+        }
+
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+            // 连接关闭时释放累积缓冲，避免泄漏
+            releaseAccumulationBuf();
+            super.channelInactive(ctx);
+        }
+
         @Override
         public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-            if (msg instanceof io.netty.buffer.ByteBuf) {
-                io.netty.buffer.ByteBuf buffer = (io.netty.buffer.ByteBuf) msg;
-                try {
-                    Object response = protocolParser.parseResp(buffer);
+            if (!(msg instanceof ByteBuf)) {
+                return;
+            }
+            ByteBuf in = (ByteBuf) msg;
+            try {
+                // 累积本次入站字节
+                accumulationBuf.writeBytes(in);
+                // 循环解析：一个 TCP 段可能包含多个完整响应（粘包），逐个入队；
+                // parseResp 返回 null 有两种语义：
+                //   1) 半包——parseResp 已 reset readerIndex 到解析起点，readerIndex 未前进；
+                //   2) 合法 RESP null（如 $-1、*_null_）——字节已完整消费，readerIndex 已前进。
+                // 通过比较解析前后 readerIndex 区分：未前进视为半包，保留字节等待下次 channelRead；
+                // 已前进视为已消费，将 null 入队并继续解析后续字节。
+                while (accumulationBuf.isReadable()) {
+                    int markBefore = accumulationBuf.readerIndex();
+                    accumulationBuf.markReaderIndex();
+                    Object response = protocolParser.parseResp(accumulationBuf);
+                    if (response == null && accumulationBuf.readerIndex() == markBefore) {
+                        // 半包：parseResp 已回退，无需再 reset，跳出等待更多数据
+                        break;
+                    }
+                    // response 非 null（完整响应），或为已消费的合法 null；入队继续
                     responseQueue.offer(response);
-                } finally {
-                    buffer.release();
                 }
+                // 丢弃已消费字节，压缩缓冲区，防止无限增长
+                accumulationBuf.discardReadBytes();
+            } finally {
+                in.release();
             }
         }
-        
+
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
             logger.error("Exception caught in RedisClientHandler", cause);
             ctx.close();
+        }
+
+        private void releaseAccumulationBuf() {
+            if (accumulationBuf != null) {
+                accumulationBuf.release();
+                accumulationBuf = null;
+            }
         }
     }
 }
