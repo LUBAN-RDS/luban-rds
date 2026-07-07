@@ -82,6 +82,15 @@ public class GossipProtocol {
     private ClusterStateManager stateManager;
 
     /**
+     * 拓扑变更回调（由 NettyRedisServer 注入，用于自动触发 nodes.conf 持久化）
+     * <p>
+     * 参照 Redis 7 clusterSaveConfigIfNeeded 机制：
+     * 当集群拓扑发生变更时调用此回调，触发 nodes.conf 持久化。
+     * </p>
+     */
+    private Runnable onTopologyChanged;
+
+    /**
      * 随机数生成器（ThreadLocal 避免竞争）
      */
     private final ThreadLocal<Random> randomProvider;
@@ -149,6 +158,19 @@ public class GossipProtocol {
      */
     public void setClusterStateManager(ClusterStateManager stateManager) {
         this.stateManager = stateManager;
+    }
+
+    /**
+     * 设置拓扑变更回调（用于自动触发 nodes.conf 持久化）
+     * <p>
+     * 参照 Redis 7 clusterSaveConfigIfNeeded 机制：
+     * 当集群拓扑发生变更（节点增删、握手完成、FAIL标记等）时调用此回调。
+     * </p>
+     *
+     * @param onTopologyChanged 拓扑变更回调
+     */
+    public void setOnTopologyChanged(Runnable onTopologyChanged) {
+        this.onTopologyChanged = onTopologyChanged;
     }
 
     /**
@@ -437,6 +459,9 @@ public class GossipProtocol {
             logger.info("新节点加入集群: nodeId={}, address={}",
                     meet.getSenderNodeId(), senderNode.getFullAddress());
 
+            // 拓扑变更：新节点通过 MEET 加入集群，触发 nodes.conf 持久化
+            notifyTopologyChanged();
+
             // 建立到发送方的出站连接，确保双向 Gossip 通信
             if (busClient != null && !busClient.isConnected(meet.getSenderNodeId())) {
                 logger.info("建立到 MEET 发送方的出站连接: nodeId={}, address={}:{}",
@@ -507,6 +532,9 @@ public class GossipProtocol {
         failedNode.removeState(ClusterNodeState.PFAIL);
 
         logger.info("节点已标记为 FAIL: nodeId={}", failedNodeId);
+
+        // 拓扑变更：节点状态变为 FAIL，触发 nodes.conf 持久化
+        notifyTopologyChanged();
     }
 
     /**
@@ -649,6 +677,8 @@ public class GossipProtocol {
                 node.addState(ClusterNodeState.MASTER);
             }
             logger.info("握手完成: nodeId={}, address={}", node.getNodeId(), node.getFullAddress());
+            // 拓扑变更：新节点完成握手，触发 nodes.conf 持久化
+            notifyTopologyChanged();
         }
     }
 
@@ -723,6 +753,9 @@ public class GossipProtocol {
                 clusterConfig.addNode(node);
                 logger.info("通过 Gossip 发现新节点: nodeId={}, address={}",
                         nodeId, node.getFullAddress());
+
+                // 拓扑变更：通过 Gossip 发现新节点，触发 nodes.conf 持久化
+                notifyTopologyChanged();
 
                 // 主动发起总线连接并发送 MEET，推动握手完成。
                 // 否则该节点会永久停留在 HANDSHAKE 状态，Gossip 拓扑无法收敛
@@ -889,5 +922,32 @@ public class GossipProtocol {
      */
     public ClusterConfig getClusterConfig() {
         return clusterConfig;
+    }
+
+    /**
+     * 如果集群配置脏了（有未持久化的拓扑变更），触发保存
+     * <p>
+     * 参照 Redis 7 serverCron 中 clusterSaveConfig 的周期性检查机制：
+     * 由 GossipTask 在每个周期调用，确保拓扑变更最终被持久化。
+     * </p>
+     */
+    public void saveClusterConfigIfNeeded() {
+        if (clusterConfig.isDirty() && onTopologyChanged != null) {
+            onTopologyChanged.run();
+        }
+    }
+
+    /**
+     * 通知拓扑变更（触发 nodes.conf 持久化）
+     * <p>
+     * 参照 Redis 7 clusterSaveConfigIfNeeded 机制：
+     * 通过 ClusterConfig.markDirty() 标记脏状态，由后台 GossipTask 定期检查并触发持久化。
+     * </p>
+     */
+    private void notifyTopologyChanged() {
+        clusterConfig.markDirty();
+        if (onTopologyChanged != null) {
+            onTopologyChanged.run();
+        }
     }
 }

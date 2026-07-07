@@ -278,6 +278,105 @@ public class ClusterConfigPersisterTest {
     }
 
     /**
+     * 测试多节点集群场景：验证 nodes.conf 能正确保存所有节点信息（不仅是 MYSELF 节点）
+     * <p>
+     * 参照 Redis 7 规范：nodes.conf 应记录集群中所有已知节点的信息，
+     * 包括主节点、从节点及其槽位分配，而不仅仅是当前节点自身。
+     * </p>
+     */
+    @Test
+    public void testSaveAllNodesInCluster() throws IOException {
+        ClusterConfig config = new ClusterConfig();
+        config.setMyNodeId("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0");
+
+        // 创建 3 个主节点（模拟 3-master 集群）
+        ClusterNode master1 = new ClusterNode("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0");
+        master1.setIp("192.168.1.1");
+        master1.setPort(7000);
+        master1.setBusPort(17000);
+        master1.addState(ClusterNodeState.MASTER);
+        master1.addState(ClusterNodeState.MYSELF);
+        master1.setConfigEpoch(1);
+        master1.addSlotRange(0, 5460);
+        config.addNode(master1);
+
+        ClusterNode master2 = new ClusterNode("b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0");
+        master2.setIp("192.168.1.2");
+        master2.setPort(7001);
+        master2.setBusPort(17001);
+        master2.addState(ClusterNodeState.MASTER);
+        master2.setConfigEpoch(2);
+        master2.addSlotRange(5461, 10922);
+        config.addNode(master2);
+
+        ClusterNode master3 = new ClusterNode("c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0");
+        master3.setIp("192.168.1.3");
+        master3.setPort(7002);
+        master3.setBusPort(17002);
+        master3.addState(ClusterNodeState.MASTER);
+        master3.setConfigEpoch(3);
+        master3.addSlotRange(10923, 16383);
+        config.addNode(master3);
+
+        // 添加一个从节点
+        ClusterNode slave = new ClusterNode("d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0");
+        slave.setIp("192.168.1.4");
+        slave.setPort(7003);
+        slave.setBusPort(17003);
+        slave.addState(ClusterNodeState.SLAVE);
+        slave.setMasterNodeId("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0");
+        slave.setConfigEpoch(1);
+        config.addNode(slave);
+
+        // 设置槽位分配
+        for (int i = 0; i <= 5460; i++) {
+            config.setSlotOwner(i, master1.getNodeId());
+        }
+        for (int i = 5461; i <= 10922; i++) {
+            config.setSlotOwner(i, master2.getNodeId());
+        }
+        for (int i = 10923; i <= 16383; i++) {
+            config.setSlotOwner(i, master3.getNodeId());
+        }
+
+        // 保存配置
+        persister.save(config, tempFile.getAbsolutePath());
+        assertTrue("nodes.conf 文件应存在", tempFile.exists());
+
+        // 加载配置
+        ClusterConfig loadedConfig = persister.load(tempFile.getAbsolutePath());
+
+        // 验证：所有 4 个节点都应被正确保存和加载
+        assertEquals("应包含所有 4 个节点", 4, loadedConfig.getNodeCount());
+
+        // 验证每个节点
+        for (String nodeId : new String[]{
+                "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+                "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0",
+                "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0",
+                "d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0"}) {
+            ClusterNode loadedNode = loadedConfig.getNode(nodeId);
+            assertNotNull("节点 " + nodeId + " 应在加载的配置中", loadedNode);
+        }
+
+        // 验证槽位分配
+        assertEquals(master1.getNodeId(), loadedConfig.getSlotOwner(0));
+        assertEquals(master2.getNodeId(), loadedConfig.getSlotOwner(5461));
+        assertEquals(master3.getNodeId(), loadedConfig.getSlotOwner(16383));
+
+        // 验证 MYSELF 标志
+        ClusterNode myselfNode = loadedConfig.getNode("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0");
+        assertTrue("MYSELF 节点应有 myself 标志", myselfNode.isMyself());
+
+        // 验证从节点关系
+        ClusterNode loadedSlave = loadedConfig.getNode("d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0");
+        assertTrue("从节点应有 slave 标志", loadedSlave.isSlave());
+        assertEquals("从节点应关联到正确的 master", 
+                "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 
+                loadedSlave.getMasterNodeId());
+    }
+
+    /**
      * 创建测试配置
      */
     private ClusterConfig createTestConfig() {

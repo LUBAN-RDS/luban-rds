@@ -75,6 +75,9 @@ public class GossipTask implements Runnable {
             // 4. 更新集群状态
             updateClusterState();
 
+            // 5. 保存集群配置（参照 Redis 7 serverCron 中 clusterSaveConfig 的周期性检查）
+            gossipProtocol.saveClusterConfigIfNeeded();
+
         } catch (Exception e) {
             logger.error("Gossip 任务执行失败", e);
         }

@@ -238,7 +238,6 @@ public class NettyRedisServer implements RedisServer {
         // 初始化集群模式
         if (config.isClusterEnabled()) {
             initClusterMode();
-            saveClusterConfig();
         }
         
         // 初始化哨兵模式
@@ -350,8 +349,15 @@ public class NettyRedisServer implements RedisServer {
                 clusterStateManager, 
                 gossipProtocol,
                 clusterConfigFilePath);
-        
-        // 10. 初始化 ClusterBusServer
+
+        // 10. 注入拓扑变更回调（参照 Redis 7 clusterSaveConfigIfNeeded 机制）
+        // 当集群拓扑发生变更时自动触发 nodes.conf 持久化
+        Runnable saveConfigCallback = this::saveClusterConfig;
+        this.gossipProtocol.setOnTopologyChanged(saveConfigCallback);
+        this.clusterCommandHandler.setOnTopologyChanged(saveConfigCallback);
+        logger.info("集群配置自动保存回调已注册");
+
+        // 11. 初始化 ClusterBusServer
         this.clusterBusServer = new ClusterBusServer(port, clusterConfig, gossipProtocol);
         
         logger.info("集群模式初始化完成: nodeId={}, port={}, busPort={}", 
@@ -503,7 +509,8 @@ public class NettyRedisServer implements RedisServer {
     /**
      * 保存集群配置到 nodes.conf 文件
      * <p>
-     * 在启动时、CLUSTER SAVECONFIG 命令调用时、以及优雅关闭时写入。
+     * 在拓扑变更（通过 Gossip/CLUSTER 命令触发）、CLUSTER SAVECONFIG 命令调用时、
+     * 以及优雅关闭时写入。保存成功后自动清除 ClusterConfig 的脏标记。
      * </p>
      */
     private void saveClusterConfig() {
@@ -514,6 +521,7 @@ public class NettyRedisServer implements RedisServer {
                 // 确保目录存在
                 configFile.getParentFile().mkdirs();
                 persister.save(clusterConfig, configFile.getAbsolutePath());
+                clusterConfig.clearDirty();
                 logger.info("集群配置已保存到: {}", configFile.getAbsolutePath());
             } catch (IOException e) {
                 logger.error("保存集群配置失败", e);

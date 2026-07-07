@@ -340,4 +340,38 @@ public class ClusterConfigTest {
         config.syncSlotsFromNode("unknown", slots, 1L);
         assertEquals(0, config.getAssignedSlotCount());
     }
+
+    // ==================== 脏标记测试（Redis 7 clusterSaveConfigIfNeeded 机制） ====================
+
+    @Test
+    public void testDirtyFlagInitialState() {
+        // 新建的 ClusterConfig 应该不是脏的
+        assertFalse(config.isDirty());
+    }
+
+    @Test
+    public void testMarkDirty() {
+        config.markDirty();
+        assertTrue(config.isDirty());
+    }
+
+    @Test
+    public void testClearDirty() {
+        config.markDirty();
+        assertTrue(config.isDirty());
+        config.clearDirty();
+        assertFalse(config.isDirty());
+    }
+
+    @Test
+    public void testDirtyFlagAfterMultipleOperations() {
+        assertFalse(config.isDirty());
+        config.markDirty();
+        assertTrue(config.isDirty());
+        // 多次标记应保持脏状态
+        config.markDirty();
+        assertTrue(config.isDirty());
+        config.clearDirty();
+        assertFalse(config.isDirty());
+    }
 }

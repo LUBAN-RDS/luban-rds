@@ -85,6 +85,15 @@ public class ClusterCommandHandler {
     private static final long FORGET_DELAY_MS = 60000;
 
     /**
+     * 拓扑变更回调（由 NettyRedisServer 注入，用于自动触发 nodes.conf 持久化）
+     * <p>
+     * 参照 Redis 7 clusterSaveConfigIfNeeded 机制：
+     * 当集群拓扑发生变更时调用此回调，触发 nodes.conf 持久化。
+     * </p>
+     */
+    private Runnable onTopologyChanged;
+
+    /**
      * 构造方法
      *
      * @param clusterConfig           集群配置
@@ -104,6 +113,32 @@ public class ClusterCommandHandler {
         this.slotMigrationState = new ConcurrentHashMap<>();
         this.slotMigrationTarget = new ConcurrentHashMap<>();
         this.forgetNodes = new ConcurrentHashMap<>();
+    }
+
+    /**
+     * 设置拓扑变更回调（用于自动触发 nodes.conf 持久化）
+     * <p>
+     * 参照 Redis 7 clusterSaveConfigIfNeeded 机制：
+     * 当集群拓扑发生变更（槽位重分配、节点角色变更等）时调用此回调。
+     * </p>
+     *
+     * @param onTopologyChanged 拓扑变更回调
+     */
+    public void setOnTopologyChanged(Runnable onTopologyChanged) {
+        this.onTopologyChanged = onTopologyChanged;
+    }
+
+    /**
+     * 通知拓扑变更（触发 nodes.conf 持久化）
+     * <p>
+     * 通过 ClusterConfig.markDirty() 标记脏状态，并立即触发回调执行持久化。
+     * </p>
+     */
+    private void notifyTopologyChanged() {
+        clusterConfig.markDirty();
+        if (onTopologyChanged != null) {
+            onTopologyChanged.run();
+        }
     }
 
     /**
@@ -550,6 +585,7 @@ public class ClusterCommandHandler {
         if (node.isSlave()) {
             clusterConfig.removeNode(nodeId);
             logger.info("CLUSTER FORGET: removed slave node {}", nodeId);
+            notifyTopologyChanged();
             return "+OK\r\n";
         }
 
@@ -563,6 +599,7 @@ public class ClusterCommandHandler {
         clusterConfig.removeNode(nodeId);
 
         logger.info("CLUSTER FORGET: removed master node {} (with 60s delay)", nodeId);
+        notifyTopologyChanged();
         return "+OK\r\n";
     }
 
@@ -612,6 +649,7 @@ public class ClusterCommandHandler {
         myNode.setConfigEpoch(clusterConfig.getCurrentEpoch());
 
         logger.info("CLUSTER REPLICATE: current node is now slave of {}", masterNodeId);
+        notifyTopologyChanged();
         return "+OK\r\n";
     }
 
@@ -673,6 +711,7 @@ public class ClusterCommandHandler {
             stateManager.updateClusterState();
 
             logger.info("CLUSTER ADDSLOTS: added {} slots", slots.length);
+            notifyTopologyChanged();
             return "+OK\r\n";
         } catch (Exception e) {
             return "-ERR " + e.getMessage() + "\r\n";
@@ -728,6 +767,7 @@ public class ClusterCommandHandler {
             clusterConfig.incrementEpoch();
 
             logger.info("CLUSTER DELSLOTS: removed {} slots", slots.length);
+            notifyTopologyChanged();
             return "+OK\r\n";
         } catch (Exception e) {
             return "-ERR " + e.getMessage() + "\r\n";
@@ -826,6 +866,7 @@ public class ClusterCommandHandler {
                 clusterConfig.incrementEpoch();
 
                 logger.info("CLUSTER SETSLOT: slot {} assigned to node {}", slot, nodeId);
+                notifyTopologyChanged();
                 return "+OK\r\n";
 
             default:
@@ -1082,6 +1123,7 @@ public class ClusterCommandHandler {
                         myNode.getNodeId());
             }
 
+            notifyTopologyChanged();
             return "+OK\r\n";
         } catch (Exception e) {
             logger.error("CLUSTER FAILOVER failed", e);
@@ -1153,6 +1195,7 @@ public class ClusterCommandHandler {
         }
 
         logger.info("CLUSTER FLUSHSLOTS: all slots cleared");
+        notifyTopologyChanged();
         return "+OK\r\n";
     }
 
@@ -1171,6 +1214,7 @@ public class ClusterCommandHandler {
         }
 
         logger.info("CLUSTER BUMPEPOCH: new epoch = {}", newEpoch);
+        notifyTopologyChanged();
         return ":" + newEpoch + "\r\n";
     }
 
@@ -1194,6 +1238,7 @@ public class ClusterCommandHandler {
                 parentDir.mkdirs();
             }
             persister.save(clusterConfig, clusterConfigFilePath);
+            clusterConfig.clearDirty();
             logger.info("CLUSTER SAVECONFIG: configuration saved to {}", clusterConfigFilePath);
             return "+OK\r\n";
         } catch (IOException e) {

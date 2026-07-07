@@ -62,6 +62,16 @@ public class ClusterConfig implements Serializable {
     private String state;
 
     /**
+     * 集群配置脏标记（用于自动触发 nodes.conf 持久化）
+     * <p>
+     * 参照 Redis 7 clusterSaveConfigIfNeeded 机制：
+     * 当集群拓扑发生变更（节点增删、状态变更、槽位重分配、纪元变化）时置为 true，
+     * 由后台定时任务检查并触发持久化，完成后清除。
+     * </p>
+     */
+    private volatile boolean dirty;
+
+    /**
      * 默认构造方法
      */
     public ClusterConfig() {
@@ -409,6 +419,33 @@ public class ClusterConfig implements Serializable {
     }
 
     // ==================== 状态管理方法 ====================
+
+    /**
+     * 标记集群配置为脏（拓扑发生变更）
+     * <p>
+     * 参照 Redis 7 clusterSaveConfigIfNeeded 机制：
+     * 当集群拓扑变更时调用此方法，触发后台持久化。
+     * </p>
+     */
+    public void markDirty() {
+        this.dirty = true;
+    }
+
+    /**
+     * 检查集群配置是否脏（是否有未持久化的拓扑变更）
+     *
+     * @return true 如果有未持久化的变更
+     */
+    public boolean isDirty() {
+        return dirty;
+    }
+
+    /**
+     * 清除脏标记（持久化完成后调用）
+     */
+    public void clearDirty() {
+        this.dirty = false;
+    }
 
     /**
      * 检查集群是否健康
