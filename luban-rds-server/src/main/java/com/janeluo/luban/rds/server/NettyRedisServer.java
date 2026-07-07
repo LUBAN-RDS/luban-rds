@@ -300,23 +300,36 @@ public class NettyRedisServer implements RedisServer {
         
         this.clusterEnabled = true;
         
-        // 1. 初始化 ClusterConfig
-        String nodeId = loadOrCreateNodeId();
+        // 1. 尝试从 nodes.conf 加载已有集群配置
+        ClusterConfig loadedConfig = loadClusterConfigFromFile();
+        
+        // 2. 初始化 ClusterConfig（优先使用已有节点ID，否则生成新ID）
+        String nodeId;
+        if (loadedConfig != null && loadedConfig.getMyNodeId() != null) {
+            nodeId = loadedConfig.getMyNodeId();
+        } else {
+            nodeId = ClusterConfigPersister.generateNodeId();
+        }
         this.clusterConfig = new ClusterConfig(nodeId);
         
-        // 2. 初始化当前节点信息
+        // 3. 从加载的配置恢复集群状态（节点、槽位、纪元等）
+        if (loadedConfig != null) {
+            restoreClusterFromConfig(loadedConfig);
+        }
+        
+        // 4. 初始化/更新当前节点信息（使用当前网络地址）
         initCurrentNode(nodeId);
         
-        // 3. 初始化 SlotManager
+        // 5. 初始化 SlotManager
         this.slotManager = new DefaultSlotManager(nodeId);
         
-        // 4. 初始化 ClusterStateManager
+        // 6. 初始化 ClusterStateManager
         this.clusterStateManager = new ClusterStateManager(clusterConfig);
         
-        // 5. 初始化 ClusterBusClient（需要在 GossipProtocol 之前）
+        // 7. 初始化 ClusterBusClient（需要在 GossipProtocol 之前）
         this.clusterBusClient = new ClusterBusClient(clusterConfig, null);
         
-        // 6. 初始化 GossipProtocol
+        // 8. 初始化 GossipProtocol
         this.gossipProtocol = new GossipProtocol(
                 clusterConfig, 
                 clusterBusClient, 
@@ -329,7 +342,7 @@ public class NettyRedisServer implements RedisServer {
         // 将 clusterStateManager 注入到 GossipProtocol，用于消息计数统计
         this.gossipProtocol.setClusterStateManager(clusterStateManager);
         
-        // 7. 初始化 ClusterCommandHandler
+        // 9. 初始化 ClusterCommandHandler
         String clusterConfigFilePath = new File(config.getDir(), config.getClusterConfigFile()).getAbsolutePath();
         this.clusterCommandHandler = new ClusterCommandHandler(
                 clusterConfig, 
@@ -338,7 +351,7 @@ public class NettyRedisServer implements RedisServer {
                 gossipProtocol,
                 clusterConfigFilePath);
         
-        // 8. 初始化 ClusterBusServer
+        // 10. 初始化 ClusterBusServer
         this.clusterBusServer = new ClusterBusServer(port, clusterConfig, gossipProtocol);
         
         logger.info("集群模式初始化完成: nodeId={}, port={}, busPort={}", 
@@ -346,32 +359,82 @@ public class NettyRedisServer implements RedisServer {
     }
     
     /**
-     * 加载或创建节点ID
-     * 
-     * @return 节点ID（40字符十六进制）
+     * 从 nodes.conf 加载集群配置
+     * <p>
+     * 在集群模式启动时尝试加载已有的集群配置文件，
+     * 恢复节点列表、槽位分配和配置纪元等信息。
+     * </p>
+     *
+     * @return 加载的集群配置，如果文件不存在或加载失败则返回 null
      */
-    private String loadOrCreateNodeId() {
+    private ClusterConfig loadClusterConfigFromFile() {
         String configFile = config.getClusterConfigFile();
         
-        // 尝试从配置文件加载
         if (configFile != null && !configFile.isEmpty()) {
             File file = new File(config.getDir(), configFile);
             if (file.exists()) {
                 try {
                     ClusterConfigPersister persister = new ClusterConfigPersister();
                     ClusterConfig loadedConfig = persister.load(file.getAbsolutePath());
-                    String loadedNodeId = loadedConfig.getMyNodeId();
-                    if (loadedNodeId != null && !loadedNodeId.isEmpty()) {
-                        logger.info("从配置文件加载节点ID: {}", loadedNodeId);
-                        return loadedNodeId;
+                    if (loadedConfig.getMyNodeId() != null && !loadedConfig.getMyNodeId().isEmpty()) {
+                        logger.info("从配置文件加载集群配置: nodeId={}, 节点数={}, 槽位数={}",
+                                loadedConfig.getMyNodeId(), loadedConfig.getNodeCount(),
+                                loadedConfig.getAssignedSlotCount());
+                        return loadedConfig;
                     }
                 } catch (IOException e) {
-                    logger.warn("加载集群配置文件失败，将创建新节点ID: {}", e.getMessage());
+                    logger.warn("加载集群配置文件失败: {}", e.getMessage());
                 }
             }
         }
+        return null;
+    }
+
+    /**
+     * 从加载的集群配置恢复集群状态
+     * <p>
+     * 将 nodes.conf 中保存的节点列表、槽位分配、配置纪元等恢复到当前 ClusterConfig 中。
+     * MYSELF 节点的网络地址（IP/端口）将在后续 initCurrentNode() 中更新为当前值。
+     * </p>
+     *
+     * @param loaded 从文件加载的集群配置
+     */
+    private void restoreClusterFromConfig(ClusterConfig loaded) {
+        // 恢复配置纪元
+        clusterConfig.setCurrentEpoch(loaded.getCurrentEpoch());
+        clusterConfig.setConfigEpoch(loaded.getConfigEpoch());
         
-        // 生成新的节点ID
+        // 恢复所有节点（MYSELF 节点的网络地址将在 initCurrentNode 中更新）
+        for (ClusterNode node : loaded.getAllNodes()) {
+            clusterConfig.addNode(node);
+        }
+        
+        // 恢复槽位分配
+        int restoredSlots = 0;
+        for (int i = 0; i < ClusterNode.CLUSTER_SLOTS; i++) {
+            String ownerId = loaded.getSlotOwner(i);
+            if (ownerId != null) {
+                clusterConfig.setSlotOwner(i, ownerId);
+                restoredSlots++;
+            }
+        }
+        
+        logger.info("从配置文件恢复集群状态: 节点数={}, 槽位数={}, currentEpoch={}, configEpoch={}",
+                loaded.getNodeCount(), restoredSlots, loaded.getCurrentEpoch(), loaded.getConfigEpoch());
+    }
+
+    /**
+     * 加载或创建节点ID
+     * 
+     * @return 节点ID（40字符十六进制）
+     */
+    private String loadOrCreateNodeId() {
+        ClusterConfig loadedConfig = loadClusterConfigFromFile();
+        if (loadedConfig != null && loadedConfig.getMyNodeId() != null) {
+            logger.info("从配置文件加载节点ID: {}", loadedConfig.getMyNodeId());
+            return loadedConfig.getMyNodeId();
+        }
+        
         String newNodeId = ClusterConfigPersister.generateNodeId();
         logger.info("生成新的节点ID: {}", newNodeId);
         return newNodeId;
@@ -379,7 +442,12 @@ public class NettyRedisServer implements RedisServer {
     
     /**
      * 初始化当前节点信息
-     * 
+     * <p>
+     * 如果节点已从 nodes.conf 恢复（具有相同 nodeId 且 MYSELF 状态的节点），
+     * 则仅更新其网络地址（IP/端口可能在重启后变化），保留其状态、槽位、配置纪元等。
+     * 如果节点不存在，则创建新的 MYSELF 节点（首次启动）。
+     * </p>
+     *
      * @param nodeId 节点ID
      */
     private void initCurrentNode(String nodeId) {
@@ -406,14 +474,26 @@ public class NettyRedisServer implements RedisServer {
             busPort = announcePort + ClusterBusServer.BUS_PORT_OFFSET;
         }
         
-        // 创建当前节点
-        ClusterNode myNode = new ClusterNode(nodeId, ip, announcePort, busPort);
-        myNode.addState(ClusterNodeState.MYSELF);
-        myNode.addState(ClusterNodeState.MASTER);  // 默认为主节点
-        myNode.getLink().setConnected(true);  // 本节点始终为已连接状态
+        // 检查是否已有 MYSELF 节点（从 nodes.conf 恢复）
+        ClusterNode myNode = clusterConfig.getNode(nodeId);
+        if (myNode != null) {
+            // 从配置文件恢复的节点，更新网络地址（IP/端口可能在重启后变化）
+            logger.info("从配置文件恢复当前节点: nodeId={}, oldAddress={}", nodeId, myNode.getFullAddress());
+            myNode.setIp(ip);
+            myNode.setPort(announcePort);
+            myNode.setBusPort(busPort);
+            myNode.getLink().setConnected(true);
+        } else {
+            // 创建新的当前节点（首次启动，无配置文件）
+            myNode = new ClusterNode(nodeId, ip, announcePort, busPort);
+            myNode.addState(ClusterNodeState.MYSELF);
+            myNode.addState(ClusterNodeState.MASTER);  // 默认为主节点
+            myNode.getLink().setConnected(true);
+            
+            // 添加到集群配置
+            clusterConfig.addNode(myNode);
+        }
         
-        // 添加到集群配置
-        clusterConfig.addNode(myNode);
         clusterConfig.setMyNodeId(nodeId);
         
         logger.info("当前节点初始化完成: nodeId={}, address={}", 
