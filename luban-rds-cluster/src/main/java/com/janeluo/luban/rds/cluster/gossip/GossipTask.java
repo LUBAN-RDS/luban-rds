@@ -72,10 +72,16 @@ public class GossipTask implements Runnable {
             // 3. 检查并广播 FAIL 消息
             checkAndBroadcastFail();
 
-            // 4. 更新集群状态
+            // 4. 驱动故障转移选举（FAIL 状态已更新，此时检查最准确）
+            FailoverManager failoverManager = gossipProtocol.getFailoverManager();
+            if (failoverManager != null) {
+                failoverManager.tick();
+            }
+
+            // 5. 更新集群状态
             updateClusterState();
 
-            // 5. 保存集群配置（参照 Redis 7 serverCron 中 clusterSaveConfig 的周期性检查）
+            // 6. 保存集群配置（参照 Redis 7 serverCron 中 clusterSaveConfig 的周期性检查）
             gossipProtocol.saveClusterConfigIfNeeded();
 
         } catch (Exception e) {

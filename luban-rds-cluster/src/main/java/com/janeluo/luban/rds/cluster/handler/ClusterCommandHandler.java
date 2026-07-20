@@ -1106,24 +1106,23 @@ public class ClusterCommandHandler {
         try {
             if (takeover) {
                 // TAKEOVER 模式：直接接管，不需要授权
-                performFailover(myNode, masterNode);
-                logger.info("CLUSTER FAILOVER TAKEOVER: slave {} promoted to master", 
+                performManualFailover(myNode, masterNode);
+                logger.info("CLUSTER FAILOVER TAKEOVER: slave {} promoted to master",
                         myNode.getNodeId());
             } else if (force) {
                 // FORCE 模式：强制故障转移，不需要主节点同意
-                performFailover(myNode, masterNode);
-                logger.info("CLUSTER FAILOVER FORCE: slave {} promoted to master", 
+                performManualFailover(myNode, masterNode);
+                logger.info("CLUSTER FAILOVER FORCE: slave {} promoted to master",
                         myNode.getNodeId());
             } else {
                 // 正常模式：需要主节点同意
                 // TODO: 实现正常的故障转移流程，需要向主节点请求授权
                 // 这里简化处理，直接执行
-                performFailover(myNode, masterNode);
-                logger.info("CLUSTER FAILOVER: slave {} promoted to master", 
+                performManualFailover(myNode, masterNode);
+                logger.info("CLUSTER FAILOVER: slave {} promoted to master",
                         myNode.getNodeId());
             }
 
-            notifyTopologyChanged();
             return "+OK\r\n";
         } catch (Exception e) {
             logger.error("CLUSTER FAILOVER failed", e);
@@ -1132,36 +1131,17 @@ public class ClusterCommandHandler {
     }
 
     /**
-     * 执行故障转移
+     * 执行手动故障转移，委托给 FailoverManager（performFailover 已抽取到那里）。
      *
-     * @param slaveNode  从节点
-     * @param masterNode 主节点
+     * @param slaveNode  当前 slave 节点
+     * @param masterNode 原 master 节点
      */
-    private void performFailover(ClusterNode slaveNode, ClusterNode masterNode) {
-        // 将从节点提升为主节点
-        slaveNode.removeState(ClusterNodeState.SLAVE);
-        slaveNode.addState(ClusterNodeState.MASTER);
-        slaveNode.setMasterNodeId(null);
-
-        // 继承主节点的槽位
-        BitSet masterSlots = masterNode.getSlots();
-        for (int i = masterSlots.nextSetBit(0); i >= 0; i = masterSlots.nextSetBit(i + 1)) {
-            slaveNode.addSlot(i);
-            slotManager.setSlotOwner(i, slaveNode.getNodeId());
+    private void performManualFailover(ClusterNode slaveNode, ClusterNode masterNode) {
+        if (gossipProtocol == null || gossipProtocol.getFailoverManager() == null) {
+            // FailoverManager 未注入（如单元测试场景），降级为直接抛错
+            throw new IllegalStateException("FailoverManager 未注入，无法执行故障转移");
         }
-
-        // 清除原主节点的槽位
-        masterNode.clearSlots();
-        masterNode.removeState(ClusterNodeState.MASTER);
-        masterNode.addState(ClusterNodeState.SLAVE);
-        masterNode.setMasterNodeId(slaveNode.getNodeId());
-
-        // 增加配置纪元
-        clusterConfig.incrementEpoch();
-        slaveNode.setConfigEpoch(clusterConfig.getCurrentEpoch());
-
-        // 更新集群状态
-        stateManager.updateClusterState();
+        gossipProtocol.getFailoverManager().performManualFailover(slaveNode, masterNode);
     }
 
     /**

@@ -253,6 +253,9 @@ public class ConfigLoader {
                     case "cluster-node-timeout":
                         config.setClusterNodeTimeout(Long.parseLong(value));
                         break;
+                    case "cluster-failover-grace-period":
+                        config.setClusterFailoverGracePeriod(Long.parseLong(value));
+                        break;
                     case "cluster-announce-ip":
                         config.setClusterAnnounceIp(value);
                         break;

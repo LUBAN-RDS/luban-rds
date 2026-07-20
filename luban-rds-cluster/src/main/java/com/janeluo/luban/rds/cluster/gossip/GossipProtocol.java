@@ -77,6 +77,11 @@ public class GossipProtocol {
     private final FailureDetector failureDetector;
 
     /**
+     * 故障转移管理器（由 NettyRedisServer 在创建后通过 setFailoverManager 注入）
+     */
+    private FailoverManager failoverManager;
+
+    /**
      * 集群状态管理器（用于消息计数统计）
      */
     private ClusterStateManager stateManager;
@@ -158,6 +163,24 @@ public class GossipProtocol {
      */
     public void setClusterStateManager(ClusterStateManager stateManager) {
         this.stateManager = stateManager;
+    }
+
+    /**
+     * 注入故障转移管理器（由 NettyRedisServer 在创建 FailoverManager 后注入）。
+     *
+     * @param failoverManager 故障转移管理器
+     */
+    public void setFailoverManager(FailoverManager failoverManager) {
+        this.failoverManager = failoverManager;
+    }
+
+    /**
+     * 获取故障转移管理器。
+     *
+     * @return 故障转移管理器，未注入时返回 null
+     */
+    public FailoverManager getFailoverManager() {
+        return failoverManager;
     }
 
     /**
@@ -577,6 +600,39 @@ public class GossipProtocol {
 
         // 拓扑变更：节点状态变为 FAIL，触发 nodes.conf 持久化
         notifyTopologyChanged();
+    }
+
+    /**
+     * 处理故障转移授权请求（委托给 FailoverManager）。
+     *
+     * @param msg 授权请求消息
+     */
+    public void handleFailoverAuthRequest(FailoverAuthRequestMessage msg) {
+        if (failoverManager != null) {
+            failoverManager.onAuthRequest(msg);
+        }
+    }
+
+    /**
+     * 处理故障转移授权确认（委托给 FailoverManager）。
+     *
+     * @param msg 授权确认消息
+     */
+    public void handleFailoverAuthAck(FailoverAuthAckMessage msg) {
+        if (failoverManager != null) {
+            failoverManager.onAuthAck(msg);
+        }
+    }
+
+    /**
+     * 处理故障转移结果（委托给 FailoverManager）。
+     *
+     * @param msg 胜选结果消息
+     */
+    public void handleFailoverResult(FailoverResultMessage msg) {
+        if (failoverManager != null) {
+            failoverManager.onFailoverResult(msg);
+        }
     }
 
     /**

@@ -231,6 +231,13 @@ public class RdsConfig {
     private long clusterNodeTimeout = 15000;
 
     /**
+     * 集群自动故障转移退避窗口（毫秒）。
+     * slave 检测到 master FAIL 后，等待该时长 + 随机抖动(0-500ms) 再发起选举。
+     * 默认 0（仅保留随机抖动）。
+     */
+    private long clusterFailoverGracePeriod = 0;
+
+    /**
      * 对外宣布的 IP 地址
      */
     private String clusterAnnounceIp = "";
@@ -685,6 +692,14 @@ public class RdsConfig {
 
     public void setClusterNodeTimeout(long clusterNodeTimeout) {
         this.clusterNodeTimeout = clusterNodeTimeout;
+    }
+
+    public long getClusterFailoverGracePeriod() {
+        return clusterFailoverGracePeriod;
+    }
+
+    public void setClusterFailoverGracePeriod(long clusterFailoverGracePeriod) {
+        this.clusterFailoverGracePeriod = clusterFailoverGracePeriod;
     }
 
     public String getClusterAnnounceIp() {
