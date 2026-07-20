@@ -1132,16 +1132,44 @@ public class ClusterCommandHandler {
 
     /**
      * 执行手动故障转移，委托给 FailoverManager（performFailover 已抽取到那里）。
+     * 若 FailoverManager 未注入（如单元测试场景传入 null gossipProtocol），
+     * 降级为本地执行以保持向后兼容。
      *
      * @param slaveNode  当前 slave 节点
      * @param masterNode 原 master 节点
      */
     private void performManualFailover(ClusterNode slaveNode, ClusterNode masterNode) {
-        if (gossipProtocol == null || gossipProtocol.getFailoverManager() == null) {
-            // FailoverManager 未注入（如单元测试场景），降级为直接抛错
-            throw new IllegalStateException("FailoverManager 未注入，无法执行故障转移");
+        if (gossipProtocol != null && gossipProtocol.getFailoverManager() != null) {
+            gossipProtocol.getFailoverManager().performManualFailover(slaveNode, masterNode);
+            return;
         }
-        gossipProtocol.getFailoverManager().performManualFailover(slaveNode, masterNode);
+        // 降级：本地执行（保留原 performFailover 行为，含 epoch 自增）
+        performFailoverLocally(slaveNode, masterNode);
+        notifyTopologyChanged();
+    }
+
+    /**
+     * 本地执行故障转移（FailoverManager 未注入时的降级路径，保留原 performFailover 行为）。
+     */
+    private void performFailoverLocally(ClusterNode slaveNode, ClusterNode masterNode) {
+        slaveNode.removeState(ClusterNodeState.SLAVE);
+        slaveNode.addState(ClusterNodeState.MASTER);
+        slaveNode.setMasterNodeId(null);
+
+        BitSet masterSlots = masterNode.getSlots();
+        for (int i = masterSlots.nextSetBit(0); i >= 0; i = masterSlots.nextSetBit(i + 1)) {
+            slaveNode.addSlot(i);
+            slotManager.setSlotOwner(i, slaveNode.getNodeId());
+        }
+
+        masterNode.clearSlots();
+        masterNode.removeState(ClusterNodeState.MASTER);
+        masterNode.addState(ClusterNodeState.SLAVE);
+        masterNode.setMasterNodeId(slaveNode.getNodeId());
+
+        clusterConfig.incrementEpoch();
+        slaveNode.setConfigEpoch(clusterConfig.getCurrentEpoch());
+        stateManager.updateClusterState();
     }
 
     /**

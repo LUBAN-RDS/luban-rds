@@ -220,7 +220,8 @@ public class FailoverManager {
      */
     public synchronized void onAuthRequest(FailoverAuthRequestMessage req) {
         ClusterNode me = clusterConfig.getMyNode();
-        if (me == null || !me.isMaster()) {
+        if (me == null || !me.isMaster() || me.isFail()) {
+            // 仅健康 master 投票（FAIL master 视为不可达，对齐 Redis 行为）
             return;
         }
 
@@ -373,6 +374,9 @@ public class FailoverManager {
         masterNode.removeState(ClusterNodeState.MASTER);
         masterNode.addState(ClusterNodeState.SLAVE);
         masterNode.setMasterNodeId(slaveNode.getNodeId());
+        // 降级时清除原 master 的 FAIL/PFAIL（它已恢复为新 master 的 slave 角色）
+        masterNode.removeState(ClusterNodeState.FAIL);
+        masterNode.removeState(ClusterNodeState.PFAIL);
 
         stateManager.updateClusterState();
     }
@@ -427,6 +431,9 @@ public class FailoverManager {
                 node.removeState(ClusterNodeState.MASTER);
                 node.addState(ClusterNodeState.SLAVE);
                 node.setMasterNodeId(winner.getNodeId());
+                // 降级时清除 FAIL/PFAIL（原 master 已恢复为 winner 的 slave 角色）
+                node.removeState(ClusterNodeState.FAIL);
+                node.removeState(ClusterNodeState.PFAIL);
                 logger.info("原 master 降级为 slave: oldMaster={}, newMaster={}",
                         node.getNodeId(), winner.getNodeId());
             }

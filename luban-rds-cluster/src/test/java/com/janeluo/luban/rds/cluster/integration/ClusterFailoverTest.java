@@ -1,8 +1,15 @@
 package com.janeluo.luban.rds.cluster.integration;
 
+import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
+import com.janeluo.luban.rds.cluster.gossip.FailoverAuthAckMessage;
+import com.janeluo.luban.rds.cluster.gossip.FailoverAuthRequestMessage;
+import com.janeluo.luban.rds.cluster.gossip.FailoverManager;
+import com.janeluo.luban.rds.cluster.gossip.FailoverResultMessage;
+import com.janeluo.luban.rds.cluster.gossip.FailoverState;
 import com.janeluo.luban.rds.cluster.gossip.FailureDetector;
+import com.janeluo.luban.rds.cluster.gossip.GossipMessage;
 import com.janeluo.luban.rds.cluster.handler.ClusterCommandHandler;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
@@ -12,7 +19,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mockito;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -439,6 +452,207 @@ class ClusterFailoverTest {
         // 再次获取，应该不在列表中
         Set<String> afterConfirm = failureDetector.getNodesToBroadcastFail();
         assertFalse(afterConfirm.contains(NODE_ID_2), "已确认FAIL的节点不应再在广播列表中");
+    }
+
+    // ==================== 自动故障转移集成测试 ====================
+
+    @Test
+    @DisplayName("集成：master FAIL 后单 slave 自动提升为新 master")
+    void testAutomaticFailoverSingleSlave() {
+        // 3 master + 1 slave of M1
+        ClusterNode m1 = createMasterNode(NODE_ID_1, "127.0.0.1", 7000);
+        for (int i = 0; i < 5000; i++) m1.addSlot(i);
+        ClusterNode m2 = createMasterNode(NODE_ID_2, "127.0.0.1", 7001);
+        ClusterNode m3 = createMasterNode(NODE_ID_3, "127.0.0.1", 7002);
+        ClusterNode s1 = createSlaveNode(NODE_ID_4, "127.0.0.1", 7003, NODE_ID_1);
+
+        TestCluster cluster = new TestCluster();
+        cluster.addNode(m1);
+        cluster.addNode(m2);
+        cluster.addNode(m3);
+        cluster.addNode(s1);
+
+        // M1 宕机
+        m1.addState(ClusterNodeState.FAIL);
+
+        // 驱动若干轮 tick，让选举收敛（含退避抖动 ≤ 500ms）
+        for (int i = 0; i < 8; i++) {
+            cluster.tickAll();
+            try {
+                Thread.sleep(120);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            cluster.deliverAllPending();
+        }
+
+        assertTrue(s1.isMaster(), "s1 应被提升为 master");
+        assertFalse(s1.isSlave());
+        assertTrue(s1.getSlotCount() > 0, "s1 应继承 M1 的槽位");
+    }
+
+    @Test
+    @DisplayName("集成：多 slave 场景下 master FAIL 后至少一个 slave 被提升")
+    void testMultipleSlavesAtLeastOneWinner() {
+        // 多 slave 场景：验证 master FAIL 后至少有一个 slave 接管（不验证唯一性，
+        // 唯一性由单元测试 testRejectOtherSlaveInSameEpoch 等覆盖）。
+        ClusterNode m1 = createMasterNode(NODE_ID_1, "127.0.0.1", 7000);
+        for (int i = 0; i < 5000; i++) m1.addSlot(i);
+        ClusterNode m2 = createMasterNode(NODE_ID_2, "127.0.0.1", 7001);
+        ClusterNode m3 = createMasterNode(NODE_ID_3, "127.0.0.1", 7002);
+        ClusterNode s1 = createSlaveNode(NODE_ID_4, "127.0.0.1", 7003, NODE_ID_1);
+        ClusterNode s2 = createSlaveNode("e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0",
+                "127.0.0.1", 7004, NODE_ID_1);
+
+        TestCluster cluster = new TestCluster();
+        cluster.addNode(m1);
+        cluster.addNode(m2);
+        cluster.addNode(m3);
+        cluster.addNode(s1);
+        cluster.addNode(s2);
+
+        m1.addState(ClusterNodeState.FAIL);
+
+        for (int i = 0; i < 12; i++) {
+            cluster.tickAll();
+            try {
+                Thread.sleep(120);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            cluster.deliverAllPending();
+        }
+
+        // 至少一个 slave 接管 m1 的槽位（高可用核心目标）
+        boolean s1TookOver = s1.isMaster() && s1.getSlotCount() > 0;
+        boolean s2TookOver = s2.isMaster() && s2.getSlotCount() > 0;
+        assertTrue(s1TookOver || s2TookOver, "至少一个 slave 应接管 m1 的槽位");
+    }
+
+    @Test
+    @DisplayName("集成：FailoverManager.performManualFailover 不广播 RESULT")
+    void testManualFailoverDoesNotBroadcastResult() {
+        ClusterConfig cfg = new ClusterConfig();
+        SlotManager sm = new DefaultSlotManager();
+        ClusterStateManager stm = new ClusterStateManager(cfg);
+        ClusterBusClient busClient = Mockito.mock(ClusterBusClient.class);
+
+        ClusterNode master = createMasterNode(NODE_ID_1, "127.0.0.1", 7000);
+        for (int i = 0; i < 100; i++) master.addSlot(i);
+        ClusterNode slave = createSlaveNode(NODE_ID_4, "127.0.0.1", 7003, NODE_ID_1);
+        cfg.addNode(master);
+        cfg.addNode(slave);
+        cfg.setMyNodeId(NODE_ID_4);
+
+        FailoverManager fm = new FailoverManager(cfg, sm, stm, busClient, () -> {}, 15000L, 0L);
+        fm.performManualFailover(slave, master);
+
+        assertEquals(FailoverState.IDLE, fm.getState());
+        assertTrue(slave.isMaster());
+        assertTrue(master.isSlave());
+        Mockito.verifyNoInteractions(busClient);  // 手动接管不广播 RESULT
+    }
+
+    /**
+     * 多节点内存模拟器：每节点一个 FailoverManager，broadcast 投递给其他节点的 handler。
+     * 不模拟真网络与 gossip 状态同步，专注验证 FailoverManager 选举协议正确性。
+     */
+    static class TestCluster {
+        final Map<String, ClusterNode> nodes = new HashMap<>();
+        final Map<String, ClusterConfig> configs = new HashMap<>();
+        final Map<String, FailoverManager> managers = new HashMap<>();
+        final Map<String, List<GossipMessage>> pending = new HashMap<>();
+
+        void addNode(ClusterNode node) {
+            node.addState(ClusterNodeState.MYSELF);
+            // 为新节点构造独立 ClusterConfig 副本（包含所有已知节点）
+            ClusterConfig cfg = new ClusterConfig();
+            cfg.setMyNodeId(node.getNodeId());
+            for (ClusterNode existing : nodes.values()) {
+                cfg.addNode(copyNodeForConfig(existing));
+            }
+            cfg.addNode(node);
+            // 把新节点也加入其他节点配置的副本
+            for (Map.Entry<String, ClusterConfig> e : configs.entrySet()) {
+                e.getValue().addNode(copyNodeForConfig(node));
+            }
+            nodes.put(node.getNodeId(), node);
+            configs.put(node.getNodeId(), cfg);
+
+            SlotManager sm = new DefaultSlotManager();
+            ClusterStateManager stm = new ClusterStateManager(cfg);
+            ClusterBusClient busClient = Mockito.mock(ClusterBusClient.class);
+            String fromId = node.getNodeId();
+            Mockito.doAnswer(inv -> {
+                GossipMessage msg = inv.getArgument(0);
+                pending.computeIfAbsent(fromId, k -> new ArrayList<>()).add(msg);
+                return null;
+            }).when(busClient).broadcast(ArgumentMatchers.any());
+            FailoverManager fm = new FailoverManager(cfg, sm, stm, busClient,
+                    () -> {}, 15000L, 0L);
+            managers.put(fromId, fm);
+        }
+
+        /**
+         * 为某个 ClusterConfig 视图复制一份节点引用（共享底层 ClusterNode 对象，
+         * 使状态变更跨节点可见；但每个 config 维护独立的 myNodeId）。
+         */
+        private ClusterNode copyNodeForConfig(ClusterNode src) {
+            // 直接返回原对象：ClusterNode 状态字段是共享的，测试需观察最终一致状态
+            return src;
+        }
+
+        void tickAll() {
+            for (FailoverManager fm : managers.values()) {
+                fm.tick();
+            }
+        }
+
+        void deliverAllPending() {
+            // 循环投递直到无新消息（AUTH_REQUEST → ACK → 胜选 → RESULT 链式触发）
+            int safety = 10;
+            while (!pending.isEmpty() && safety-- > 0) {
+                // 快照当前 pending，清空后允许处理期间产生的新消息进入下一轮
+                Map<String, List<GossipMessage>> snapshot = new HashMap<>();
+                for (Map.Entry<String, List<GossipMessage>> e : pending.entrySet()) {
+                    snapshot.put(e.getKey(), new ArrayList<>(e.getValue()));
+                }
+                pending.clear();
+
+                for (Map.Entry<String, List<GossipMessage>> e : snapshot.entrySet()) {
+                    String from = e.getKey();
+                    for (GossipMessage msg : e.getValue()) {
+                        for (Map.Entry<String, FailoverManager> me : managers.entrySet()) {
+                            if (me.getKey().equals(from)) {
+                                continue;
+                            }
+                            if (msg instanceof FailoverAuthRequestMessage) {
+                                me.getValue().onAuthRequest((FailoverAuthRequestMessage) msg);
+                            } else if (msg instanceof FailoverAuthAckMessage) {
+                                me.getValue().onAuthAck((FailoverAuthAckMessage) msg);
+                            } else if (msg instanceof FailoverResultMessage) {
+                                me.getValue().onFailoverResult((FailoverResultMessage) msg);
+                            }
+                        }
+                    }
+                }
+            }
+            pending.clear();
+        }
+    }
+
+    /**
+     * 创建从节点（自动故障转移测试用辅助方法）
+     */
+    private ClusterNode createSlaveNode(String nodeId, String ip, int port, String masterId) {
+        ClusterNode node = new ClusterNode(nodeId);
+        node.setIp(ip);
+        node.setPort(port);
+        node.setBusPort(port + 10000);
+        node.addState(ClusterNodeState.SLAVE);
+        node.setMasterNodeId(masterId);
+        node.updateLastPongTime();
+        return node;
     }
 
     // ==================== 辅助方法 ====================
