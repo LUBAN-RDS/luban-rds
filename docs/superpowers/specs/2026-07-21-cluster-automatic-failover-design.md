@@ -374,7 +374,7 @@ public List<ClusterNode> getSlavesOfMaster(String masterNodeId) {
 ### GossipMessageType.FAILOVER_RESULT 新增
 
 ```java
-FAILOVER_RESULT((byte) 0x07);
+FAILOVER_RESULT((byte) 0x08);   // 0x00-0x07 已占用，0x08 为下一个空闲码
 ```
 并在 `GossipMessage.createMessage` 工厂注册。
 
