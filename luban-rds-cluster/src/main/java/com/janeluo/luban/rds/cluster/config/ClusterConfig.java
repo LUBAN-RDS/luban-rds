@@ -4,8 +4,10 @@ import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -484,6 +486,25 @@ public class ClusterConfig implements Serializable {
             }
         }
         return count;
+    }
+
+    /**
+     * 获取指定主节点的所有从节点
+     *
+     * @param masterNodeId 主节点ID
+     * @return 从节点列表（可能为空，不会返回 null）
+     */
+    public List<ClusterNode> getSlavesOfMaster(String masterNodeId) {
+        List<ClusterNode> slaves = new ArrayList<>();
+        if (masterNodeId == null) {
+            return slaves;
+        }
+        for (ClusterNode node : nodes.values()) {
+            if (node.isSlave() && masterNodeId.equals(node.getMasterNodeId())) {
+                slaves.add(node);
+            }
+        }
+        return slaves;
     }
 
     /**

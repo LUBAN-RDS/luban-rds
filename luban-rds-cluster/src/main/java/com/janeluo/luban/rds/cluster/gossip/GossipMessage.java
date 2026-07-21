@@ -230,6 +230,8 @@ public abstract class GossipMessage implements Serializable {
                 return new FailoverAuthAckMessage();
             case UPDATE:
                 return new UpdateMessage();
+            case FAILOVER_RESULT:
+                return new FailoverResultMessage();
             default:
                 throw new IllegalArgumentException("不支持的消息类型: " + type);
         }

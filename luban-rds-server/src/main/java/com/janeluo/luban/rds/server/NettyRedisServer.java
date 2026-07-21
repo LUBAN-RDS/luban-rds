@@ -5,6 +5,7 @@ import com.janeluo.luban.rds.cluster.bus.ClusterBusServer;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
+import com.janeluo.luban.rds.cluster.gossip.FailoverManager;
 import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
 import com.janeluo.luban.rds.cluster.handler.ClusterCommandHandler;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
@@ -363,6 +364,18 @@ public class NettyRedisServer implements RedisServer {
         this.gossipProtocol.setOnTopologyChanged(saveConfigCallback);
         this.clusterCommandHandler.setOnTopologyChanged(saveConfigCallback);
         logger.info("集群配置自动保存回调已注册");
+
+        // 10.5 初始化 FailoverManager 并注入 GossipProtocol
+        FailoverManager failoverManager = new FailoverManager(
+                clusterConfig,
+                slotManager,
+                clusterStateManager,
+                clusterBusClient,
+                saveConfigCallback,
+                config.getClusterNodeTimeout(),
+                config.getClusterFailoverGracePeriod());
+        this.gossipProtocol.setFailoverManager(failoverManager);
+        logger.info("FailoverManager 已注入: gracePeriod={}ms", config.getClusterFailoverGracePeriod());
 
         // 11. 初始化 ClusterBusServer
         this.clusterBusServer = new ClusterBusServer(port, clusterConfig, gossipProtocol);

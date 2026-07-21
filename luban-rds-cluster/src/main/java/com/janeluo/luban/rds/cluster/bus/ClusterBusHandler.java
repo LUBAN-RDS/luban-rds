@@ -2,6 +2,9 @@ package com.janeluo.luban.rds.cluster.bus;
 
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.gossip.FailMessage;
+import com.janeluo.luban.rds.cluster.gossip.FailoverAuthAckMessage;
+import com.janeluo.luban.rds.cluster.gossip.FailoverAuthRequestMessage;
+import com.janeluo.luban.rds.cluster.gossip.FailoverResultMessage;
 import com.janeluo.luban.rds.cluster.gossip.GossipMessage;
 import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
 import com.janeluo.luban.rds.cluster.gossip.MeetMessage;
@@ -223,6 +226,15 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
             case UPDATE:
                 handleUpdate(message);
                 return null;
+            case FAILOVER_AUTH_REQUEST:
+                handleFailoverAuthRequest((FailoverAuthRequestMessage) message);
+                return null;
+            case FAILOVER_AUTH_ACK:
+                handleFailoverAuthAck((FailoverAuthAckMessage) message);
+                return null;
+            case FAILOVER_RESULT:
+                handleFailoverResult((FailoverResultMessage) message);
+                return null;
             default:
                 logger.warn("未知的消息类型: {}", message.getType());
                 return null;
@@ -308,6 +320,45 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
     private void handleUpdate(GossipMessage message) {
         logger.info("收到 UPDATE 消息，来自节点: {}", message.getSenderNodeId());
         // UPDATE 消息处理可以后续扩展
+    }
+
+    /**
+     * 处理故障转移授权请求（委托给 GossipProtocol/FailoverManager）。
+     *
+     * @param msg 授权请求消息
+     */
+    private void handleFailoverAuthRequest(FailoverAuthRequestMessage msg) {
+        logger.debug("收到 FAILOVER_AUTH_REQUEST: candidate={}, epoch={}",
+                msg.getSenderNodeId(), msg.getCurrentEpoch());
+        if (gossipProtocol != null) {
+            gossipProtocol.handleFailoverAuthRequest(msg);
+        }
+    }
+
+    /**
+     * 处理故障转移授权确认（委托给 GossipProtocol/FailoverManager）。
+     *
+     * @param msg 授权确认消息
+     */
+    private void handleFailoverAuthAck(FailoverAuthAckMessage msg) {
+        logger.debug("收到 FAILOVER_AUTH_ACK: voter={}, epoch={}",
+                msg.getSenderNodeId(), msg.getCurrentEpoch());
+        if (gossipProtocol != null) {
+            gossipProtocol.handleFailoverAuthAck(msg);
+        }
+    }
+
+    /**
+     * 处理故障转移结果（委托给 GossipProtocol/FailoverManager）。
+     *
+     * @param msg 胜选结果消息
+     */
+    private void handleFailoverResult(FailoverResultMessage msg) {
+        logger.info("收到 FAILOVER_RESULT: winner={}, epoch={}",
+                msg.getWinnerNodeId(), msg.getNewConfigEpoch());
+        if (gossipProtocol != null) {
+            gossipProtocol.handleFailoverResult(msg);
+        }
     }
 
     /**

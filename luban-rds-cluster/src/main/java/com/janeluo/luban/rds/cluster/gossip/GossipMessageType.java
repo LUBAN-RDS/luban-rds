@@ -48,7 +48,12 @@ public enum GossipMessageType {
     /**
      * 配置更新通知 - 通知配置变更
      */
-    UPDATE((byte) 0x07);
+    UPDATE((byte) 0x07),
+
+    /**
+     * 故障转移结果通知 - 胜选 slave 广播自己已提升为新 master
+     */
+    FAILOVER_RESULT((byte) 0x08);
 
     /**
      * 消息类型编码
