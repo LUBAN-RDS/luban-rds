@@ -220,21 +220,43 @@ public class FailureDetector {
     }
 
     /**
-     * 从 Gossip 消息中处理 PFAIL 投票
+     * 从 Gossip 消息中处理 PFAIL 投票。
+     * <p>
+     * Gossip section 携带的是"消息发送方"对目标节点的看法：
+     * 如果发送方认为目标节点处于 PFAIL，则把发送方记入目标节点的投票集合。
+     * 这是跨节点 PFAIL 共识传播的关键路径——缺少此步，
+     * {@link #pfailVotes} 永远只含本节点自己的投票，
+     * {@link #isMajorityAgreed(String)} 永远无法达到多数，
+     * 节点永远不会被标记为 FAIL，自动故障转移无法触发。
+     * </p>
      *
-     * @param nodeInfo Gossip 节点信息
+     * @param nodeInfo    Gossip section 中描述的目标节点信息
+     * @param voterNodeId 消息发送方节点 ID（即投票人）
      */
-    public void processGossipPfailVote(GossipNodeInfo nodeInfo) {
-        if (nodeInfo == null) {
+    public void processGossipPfailVote(GossipNodeInfo nodeInfo, String voterNodeId) {
+        if (nodeInfo == null || voterNodeId == null) {
+            return;
+        }
+
+        // 仅在目标节点被标记为 PFAIL 时登记投票
+        if (!nodeInfo.isPfail()) {
             return;
         }
 
         String targetNodeId = nodeInfo.getNodeId();
-
-        // 检查是否包含 PFAIL 标志
-        if (nodeInfo.isPfail()) {
-            logger.debug("处理 Gossip PFAIL 信息: targetNodeId={}", targetNodeId);
+        if (targetNodeId == null) {
+            return;
         }
+
+        // 跳过自投票（本节点对自己的 PFAIL 投票无意义；
+        // 本节点对其他节点的 PFAIL 投票已在 checkNodeTimeout 中通过 recordPfailVote 记录）
+        if (voterNodeId.equals(targetNodeId)) {
+            return;
+        }
+
+        recordPfailVote(targetNodeId, voterNodeId);
+        logger.debug("处理 Gossip PFAIL 投票: targetNodeId={}, voterNodeId={}",
+                targetNodeId, voterNodeId);
     }
 
     /**

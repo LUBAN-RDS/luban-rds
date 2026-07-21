@@ -266,6 +266,96 @@ class FailureDetectorTest {
         assertTrue(nodesToBroadcast.contains(targetNode.getNodeId()));
     }
 
+    @Test
+    @DisplayName("测试从 Gossip 消息处理 PFAIL 投票 - 节点处于 PFAIL 时登记投票")
+    void testProcessGossipPfailVoteWhenPfailShouldRecordVote() {
+        // 添加多个主节点（4 个主节点，majority = 3）
+        for (int i = 1; i <= 3; i++) {
+            ClusterNode node = createTestNode(
+                    String.format("%040d", i),
+                    "127.0.0.1",
+                    6380 + i,
+                    16380 + i
+            );
+            node.addState(ClusterNodeState.MASTER);
+            clusterConfig.addNode(node);
+        }
+
+        String targetNodeId = "cccccccccccccccccccccccccccccccccccccccc";
+
+        // 构造发送方（投票人 1）认为 target 处于 PFAIL 的 gossip section
+        GossipNodeInfo nodeInfo = new GossipNodeInfo(targetNodeId);
+        nodeInfo.addFlag(ClusterNodeState.PFAIL);
+
+        failureDetector.processGossipPfailVote(nodeInfo, String.format("%040d", 1));
+
+        // 应登记 voter=0000...01 一票
+        assertEquals(1, failureDetector.getPfailVoteCount(targetNodeId));
+    }
+
+    @Test
+    @DisplayName("测试从 Gossip 消息处理 PFAIL 投票 - 节点不处于 PFAIL 时不登记")
+    void testProcessGossipPfailVoteWhenNotPfailShouldNotRecordVote() {
+        String targetNodeId = "cccccccccccccccccccccccccccccccccccccccc";
+        String voterNodeId = String.format("%040d", 1);
+
+        // 构造一个不带 PFAIL 标志的 gossip section
+        GossipNodeInfo nodeInfo = new GossipNodeInfo(targetNodeId);
+        nodeInfo.addFlag(ClusterNodeState.MASTER);
+
+        failureDetector.processGossipPfailVote(nodeInfo, voterNodeId);
+
+        assertEquals(0, failureDetector.getPfailVoteCount(targetNodeId));
+    }
+
+    @Test
+    @DisplayName("测试从 Gossip 消息处理 PFAIL 投票 - 自投票应被跳过")
+    void testProcessGossipPfailVoteWhenSelfVoteShouldSkip() {
+        String targetNodeId = "cccccccccccccccccccccccccccccccccccccccc";
+
+        // voter == target（自投票）
+        GossipNodeInfo nodeInfo = new GossipNodeInfo(targetNodeId);
+        nodeInfo.addFlag(ClusterNodeState.PFAIL);
+
+        failureDetector.processGossipPfailVote(nodeInfo, targetNodeId);
+
+        assertEquals(0, failureDetector.getPfailVoteCount(targetNodeId));
+    }
+
+    @Test
+    @DisplayName("测试从 Gossip 消息处理 PFAIL 投票 - 多 voter 累计后达到多数")
+    void testProcessGossipPfailVoteMultipleVotersReachesMajority() {
+        // 添加 3 个 master（共 4 个 master，majority = 3）
+        for (int i = 1; i <= 3; i++) {
+            ClusterNode node = createTestNode(
+                    String.format("%040d", i),
+                    "127.0.0.1",
+                    6380 + i,
+                    16380 + i
+            );
+            node.addState(ClusterNodeState.MASTER);
+            clusterConfig.addNode(node);
+        }
+
+        String targetNodeId = "cccccccccccccccccccccccccccccccccccccccc";
+        GossipNodeInfo nodeInfo = new GossipNodeInfo(targetNodeId);
+        nodeInfo.addFlag(ClusterNodeState.PFAIL);
+
+        // voter 1 投票
+        failureDetector.processGossipPfailVote(nodeInfo, String.format("%040d", 1));
+        // voter 2 投票
+        failureDetector.processGossipPfailVote(nodeInfo, String.format("%040d", 2));
+
+        // 仅 2 票，未达 majority=3
+        assertFalse(failureDetector.isMajorityAgreed(targetNodeId));
+
+        // voter 3 投票
+        failureDetector.processGossipPfailVote(nodeInfo, String.format("%040d", 3));
+
+        // 现有 3 票达多数
+        assertTrue(failureDetector.isMajorityAgreed(targetNodeId));
+    }
+
     /**
      * 创建测试节点
      */

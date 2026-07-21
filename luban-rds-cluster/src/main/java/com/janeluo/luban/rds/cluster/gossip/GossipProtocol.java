@@ -336,7 +336,7 @@ public class GossipProtocol {
         updateNodeFromPingMessage(ping);
 
         // 处理 Gossip 信息
-        processGossipNodes(ping.getGossipNodes());
+        processGossipNodes(ping.getGossipNodes(), ping.getSenderNodeId());
 
         // 更新节点最后通信时间
         updateNodeLastInteraction(ping.getSenderNodeId());
@@ -377,7 +377,7 @@ public class GossipProtocol {
         updateNodeFromPongMessage(pong);
 
         // 处理 Gossip 信息
-        processGossipNodes(pong.getGossipNodes());
+        processGossipNodes(pong.getGossipNodes(), pong.getSenderNodeId());
 
         // 更新节点最后通信时间
         updateNodeLastInteraction(pong.getSenderNodeId());
@@ -539,7 +539,7 @@ public class GossipProtocol {
         updateNodeFromMeetMessage(meet);
 
         // 处理 Gossip 信息
-        processGossipNodes(meet.getGossipNodes());
+        processGossipNodes(meet.getGossipNodes(), meet.getSenderNodeId());
     }
 
     /**
@@ -807,11 +807,18 @@ public class GossipProtocol {
     }
 
     /**
-     * 处理 Gossip 节点信息
+     * 处理 Gossip 节点信息。
+     * <p>
+     * 除同步节点元数据与槽位归属外，还会把"消息发送方"对目标节点的 PFAIL 投票
+     * 登记到 {@link FailureDetector}，使跨节点的 PFAIL 共识能够累积，
+     * 从而让 {@link FailureDetector#isMajorityAgreed(String)} 在收到多数派投票后
+     * 能将节点标记为 FAIL，进而触发自动故障转移。
+     * </p>
      *
-     * @param gossipNodes Gossip 节点信息列表
+     * @param gossipNodes  Gossip 节点信息列表
+     * @param senderNodeId 消息发送方节点 ID（作为 PFAIL 投票的投票人）
      */
-    private void processGossipNodes(List<GossipNodeInfo> gossipNodes) {
+    private void processGossipNodes(List<GossipNodeInfo> gossipNodes, String senderNodeId) {
         if (gossipNodes == null || gossipNodes.isEmpty()) {
             return;
         }
@@ -880,6 +887,9 @@ public class GossipProtocol {
 
             // 同步该节点拥有的槽位归属（基于其配置纪元裁决冲突）
             clusterConfig.syncSlotsFromNode(nodeId, nodeInfo.getSlots(), nodeInfo.getConfigEpoch());
+
+            // 将发送方对该节点的 PFAIL 投票登记到故障检测器，用于跨节点 FAIL 共识
+            failureDetector.processGossipPfailVote(nodeInfo, senderNodeId);
         }
     }
 
