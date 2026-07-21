@@ -2,6 +2,8 @@
 comet_change: add-cluster-automatic-failover
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-21-add-cluster-automatic-failover
+status: final
 ---
 
 # Cluster Automatic Failover — 技术设计
