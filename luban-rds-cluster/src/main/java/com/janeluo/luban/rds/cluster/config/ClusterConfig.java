@@ -5,12 +5,14 @@ import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 集群配置
@@ -28,14 +30,14 @@ public class ClusterConfig implements Serializable {
     private String myNodeId;
 
     /**
-     * 当前集群配置纪元
+     * 当前集群配置纪元（AtomicLong 保证跨线程自增/比较的原子性）
      */
-    private long currentEpoch;
+    private final AtomicLong currentEpoch;
 
     /**
-     * 当前节点的配置纪元
+     * 当前节点的配置纪元（AtomicLong 保证跨线程自增/比较的原子性）
      */
-    private long configEpoch;
+    private final AtomicLong configEpoch;
 
     /**
      * 所有节点列表（节点ID -> 节点对象）
@@ -45,11 +47,17 @@ public class ClusterConfig implements Serializable {
     /**
      * 槽位分配表（槽位 -> 节点ID）
      * 数组长度为16384，每个元素存储负责该槽位的节点ID
+     * <p>
+     * volatile 保证引用可见性；数组内容的变更由 synchronized 方法保护。
+     * </p>
      */
-    private String[] slotAssignment;
+    private volatile String[] slotAssignment;
 
     /**
      * 已分配槽位的 BitSet（用于快速判断槽位是否已分配）
+     * <p>
+     * volatile 保证引用可见性；内容变更由 synchronized 方法保护。
+     * </p>
      */
     private transient BitSet assignedSlotsBitSet;
 
@@ -82,8 +90,8 @@ public class ClusterConfig implements Serializable {
         this.assignedSlotsBitSet = new BitSet(ClusterNode.CLUSTER_SLOTS);
         this.assignedSlotCount = new AtomicInteger(0);
         this.state = "fail";
-        this.currentEpoch = 0;
-        this.configEpoch = 0;
+        this.currentEpoch = new AtomicLong(0);
+        this.configEpoch = new AtomicLong(0);
     }
 
     /**
@@ -107,19 +115,19 @@ public class ClusterConfig implements Serializable {
     }
 
     public long getCurrentEpoch() {
-        return currentEpoch;
+        return currentEpoch.get();
     }
 
     public void setCurrentEpoch(long currentEpoch) {
-        this.currentEpoch = currentEpoch;
+        this.currentEpoch.set(currentEpoch);
     }
 
     public long getConfigEpoch() {
-        return configEpoch;
+        return configEpoch.get();
     }
 
     public void setConfigEpoch(long configEpoch) {
-        this.configEpoch = configEpoch;
+        this.configEpoch.set(configEpoch);
     }
 
     public Map<String, ClusterNode> getNodes() {
@@ -134,14 +142,24 @@ public class ClusterConfig implements Serializable {
         return slotAssignment;
     }
 
-    public void setSlotAssignment(String[] slotAssignment) {
+    public synchronized void setSlotAssignment(String[] slotAssignment) {
         if (slotAssignment != null && slotAssignment.length != ClusterNode.CLUSTER_SLOTS) {
             throw new IllegalArgumentException(
                     "槽位分配表长度必须为" + ClusterNode.CLUSTER_SLOTS);
         }
-        this.slotAssignment = slotAssignment != null 
-                ? slotAssignment.clone() 
+        this.slotAssignment = slotAssignment != null
+                ? slotAssignment.clone()
                 : new String[ClusterNode.CLUSTER_SLOTS];
+        // 重建 BitSet 和计数器，避免二者与新数组不一致
+        this.assignedSlotsBitSet.clear();
+        int count = 0;
+        for (int i = 0; i < this.slotAssignment.length; i++) {
+            if (this.slotAssignment[i] != null) {
+                this.assignedSlotsBitSet.set(i);
+                count++;
+            }
+        }
+        this.assignedSlotCount.set(count);
     }
 
     public String getState() {
@@ -171,7 +189,7 @@ public class ClusterConfig implements Serializable {
      *
      * @param nodeId 要移除的节点ID
      */
-    public void removeNode(String nodeId) {
+    public synchronized void removeNode(String nodeId) {
         if (nodeId == null) {
             return;
         }
@@ -248,7 +266,7 @@ public class ClusterConfig implements Serializable {
      * @param slot   槽位号（0-16383）
      * @param nodeId 节点ID
      */
-    public void setSlotOwner(int slot, String nodeId) {
+    public synchronized void setSlotOwner(int slot, String nodeId) {
         validateSlot(slot);
         String oldNodeId = slotAssignment[slot];
         slotAssignment[slot] = nodeId;
@@ -292,7 +310,7 @@ public class ClusterConfig implements Serializable {
      * @param slots       该节点拥有的槽位集合
      * @param configEpoch 该节点的配置纪元（用于冲突裁决）
      */
-    public void syncSlotsFromNode(String nodeId, BitSet slots, long configEpoch) {
+    public synchronized void syncSlotsFromNode(String nodeId, BitSet slots, long configEpoch) {
         if (nodeId == null || slots == null) {
             return;
         }
@@ -351,7 +369,7 @@ public class ClusterConfig implements Serializable {
      *
      * @param slot 槽位号（0-16383）
      */
-    public void clearSlot(int slot) {
+    public synchronized void clearSlot(int slot) {
         validateSlot(slot);
         String oldNodeId = slotAssignment[slot];
         slotAssignment[slot] = null;
@@ -410,7 +428,7 @@ public class ClusterConfig implements Serializable {
      * @return 新的配置纪元值
      */
     public long incrementEpoch() {
-        return ++this.currentEpoch;
+        return currentEpoch.incrementAndGet();
     }
 
     /**
@@ -420,11 +438,7 @@ public class ClusterConfig implements Serializable {
      * @return 是否更新成功
      */
     public boolean setEpochIfGreater(long newEpoch) {
-        if (newEpoch > this.currentEpoch) {
-            this.currentEpoch = newEpoch;
-            return true;
-        }
-        return false;
+        return currentEpoch.getAndUpdate(e -> Math.max(e, newEpoch)) < newEpoch;
     }
 
     // ==================== 状态管理方法 ====================
@@ -517,22 +531,23 @@ public class ClusterConfig implements Serializable {
     /**
      * 重置集群配置
      */
-    public void reset() {
+    public synchronized void reset() {
         this.nodes.clear();
-        this.slotAssignment = new String[ClusterNode.CLUSTER_SLOTS];
-        this.assignedSlotsBitSet = new BitSet(ClusterNode.CLUSTER_SLOTS);
-        this.assignedSlotCount = new AtomicInteger(0);
+        // 就地重置而非替换对象引用，避免其他线程持有的旧引用失效
+        Arrays.fill(this.slotAssignment, null);
+        this.assignedSlotsBitSet.clear();
+        this.assignedSlotCount.set(0);
         this.state = "fail";
-        this.currentEpoch = 0;
-        this.configEpoch = 0;
+        this.currentEpoch.set(0);
+        this.configEpoch.set(0);
     }
 
     @Override
     public String toString() {
         return "ClusterConfig{" +
                 "myNodeId='" + myNodeId + '\'' +
-                ", currentEpoch=" + currentEpoch +
-                ", configEpoch=" + configEpoch +
+                ", currentEpoch=" + currentEpoch.get() +
+                ", configEpoch=" + configEpoch.get() +
                 ", state='" + state + '\'' +
                 ", nodeCount=" + nodes.size() +
                 ", assignedSlots=" + getAssignedSlotCount() +

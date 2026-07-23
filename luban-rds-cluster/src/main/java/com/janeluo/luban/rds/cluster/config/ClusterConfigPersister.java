@@ -8,12 +8,19 @@ import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.BitSet;
+import java.util.HexFormat;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.StringTokenizer;
@@ -62,7 +69,16 @@ public class ClusterConfigPersister {
 
         logger.info("保存集群配置到文件: {}", filePath);
 
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(filePath))) {
+        // 原子写入：先写临时文件，成功后原子替换目标文件，避免崩溃导致 nodes.conf 损坏
+        Path target = Paths.get(filePath).toAbsolutePath().normalize();
+        Path parent = target.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+
+        try {
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(tmp.toFile()))) {
             // 写入文件头注释
             writer.write("# Luban-RDS Cluster Configuration");
             writer.newLine();
@@ -92,6 +108,29 @@ public class ClusterConfigPersister {
             }
 
             logger.info("集群配置保存成功，节点数: {}", savedCount);
+            }
+
+            // 原子替换：tmp -> target
+            try {
+                Files.move(tmp, target,
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                // 文件系统不支持原子移动时降级为普通替换
+                logger.warn("文件系统不支持原子移动，降级为普通替换: {}", target);
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException | RuntimeException e) {
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (IOException cleanupError) {
+                e.addSuppressed(cleanupError);
+            }
+            logger.error("保存集群配置失败: target={}, tmp={}", target, tmp, e);
+            if (e instanceof IOException) {
+                throw (IOException) e;
+            }
+            throw e;
         }
     }
 
@@ -147,6 +186,18 @@ public class ClusterConfigPersister {
                             continue;
                         }
 
+                        // 重启后重置最后 PONG 时间，避免故障检测器将恢复节点立即误判为 PFAIL。
+                        // nodes.conf 将 lastPongTime 落盘为 0（意为"重启后重新计时"），
+                        // 若加载后仍为 0，故障检测器 GossipTask 首次 tick 即判定所有节点超时。
+                        // 此处重置为当前时间，给予 connectKnownNodes 一个 nodeTimeout 窗口完成建连与握手。
+                        long now = System.currentTimeMillis();
+                        if (node.getLastPongTime() == 0) {
+                            node.setLastPongTime(now);
+                        }
+                        if (node.getLastPingTime() == 0) {
+                            node.setLastPingTime(now);
+                        }
+
                         config.addNode(node);
                         
                         // 如果是 myself 节点，设置 myNodeId
@@ -181,25 +232,26 @@ public class ClusterConfigPersister {
     public static String generateNodeId() {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-1");
-            
-            // 使用多种信息生成唯一ID
+
+            // 使用多种信息生成唯一ID（用 JDK ThreadLocalRandom 提供线程安全的随机熵）
             StringBuilder sb = new StringBuilder();
             sb.append(System.currentTimeMillis());
             sb.append("-");
-            sb.append(ThreadLocalRandom.current().nextLong());
+            sb.append(java.util.concurrent.ThreadLocalRandom.current().nextLong());
             sb.append("-");
             sb.append(System.getProperty("user.name", "unknown"));
             sb.append("-");
             sb.append(System.getProperty("os.name", "unknown"));
-            
+
             byte[] hash = md.digest(sb.toString().getBytes());
-            return bytesToHex(hash);
+            return HexFormat.of().formatHex(hash);
         } catch (NoSuchAlgorithmException e) {
             // SHA-1 应该总是可用，如果不可用则使用随机方法
             logger.warn("SHA-1算法不可用，使用随机方法生成节点ID");
             StringBuilder sb = new StringBuilder();
             for (int i = 0; i < NODE_ID_LENGTH; i++) {
-                sb.append(Integer.toHexString(ThreadLocalRandom.current().nextInt(16)));
+                sb.append(Integer.toHexString(
+                        java.util.concurrent.ThreadLocalRandom.current().nextInt(16)));
             }
             return sb.toString();
         }
@@ -230,13 +282,13 @@ public class ClusterConfigPersister {
         sb.append(" ");
         sb.append(node.getMasterNodeId() != null ? node.getMasterNodeId() : "-");
 
-        // 最后发送PING时间
+        // 最后发送PING时间（落盘归零，避免重启后基于过期时间戳误判节点超时）
         sb.append(" ");
-        sb.append(node.getLastPingTime());
+        sb.append(0);
 
-        // 最后收到PONG时间
+        // 最后收到PONG时间（落盘归零，由故障检测器重新计时）
         sb.append(" ");
-        sb.append(node.getLastPongTime());
+        sb.append(0);
 
         // 配置纪元
         sb.append(" ");
@@ -439,27 +491,47 @@ public class ClusterConfigPersister {
      */
     private void parseAddress(ClusterNode node, String address) {
         try {
-            // 格式: ip:port@cport
-            int atIndex = address.indexOf('@');
-            int colonIndex = address.indexOf(':');
+            // 格式: ip:port@cport（IPv6 时 ip 可能含冒号，此处按 Redis nodes.conf 的 IPv4 约定处理）
+            // 先用 lastIndexOf('@') 分离 cport，再用最后一个 ':' 分离 ip 与 port
+            String hostPort;
+            String cportStr = null;
+            int atIndex = address.lastIndexOf('@');
+            if (atIndex >= 0) {
+                hostPort = address.substring(0, atIndex);
+                cportStr = address.substring(atIndex + 1);
+            } else {
+                hostPort = address;
+            }
 
-            if (colonIndex > 0) {
-                String ip = address.substring(0, colonIndex);
-                node.setIp(ip);
+            int colonIndex = hostPort.lastIndexOf(':');
+            if (colonIndex <= 0) {
+                // 无 ':' 或 ip 为空（如 ":6379"），无法解析，标记 NOADDR
+                node.addState(ClusterNodeState.NOADDR);
+                logger.warn("地址缺少 ip:port 结构，标记 NOADDR: {}", address);
+                return;
+            }
 
-                if (atIndex > 0) {
-                    int port = Integer.parseInt(address.substring(colonIndex + 1, atIndex));
-                    int busPort = Integer.parseInt(address.substring(atIndex + 1));
-                    node.setPort(port);
-                    node.setBusPort(busPort);
-                } else {
-                    int port = Integer.parseInt(address.substring(colonIndex + 1));
-                    node.setPort(port);
-                    node.setBusPort(port + 10000); // 默认集群总线端口
-                }
+            String ip = hostPort.substring(0, colonIndex);
+            String portStr = hostPort.substring(colonIndex + 1);
+
+            if (ip.isEmpty()) {
+                node.addState(ClusterNodeState.NOADDR);
+                logger.warn("地址 ip 为空，标记 NOADDR: {}", address);
+                return;
+            }
+
+            node.setIp(ip);
+            int port = Integer.parseInt(portStr);
+            node.setPort(port);
+            if (cportStr != null) {
+                node.setBusPort(Integer.parseInt(cportStr));
+            } else {
+                node.setBusPort(port + 10000); // 默认集群总线端口
             }
         } catch (Exception e) {
-            logger.warn("解析地址失败: {}", address);
+            // 解析失败标记 NOADDR，避免残缺地址进入配置后被 gossip 当作有效节点
+            node.addState(ClusterNodeState.NOADDR);
+            logger.warn("解析地址失败，标记 NOADDR: {}", address);
         }
     }
 
@@ -528,28 +600,4 @@ public class ClusterConfigPersister {
         }
     }
 
-    /**
-     * 字节数组转十六进制字符串
-     *
-     * @param bytes 字节数组
-     * @return 十六进制字符串
-     */
-    private static String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
-    }
-
-    /**
-     * 线程本地随机数生成器
-     */
-    private static class ThreadLocalRandom {
-        private static final java.util.Random random = new java.util.Random();
-
-        public static java.util.Random current() {
-            return random;
-        }
-    }
 }

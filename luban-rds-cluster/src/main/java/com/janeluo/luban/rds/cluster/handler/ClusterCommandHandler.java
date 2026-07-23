@@ -10,14 +10,17 @@ import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 import com.janeluo.luban.rds.cluster.slot.SlotManager;
 import com.janeluo.luban.rds.cluster.slot.SlotUtils;
+import com.janeluo.luban.rds.core.store.MemoryStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -57,6 +60,11 @@ public class ClusterCommandHandler {
      * 集群配置文件路径（用于 CLUSTER SAVECONFIG 持久化）
      */
     private final String clusterConfigFilePath;
+
+    /**
+     * 内存存储（用于 GETKEYSINSLOT / COUNTKEYSINSLOT 访问实际键）
+     */
+    private final MemoryStore memoryStore;
 
     /**
      * 槽位迁移状态
@@ -101,15 +109,17 @@ public class ClusterCommandHandler {
      * @param stateManager            集群状态管理器
      * @param gossipProtocol          Gossip 协议
      * @param clusterConfigFilePath   集群配置文件路径（用于 CLUSTER SAVECONFIG 持久化，可为 null）
+     * @param memoryStore             内存存储（用于 GETKEYSINSLOT / COUNTKEYSINSLOT，可为 null）
      */
     public ClusterCommandHandler(ClusterConfig clusterConfig, SlotManager slotManager,
                                   ClusterStateManager stateManager, GossipProtocol gossipProtocol,
-                                  String clusterConfigFilePath) {
+                                  String clusterConfigFilePath, MemoryStore memoryStore) {
         this.clusterConfig = clusterConfig;
         this.slotManager = slotManager;
         this.stateManager = stateManager;
         this.gossipProtocol = gossipProtocol;
         this.clusterConfigFilePath = clusterConfigFilePath;
+        this.memoryStore = memoryStore;
         this.slotMigrationState = new ConcurrentHashMap<>();
         this.slotMigrationTarget = new ConcurrentHashMap<>();
         this.forgetNodes = new ConcurrentHashMap<>();
@@ -200,11 +210,22 @@ public class ClusterCommandHandler {
             }
         } catch (IllegalArgumentException e) {
             logger.warn("CLUSTER {} 命令参数错误: {}", subcommand, e.getMessage());
-            return "-ERR " + e.getMessage() + "\r\n";
+            return "-ERR " + safeMessage(e) + "\r\n";
         } catch (Exception e) {
             logger.error("CLUSTER {} 命令执行失败", subcommand, e);
-            return "-ERR " + e.getMessage() + "\r\n";
+            return "-ERR " + safeMessage(e) + "\r\n";
         }
+    }
+
+    /**
+     * 安全获取异常消息，避免 null 导致 RESP 输出 "-ERR null"。
+     *
+     * @param e 异常
+     * @return 非空的消息字符串
+     */
+    private static String safeMessage(Exception e) {
+        String msg = e.getMessage();
+        return msg != null ? msg : e.getClass().getSimpleName();
     }
 
     /**
@@ -256,7 +277,15 @@ public class ClusterCommandHandler {
     private String clusterNodes() {
         StringBuilder sb = new StringBuilder();
 
-        for (ClusterNode node : clusterConfig.getAllNodes()) {
+        // 按 nodeId 字典序排序，保证 CLUSTER NODES 输出稳定（对齐 Redis clusterGenNodesDescription）
+        List<ClusterNode> sortedNodes = new ArrayList<>(clusterConfig.getAllNodes());
+        sortedNodes.sort((a, b) -> {
+            String idA = a.getNodeId() != null ? a.getNodeId() : "";
+            String idB = b.getNodeId() != null ? b.getNodeId() : "";
+            return idA.compareTo(idB);
+        });
+
+        for (ClusterNode node : sortedNodes) {
             if (node.hasState(ClusterNodeState.HANDSHAKE) || node.hasState(ClusterNodeState.NOADDR)) {
                 continue;
             }
@@ -595,12 +624,13 @@ public class ClusterCommandHandler {
             return "-ERR Node " + nodeId + " is not empty! Reshard data away and try again.\r\n";
         }
 
-        // 添加到延迟移除列表
+        // 立即移除节点，并加入 forget 列表（60s 内阻止其他节点通过 gossip 重新引入该节点）
         forgetNodes.put(nodeId, System.currentTimeMillis() + FORGET_DELAY_MS);
         clusterConfig.removeNode(nodeId);
         clearSlotManagerForNode(nodeId);
 
-        logger.info("CLUSTER FORGET: removed master node {} (with 60s delay)", nodeId);
+        logger.info("CLUSTER FORGET: removed master node {} (forget-listed for {}ms)",
+                nodeId, FORGET_DELAY_MS);
         notifyTopologyChanged();
         return "+OK\r\n";
     }
@@ -667,19 +697,20 @@ public class ClusterCommandHandler {
             return "-ERR wrong number of arguments for 'cluster|addslots' command\r\n";
         }
 
-        // 解析槽位参数
-        int[] slots = new int[args.length - 1];
+        // 解析槽位参数（使用 Set 去重，避免重复参数导致 addSlots 异常或重复分配）
+        java.util.Set<Integer> slotSet = new java.util.LinkedHashSet<>();
         for (int i = 1; i < args.length; i++) {
             try {
                 int slot = Integer.parseInt(args[i]);
                 SlotUtils.validateSlot(slot);
-                slots[i - 1] = slot;
+                slotSet.add(slot);
             } catch (NumberFormatException e) {
                 return "-ERR Invalid slot number: " + args[i] + "\r\n";
             } catch (IllegalArgumentException e) {
                 return "-ERR " + e.getMessage() + "\r\n";
             }
         }
+        int[] slots = slotSet.stream().mapToInt(Integer::intValue).toArray();
 
         // 检查槽位是否已分配
         for (int slot : slots) {
@@ -943,10 +974,17 @@ public class ClusterCommandHandler {
             return "-ERR Invalid count: " + args[2] + "\r\n";
         }
 
-        // TODO: 实际实现需要访问数据存储获取指定槽位的键
-        // 这里返回空列表
-        logger.debug("CLUSTER GETKEYSINSLOT: slot={}, count={}", slot, count);
-        return "*0\r\n";
+        // 仅当本节点负责该槽位时才返回键，否则返回空数组（对齐 Redis 行为）
+        List<String> keys = Collections.emptyList();
+        if (memoryStore != null && slotManager.isSlotLocal(slot)) {
+            List<String> result = memoryStore.getKeysInSlot(0, slot, count);
+            if (result != null) {
+                keys = result;
+            }
+        }
+
+        logger.debug("CLUSTER GETKEYSINSLOT: slot={}, count={}, returned={}", slot, count, keys.size());
+        return formatBulkArray(keys);
     }
 
     /**
@@ -972,10 +1010,38 @@ public class ClusterCommandHandler {
             return "-ERR " + e.getMessage() + "\r\n";
         }
 
-        // TODO: 实际实现需要访问数据存储统计指定槽位的键数量
-        // 这里返回0
-        logger.debug("CLUSTER COUNTKEYSINSLOT: slot={}", slot);
-        return ":0\r\n";
+        // 仅当本节点负责该槽位时才统计，否则返回 0（对齐 Redis 行为）
+        int count = 0;
+        if (memoryStore != null && slotManager.isSlotLocal(slot)) {
+            count = memoryStore.countKeysInSlot(0, slot);
+        }
+
+        logger.debug("CLUSTER COUNTKEYSINSLOT: slot={}, count={}", slot, count);
+        return ":" + count + "\r\n";
+    }
+
+    /**
+     * 将字符串列表格式化为 RESP bulk array 响应
+     *
+     * @param keys 键列表
+     * @return RESP 格式的 bulk array 字符串
+     */
+    private String formatBulkArray(List<String> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return "*0\r\n";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(keys.size()).append("\r\n");
+        for (String key : keys) {
+            if (key == null) {
+                sb.append("$-1\r\n");
+            } else {
+                byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
+                sb.append("$").append(keyBytes.length).append("\r\n");
+                sb.append(key).append("\r\n");
+            }
+        }
+        return sb.toString();
     }
 
     /**

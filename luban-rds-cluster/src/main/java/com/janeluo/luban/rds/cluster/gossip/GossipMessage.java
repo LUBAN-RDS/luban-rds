@@ -168,6 +168,16 @@ public abstract class GossipMessage implements Serializable {
                 ((data[offset++] & 0xFF) << 8) |
                 (data[offset++] & 0xFF);
 
+        // 校验消息体长度不超过剩余可用数据，防止恶意/截断报文导致越界
+        if (messageLength < 0) {
+            throw new IllegalArgumentException("消息体长度为负: " + messageLength);
+        }
+        int remaining = data.length - offset;
+        if (messageLength > remaining) {
+            throw new IllegalArgumentException(
+                    "消息体长度 " + messageLength + " 超出剩余数据长度 " + remaining);
+        }
+
         // 解码消息体
         if (messageLength > 0) {
             byte[] body = new byte[messageLength];
@@ -232,6 +242,10 @@ public abstract class GossipMessage implements Serializable {
                 return new UpdateMessage();
             case FAILOVER_RESULT:
                 return new FailoverResultMessage();
+            case MIGRATE_KEY:
+                return new MigrateKeyMessage();
+            case MIGRATE_KEY_ACK:
+                return new MigrateKeyAckMessage();
             default:
                 throw new IllegalArgumentException("不支持的消息类型: " + type);
         }

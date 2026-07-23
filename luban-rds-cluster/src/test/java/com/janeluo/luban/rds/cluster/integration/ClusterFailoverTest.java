@@ -56,7 +56,7 @@ class ClusterFailoverTest {
         config = new ClusterConfig();
         slotManager = new DefaultSlotManager();
         stateManager = new ClusterStateManager(config);
-        commandHandler = new ClusterCommandHandler(config, slotManager, stateManager, null, null);
+        commandHandler = new ClusterCommandHandler(config, slotManager, stateManager, null, null, null);
         failureDetector = new FailureDetector(config, NODE_TIMEOUT);
     }
 
@@ -337,26 +337,29 @@ class ClusterFailoverTest {
     @Test
     @DisplayName("测试故障转移条件检查")
     void testFailoverConditionCheck() {
-        // 创建三主节点集群
+        // myself 是 slave，其 master node1；另有两个可用 master 满足 quorum
         ClusterNode node1 = createMasterNode(NODE_ID_1, "127.0.0.1", 7000);
-        node1.addState(ClusterNodeState.MYSELF);
+        node1.addState(ClusterNodeState.FAIL);  // myMaster 已 FAIL
         ClusterNode node2 = createMasterNode(NODE_ID_2, "127.0.0.1", 7001);
         ClusterNode node3 = createMasterNode(NODE_ID_3, "127.0.0.1", 7002);
+        ClusterNode me = createSlaveNode(NODE_ID_4, "127.0.0.1", 7003, NODE_ID_1);
+        me.addState(ClusterNodeState.MYSELF);
 
         config.addNode(node1);
         config.addNode(node2);
         config.addNode(node3);
-        config.setMyNodeId(NODE_ID_1);
+        config.addNode(me);
+        config.setMyNodeId(NODE_ID_4);
 
-        // 所有节点可用，可以故障转移
-        assertTrue(stateManager.canFailover(), "所有节点可用时应该可以故障转移");
+        // myself 是 slave、master FAIL、可用 master 过半 → 可故障转移
+        assertTrue(stateManager.canFailover(), "满足条件时应该可以故障转移");
 
-        // 标记两个节点为 FAIL（超过半数）
+        // 标记另外两个 master 也为 FAIL（可用 master 不过半）
         node2.addState(ClusterNodeState.FAIL);
         node3.addState(ClusterNodeState.FAIL);
 
         // 不可进行故障转移
-        assertFalse(stateManager.canFailover(), "超过半数节点不可用时不应能故障转移");
+        assertFalse(stateManager.canFailover(), "超过半数 master 不可用时不应能故障转移");
     }
 
     @Test

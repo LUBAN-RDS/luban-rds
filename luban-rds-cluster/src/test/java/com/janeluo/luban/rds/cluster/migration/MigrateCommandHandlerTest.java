@@ -1,6 +1,10 @@
 package com.janeluo.luban.rds.cluster.migration;
 
 import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
+import com.janeluo.luban.rds.cluster.config.ClusterConfig;
+import com.janeluo.luban.rds.cluster.gossip.GossipMessage;
+import com.janeluo.luban.rds.cluster.gossip.MigrateKeyAckMessage;
+import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -17,6 +21,9 @@ import static org.mockito.Mockito.*;
  */
 class MigrateCommandHandlerTest {
 
+    private static final String MY_NODE_ID = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+    private static final String TARGET_NODE_ID = "b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+
     @Mock
     private SlotMigrationManager migrationManager;
 
@@ -26,12 +33,27 @@ class MigrateCommandHandlerTest {
     @Mock
     private ClusterBusClient busClient;
 
+    @Mock
+    private ClusterConfig clusterConfig;
+
     private MigrateCommandHandler handler;
 
     @BeforeEach
     void setUp() {
         MockitoAnnotations.openMocks(this);
-        handler = new MigrateCommandHandler(migrationManager, memoryStore, busClient);
+        handler = new MigrateCommandHandler(migrationManager, memoryStore, busClient, clusterConfig);
+
+        // 模拟本节点
+        ClusterNode myNode = new ClusterNode(MY_NODE_ID);
+        myNode.setIp("127.0.0.1");
+        myNode.setPort(7000);
+        when(clusterConfig.getMyNode()).thenReturn(myNode);
+
+        // 模拟目标节点 127.0.0.1:6379
+        ClusterNode targetNode = new ClusterNode(TARGET_NODE_ID);
+        targetNode.setIp("127.0.0.1");
+        targetNode.setPort(6379);
+        when(clusterConfig.getAllNodes()).thenReturn(java.util.Collections.singletonList(targetNode));
     }
 
     @Test
@@ -61,15 +83,35 @@ class MigrateCommandHandlerTest {
         when(memoryStore.exists(0, "test-key")).thenReturn(true);
         when(memoryStore.get(0, "test-key")).thenReturn("test-value");
         when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
-        when(memoryStore.type(0, "test-key")).thenReturn("string");
-        when(migrationManager.isMigrating(anyInt())).thenReturn(false);
-        when(migrationManager.exportKey("test-key")).thenReturn(
-                ExportResult.success("test-key", "test-value".getBytes(), 1000L, "string")
-        );
+        // sendAndWait 返回成功 ACK
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", true, null);
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong())).thenReturn(ack);
         when(memoryStore.del(0, "test-key")).thenReturn(true);
 
         String result = handler.handle(args);
         assertEquals("+OK\r\n", result);
+        // 验证键确实被发送到目标节点
+        verify(busClient).sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong());
+        // 非 COPY 模式应删除源键
+        verify(memoryStore).del(0, "test-key");
+    }
+
+    @Test
+    @DisplayName("测试单键迁移 - 发送失败时不删除源键（防丢数据）")
+    void testMigrateSingleKeySendFailedNoDelete() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000"};
+
+        when(memoryStore.exists(0, "test-key")).thenReturn(true);
+        when(memoryStore.get(0, "test-key")).thenReturn("test-value");
+        when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
+        // sendAndWait 返回失败 ACK
+        MigrateKeyAckMessage failAck = new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", false, "import failed");
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong())).thenReturn(failAck);
+
+        String result = handler.handle(args);
+        assertEquals("-IOERR error transferring key\r\n", result);
+        // 发送失败时不应删除源键
+        verify(memoryStore, never()).del(0, "test-key");
     }
 
     @Test
@@ -80,11 +122,8 @@ class MigrateCommandHandlerTest {
         when(memoryStore.exists(0, "test-key")).thenReturn(true);
         when(memoryStore.get(0, "test-key")).thenReturn("test-value");
         when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
-        when(memoryStore.type(0, "test-key")).thenReturn("string");
-        when(migrationManager.isMigrating(anyInt())).thenReturn(false);
-        when(migrationManager.exportKey("test-key")).thenReturn(
-                ExportResult.success("test-key", "test-value".getBytes(), 1000L, "string")
-        );
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", true, null);
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong())).thenReturn(ack);
 
         String result = handler.handle(args);
         assertEquals("+OK\r\n", result);
@@ -102,15 +141,15 @@ class MigrateCommandHandlerTest {
         when(memoryStore.exists(0, "key2")).thenReturn(true);
         when(memoryStore.exists(0, "key3")).thenReturn(true);
 
-        when(migrationManager.exportKey("key1")).thenReturn(
-                ExportResult.success("key1", "value1".getBytes(), 0L, "string")
-        );
-        when(migrationManager.exportKey("key2")).thenReturn(
-                ExportResult.success("key2", "value2".getBytes(), 0L, "string")
-        );
-        when(migrationManager.exportKey("key3")).thenReturn(
-                ExportResult.success("key3", "value3".getBytes(), 0L, "string")
-        );
+        when(memoryStore.get(0, "key1")).thenReturn("value1");
+        when(memoryStore.get(0, "key2")).thenReturn("value2");
+        when(memoryStore.get(0, "key3")).thenReturn("value3");
+        when(memoryStore.pttl(0, "key1")).thenReturn(0L);
+        when(memoryStore.pttl(0, "key2")).thenReturn(0L);
+        when(memoryStore.pttl(0, "key3")).thenReturn(0L);
+
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(TARGET_NODE_ID, "", true, null);
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong())).thenReturn(ack);
 
         when(memoryStore.del(0, "key1")).thenReturn(true);
         when(memoryStore.del(0, "key2")).thenReturn(true);
@@ -128,9 +167,11 @@ class MigrateCommandHandlerTest {
         when(memoryStore.exists(0, "key1")).thenReturn(true);
         when(memoryStore.exists(0, "key2")).thenReturn(false); // key2 不存在
 
-        when(migrationManager.exportKey("key1")).thenReturn(
-                ExportResult.success("key1", "value1".getBytes(), 0L, "string")
-        );
+        when(memoryStore.get(0, "key1")).thenReturn("value1");
+        when(memoryStore.pttl(0, "key1")).thenReturn(0L);
+
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(TARGET_NODE_ID, "", true, null);
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong())).thenReturn(ack);
 
         when(memoryStore.del(0, "key1")).thenReturn(true);
 

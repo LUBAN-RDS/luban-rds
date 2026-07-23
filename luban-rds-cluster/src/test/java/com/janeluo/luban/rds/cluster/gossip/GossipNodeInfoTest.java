@@ -30,6 +30,7 @@ class GossipNodeInfoTest {
         slots.set(10922);
         slots.set(16383);
         info.setSlots(slots);
+        info.setMasterNodeId("dddddddddddddddddddddddddddddddddddddddd");
 
         byte[] encoded = info.encode();
         assertNotNull(encoded);
@@ -48,6 +49,7 @@ class GossipNodeInfoTest {
         assertEquals(4, decoded.getSlots().cardinality());
         assertTrue(decoded.getSlots().get(0));
         assertTrue(decoded.getSlots().get(16383));
+        assertEquals(info.getMasterNodeId(), decoded.getMasterNodeId());
     }
 
     @Test
@@ -86,5 +88,25 @@ class GossipNodeInfoTest {
         info.setSlots(slots);
 
         assertEquals(info.encode().length, info.getEncodedLength());
+    }
+
+    @Test
+    @DisplayName("masterNodeId 为 null 时 encode/decode 往返一致")
+    void testMasterNodeIdNullRoundTrip() {
+        GossipNodeInfo info = new GossipNodeInfo("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        info.setIp("192.168.1.1");
+        info.setPort(7003);
+        info.setBusPort(17003);
+        info.setConfigEpoch(5L);
+        info.setFlags(EnumSet.of(ClusterNodeState.SLAVE));
+        info.setMasterNodeId(null);
+
+        byte[] encoded = info.encode();
+        GossipNodeInfo decoded = new GossipNodeInfo();
+        decoded.decode(encoded, 0);
+
+        assertEquals(info.getNodeId(), decoded.getNodeId());
+        assertNull(decoded.getMasterNodeId());
+        assertEquals(info.getEncodedLength(), encoded.length);
     }
 }

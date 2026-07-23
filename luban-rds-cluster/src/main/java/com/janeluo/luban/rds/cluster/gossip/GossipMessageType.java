@@ -53,7 +53,17 @@ public enum GossipMessageType {
     /**
      * 故障转移结果通知 - 胜选 slave 广播自己已提升为新 master
      */
-    FAILOVER_RESULT((byte) 0x08);
+    FAILOVER_RESULT((byte) 0x08),
+
+    /**
+     * 键迁移请求 - MIGRATE 命令通过总线传输单个键到目标节点
+     */
+    MIGRATE_KEY((byte) 0x09),
+
+    /**
+     * 键迁移确认 - 目标节点收到键后回复源节点
+     */
+    MIGRATE_KEY_ACK((byte) 0x0A);
 
     /**
      * 消息类型编码

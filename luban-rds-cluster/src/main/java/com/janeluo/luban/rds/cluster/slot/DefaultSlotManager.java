@@ -164,7 +164,13 @@ public class DefaultSlotManager implements SlotManager {
             int removedCount = 0;
             for (int slot : slots) {
                 SlotUtils.validateSlot(slot);
-                if (slotOwners[slot] != null) {
+                String owner = slotOwners[slot];
+                // 校验槽位归属：只允许清除本节点拥有的槽位，避免误扣全局计数与清空他人 owner
+                if (owner != null && myNodeId != null && !myNodeId.equals(owner)) {
+                    throw new IllegalStateException(
+                            "槽位 " + slot + " 属于节点 " + owner + "，本节点无权删除");
+                }
+                if (owner != null) {
                     removedCount++;
                 }
                 mySlots.clear(slot);
@@ -191,6 +197,14 @@ public class DefaultSlotManager implements SlotManager {
         lock.writeLock().lock();
         try {
             int removedCount = 0;
+            // 先校验范围内所有槽位归属
+            for (int slot = start; slot <= end; slot++) {
+                String owner = slotOwners[slot];
+                if (owner != null && myNodeId != null && !myNodeId.equals(owner)) {
+                    throw new IllegalStateException(
+                            "槽位 " + slot + " 属于节点 " + owner + "，本节点无权删除");
+                }
+            }
             mySlots.clear(start, end + 1);
             for (int slot = start; slot <= end; slot++) {
                 if (slotOwners[slot] != null) {
@@ -329,7 +343,12 @@ public class DefaultSlotManager implements SlotManager {
 
     @Override
     public void setMyNodeId(String nodeId) {
-        this.myNodeId = nodeId;
+        lock.writeLock().lock();
+        try {
+            this.myNodeId = nodeId;
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     @Override
@@ -430,13 +449,18 @@ public class DefaultSlotManager implements SlotManager {
      * @return 统计信息字符串
      */
     public String getStatistics() {
-        int myCount = mySlots.cardinality();
-        int assignedCount = assignedSlotCount.get();
-        int unassignedCount = SlotUtils.CLUSTER_SLOTS - assignedCount;
+        lock.readLock().lock();
+        try {
+            int myCount = mySlots.cardinality();
+            int assignedCount = assignedSlotCount.get();
+            int unassignedCount = SlotUtils.CLUSTER_SLOTS - assignedCount;
 
-        return String.format(
-                "SlotManager统计: 总槽位=%d, 本节点槽位=%d, 已分配=%d, 未分配=%d",
-                SlotUtils.CLUSTER_SLOTS, myCount, assignedCount, unassignedCount);
+            return String.format(
+                    "SlotManager统计: 总槽位=%d, 本节点槽位=%d, 已分配=%d, 未分配=%d",
+                    SlotUtils.CLUSTER_SLOTS, myCount, assignedCount, unassignedCount);
+        } finally {
+            lock.readLock().unlock();
+        }
     }
 
     @Override

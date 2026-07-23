@@ -8,8 +8,11 @@ import com.janeluo.luban.rds.cluster.gossip.FailoverResultMessage;
 import com.janeluo.luban.rds.cluster.gossip.GossipMessage;
 import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
 import com.janeluo.luban.rds.cluster.gossip.MeetMessage;
+import com.janeluo.luban.rds.cluster.gossip.MigrateKeyAckMessage;
+import com.janeluo.luban.rds.cluster.gossip.MigrateKeyMessage;
 import com.janeluo.luban.rds.cluster.gossip.PingMessage;
 import com.janeluo.luban.rds.cluster.gossip.PongMessage;
+import com.janeluo.luban.rds.cluster.gossip.PublishMessage;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 import io.netty.channel.ChannelHandlerContext;
@@ -18,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 集群总线消息处理器
@@ -55,9 +59,9 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
     private String remoteNodeId;
 
     /**
-     * 临时节点ID是否已解析为真实节点ID
+     * 临时节点ID是否已解析为真实节点ID（CAS 保护，确保并发消息只解析一次）
      */
-    private volatile boolean tempIdResolved;
+    private final AtomicBoolean tempIdResolved = new AtomicBoolean(false);
 
     /**
      * 构造方法（用于 ClusterBusServer 的入站连接）
@@ -92,10 +96,7 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
      */
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
-        InetSocketAddress remoteAddress = (InetSocketAddress) ctx.channel().remoteAddress();
-        logger.info("集群总线连接建立，远程地址: {}:{}", 
-                remoteAddress.getAddress().getHostAddress(), 
-                remoteAddress.getPort());
+        logger.info("集群总线连接建立，远程地址: {}", formatRemoteAddress(ctx));
     }
 
     /**
@@ -105,11 +106,7 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
      */
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
-        InetSocketAddress remoteAddress = (InetSocketAddress) ctx.channel().remoteAddress();
-        logger.info("集群总线连接断开，远程地址: {}:{}, 节点ID: {}", 
-                remoteAddress.getAddress().getHostAddress(), 
-                remoteAddress.getPort(),
-                remoteNodeId);
+        logger.info("集群总线连接断开，远程地址: {}, 节点ID: {}", formatRemoteAddress(ctx), remoteNodeId);
 
         // 更新节点连接状态
         if (remoteNodeId != null) {
@@ -117,6 +114,27 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
             if (node != null && node.getLink() != null) {
                 node.getLink().setConnected(false);
             }
+        }
+    }
+
+    /**
+     * 安全格式化远程地址，避免 remoteAddress 为 null 或类型不符时抛异常。
+     *
+     * @param ctx 通道上下文
+     * @return 可读的远程地址字符串
+     */
+    private String formatRemoteAddress(ChannelHandlerContext ctx) {
+        try {
+            java.net.SocketAddress addr = ctx.channel().remoteAddress();
+            if (addr instanceof InetSocketAddress) {
+                InetSocketAddress inet = (InetSocketAddress) addr;
+                return inet.getAddress() != null
+                        ? inet.getAddress().getHostAddress() + ":" + inet.getPort()
+                        : "unknown:" + inet.getPort();
+            }
+            return addr != null ? addr.toString() : "unknown";
+        } catch (Exception e) {
+            return "unknown";
         }
     }
 
@@ -140,10 +158,10 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
             logger.trace("收到 Gossip 消息: {}", message);
         }
 
-        // MEET 握手响应处理：将临时节点ID替换为真实节点ID（仅执行一次）
+        // MEET 握手响应处理：将临时节点ID替换为真实节点ID（仅执行一次，CAS 保证并发安全）
         if (busClient != null && expectedNodeId != null && remoteNodeId != null
-                && !expectedNodeId.equals(remoteNodeId) && !tempIdResolved) {
-            tempIdResolved = true;
+                && !expectedNodeId.equals(remoteNodeId)
+                && tempIdResolved.compareAndSet(false, true)) {
             resolveTempNodeId(remoteNodeId);
         }
 
@@ -226,6 +244,9 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
             case UPDATE:
                 handleUpdate(message);
                 return null;
+            case PUBLISH:
+                handlePublish((PublishMessage) message);
+                return null;
             case FAILOVER_AUTH_REQUEST:
                 handleFailoverAuthRequest((FailoverAuthRequestMessage) message);
                 return null;
@@ -234,6 +255,11 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
                 return null;
             case FAILOVER_RESULT:
                 handleFailoverResult((FailoverResultMessage) message);
+                return null;
+            case MIGRATE_KEY:
+                return handleMigrateKey((MigrateKeyMessage) message);
+            case MIGRATE_KEY_ACK:
+                handleMigrateKeyAck((MigrateKeyAckMessage) message);
                 return null;
             default:
                 logger.warn("未知的消息类型: {}", message.getType());
@@ -323,6 +349,24 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
     }
 
     /**
+     * 处理 PUBLISH 消息（跨节点 Pub/Sub 传播）。
+     * <p>
+     * 委托 GossipProtocol 转发到本地 PubSubManager。若 GossipProtocol 未注入或
+     * 暂未实现本地订阅转发，记录告警但不丢失消息类型分支。
+     * </p>
+     *
+     * @param msg PUBLISH 消息
+     */
+    private void handlePublish(PublishMessage msg) {
+        logger.debug("收到 PUBLISH 消息，来自节点: {}, 频道: {}", msg.getSenderNodeId(), msg.getChannel());
+        if (gossipProtocol != null) {
+            gossipProtocol.handlePublish(msg);
+        } else {
+            logger.warn("收到 PUBLISH 消息但 GossipProtocol 未注入，频道: {}", msg.getChannel());
+        }
+    }
+
+    /**
      * 处理故障转移授权请求（委托给 GossipProtocol/FailoverManager）。
      *
      * @param msg 授权请求消息
@@ -362,6 +406,42 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
     }
 
     /**
+     * 处理键迁移请求（MIGRATE_KEY）。
+     * <p>
+     * 目标节点收到请求后调用 GossipProtocol.handleMigrateKey 导入键，
+     * 返回 MIGRATE_KEY_ACK 给源节点。
+     * </p>
+     *
+     * @param msg 键迁移请求消息
+     * @return 键迁移确认消息
+     */
+    private GossipMessage handleMigrateKey(MigrateKeyMessage msg) {
+        logger.debug("收到 MIGRATE_KEY: key={}, sender={}", msg.getKey(), msg.getSenderNodeId());
+        if (gossipProtocol != null) {
+            return gossipProtocol.handleMigrateKey(msg);
+        }
+        ClusterNode myNode = clusterConfig.getMyNode();
+        String myNodeId = myNode != null ? myNode.getNodeId() : msg.getSenderNodeId();
+        return new MigrateKeyAckMessage(myNodeId, msg.getKey(), false, "GossipProtocol 未注入");
+    }
+
+    /**
+     * 处理键迁移确认（MIGRATE_KEY_ACK）。
+     * <p>
+     * 源节点收到目标节点的 ACK 后，完成等待中的 sendAndWait 请求。
+     * </p>
+     *
+     * @param msg 键迁移确认消息
+     */
+    private void handleMigrateKeyAck(MigrateKeyAckMessage msg) {
+        logger.debug("收到 MIGRATE_KEY_ACK: key={}, success={}, sender={}",
+                msg.getKey(), msg.isSuccess(), msg.getSenderNodeId());
+        if (busClient != null) {
+            busClient.completeResponse(msg.getSenderNodeId(), msg);
+        }
+    }
+
+    /**
      * 发生异常时调用
      *
      * @param ctx   通道上下文
@@ -369,14 +449,10 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
      */
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        InetSocketAddress remoteAddress = (InetSocketAddress) ctx.channel().remoteAddress();
-        logger.error("集群总线连接异常，远程地址: {}:{}, 节点ID: {}", 
-                remoteAddress.getAddress().getHostAddress(), 
-                remoteAddress.getPort(),
-                remoteNodeId, 
-                cause);
+        logger.error("集群总线连接异常，远程地址: {}, 节点ID: {}",
+                formatRemoteAddress(ctx), remoteNodeId, cause);
 
-        // 关闭连接
+        // 关闭连接，触发客户端重连评估
         ctx.close();
     }
 

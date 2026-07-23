@@ -3,6 +3,8 @@ package com.janeluo.luban.rds.cluster.config;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 
+import java.util.concurrent.atomic.LongAdder;
+
 /**
  * 集群状态管理器
  * <p>
@@ -17,14 +19,14 @@ public class ClusterStateManager {
     private final ClusterConfig config;
 
     /**
-     * 已发送消息计数
+     * 已发送消息计数（LongAdder 保证多线程累加的原子性与高吞吐）
      */
-    private long messagesSent;
+    private final LongAdder messagesSent = new LongAdder();
 
     /**
-     * 已接收消息计数
+     * 已接收消息计数（LongAdder 保证多线程累加的原子性与高吞吐）
      */
-    private long messagesReceived;
+    private final LongAdder messagesReceived = new LongAdder();
 
     /**
      * 构造方法
@@ -36,8 +38,6 @@ public class ClusterStateManager {
             throw new IllegalArgumentException("集群配置不能为空");
         }
         this.config = config;
-        this.messagesSent = 0;
-        this.messagesReceived = 0;
     }
 
     /**
@@ -56,27 +56,17 @@ public class ClusterStateManager {
             return false;
         }
 
-        // 检查所有负责槽位的主节点是否可用
+        // 检查所有负责槽位的主节点是否可用。
+        // 注意：Redis 语义中 slot 的 owner 只能是 master；slave 接管 slot 前必须先提权为 master。
+        // PFAIL 不计入 fail（宽容期，避免网络抖动误判集群下线），仅 FAIL master 持有的 slot 使集群 fail。
+        // 此处有意简化：未实现 Redis 的"多数 master 不可达才 fail"quorum 机制。
         for (int slot = 0; slot < ClusterNode.CLUSTER_SLOTS; slot++) {
             ClusterNode node = config.getSlotOwnerNode(slot);
             if (node == null) {
                 return false;
             }
-
-            // 如果是从节点，检查其主节点
-            if (node.isSlave()) {
-                String masterId = node.getMasterNodeId();
-                if (masterId != null) {
-                    ClusterNode master = config.getNode(masterId);
-                    if (master == null || master.isFail()) {
-                        return false;
-                    }
-                }
-            } else {
-                // 主节点检查是否下线
-                if (node.isFail()) {
-                    return false;
-                }
+            if (node.isFail()) {
+                return false;
             }
         }
 
@@ -140,8 +130,8 @@ public class ClusterStateManager {
         stats.setMyEpoch(config.getConfigEpoch());
 
         // 设置消息计数
-        stats.setMessagesSent(messagesSent);
-        stats.setMessagesReceived(messagesReceived);
+        stats.setMessagesSent(messagesSent.sum());
+        stats.setMessagesReceived(messagesReceived.sum());
 
         return stats;
     }
@@ -152,7 +142,7 @@ public class ClusterStateManager {
      * @param count 增加的数量
      */
     public void incrementMessagesSent(long count) {
-        this.messagesSent += count;
+        this.messagesSent.add(count);
     }
 
     /**
@@ -161,15 +151,15 @@ public class ClusterStateManager {
      * @param count 增加的数量
      */
     public void incrementMessagesReceived(long count) {
-        this.messagesReceived += count;
+        this.messagesReceived.add(count);
     }
 
     /**
      * 重置消息计数
      */
     public void resetMessageCounters() {
-        this.messagesSent = 0;
-        this.messagesReceived = 0;
+        this.messagesSent.reset();
+        this.messagesReceived.reset();
     }
 
     /**
@@ -188,23 +178,8 @@ public class ClusterStateManager {
             return false;
         }
 
-        // 检查节点是否可用
-        if (!node.isAvailable()) {
-            return false;
-        }
-
-        // 如果是从节点，检查主节点是否可用
-        if (node.isSlave()) {
-            String masterId = node.getMasterNodeId();
-            if (masterId != null) {
-                ClusterNode master = config.getNode(masterId);
-                if (master == null || !master.isAvailable()) {
-                    return false;
-                }
-            }
-        }
-
-        return true;
+        // slot owner 只能是 master，检查其是否可用（未 FAIL/PFAIL）
+        return node.isAvailable();
     }
 
     /**
@@ -231,6 +206,20 @@ public class ClusterStateManager {
      * @return 是否可以进行故障转移
      */
     public boolean canFailover() {
+        // 前置条件：本节点必须是 slave，且其 master 已 FAIL（对齐 Redis：仅 fail master 的 slave 才能发起选举）
+        ClusterNode myself = config.getMyNode();
+        if (myself == null || !myself.isSlave()) {
+            return false;
+        }
+        String myMasterId = myself.getMasterNodeId();
+        if (myMasterId == null) {
+            return false;
+        }
+        ClusterNode myMaster = config.getNode(myMasterId);
+        if (myMaster == null || !myMaster.isFail()) {
+            return false;
+        }
+
         int masterCount = 0;
         int availableMasterCount = 0;
 

@@ -303,12 +303,20 @@ public class GossipNodeInfo implements Serializable {
      * @return 编码后的字节数组
      */
     public byte[] encode() {
+        // 校验 nodeId 长度，禁止空填充导致的解码歧义
+        if (nodeId != null && nodeId.length() != NODE_ID_LENGTH) {
+            throw new IllegalArgumentException(
+                    "节点ID长度必须为" + NODE_ID_LENGTH + "字符，当前长度: " + nodeId.length());
+        }
+
         // 计算总长度
         int ipBytesLength = ip != null ? ip.getBytes(java.nio.charset.StandardCharsets.UTF_8).length : 0;
         int flagsCount = flags.size();
         byte[] slotsBytes = slots != null ? slots.toByteArray() : EMPTY_BYTES;
+        // masterNodeId：1 字节标志 + （有值时）40 字节 node-id
+        int masterNodeIdLength = masterNodeId != null ? NODE_ID_LENGTH : 0;
         int totalLength = NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2
-                + 4 + slotsBytes.length;
+                + 4 + slotsBytes.length + 1 + masterNodeIdLength;
 
         byte[] data = new byte[totalLength];
         int offset = 0;
@@ -370,6 +378,16 @@ public class GossipNodeInfo implements Serializable {
             offset += slotsBytes.length;
         }
 
+        // 写入 masterNodeId：1 字节标志 + 可选 40 字节 node-id
+        if (masterNodeId != null) {
+            data[offset++] = 1;
+            byte[] masterIdBytes = masterNodeId.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            System.arraycopy(masterIdBytes, 0, data, offset, NODE_ID_LENGTH);
+            offset += NODE_ID_LENGTH;
+        } else {
+            data[offset++] = 0;
+        }
+
         return data;
     }
 
@@ -381,14 +399,40 @@ public class GossipNodeInfo implements Serializable {
      * @return 解码后的偏移量
      */
     public int decode(byte[] data, int offset) {
-        // 读取节点ID
+        if (data == null) {
+            throw new IllegalArgumentException("解码数据为空");
+        }
+        // 定长部分最小长度：40(id) + 1(iplen) + 4(port) + 4(busport) + 8(epoch) + 1(flagsCount)
+        final int minFixed = NODE_ID_LENGTH + 1 + 4 + 4 + 8 + 1;
+        if (offset < 0 || offset > data.length - minFixed) {
+            throw new IllegalArgumentException(
+                    "GossipNodeInfo 定长部分数据不足: 需要 " + minFixed + " 字节");
+        }
+
+        // 读取节点ID，trim 尾部 0x00 填充后校验
         byte[] nodeIdBytes = new byte[NODE_ID_LENGTH];
         System.arraycopy(data, offset, nodeIdBytes, 0, NODE_ID_LENGTH);
-        this.nodeId = new String(nodeIdBytes, java.nio.charset.StandardCharsets.UTF_8);
+        String rawNodeId = new String(nodeIdBytes, java.nio.charset.StandardCharsets.UTF_8);
+        // 去除尾部填充的 0x00（兼容旧编码端可能的零填充）
+        int idEnd = rawNodeId.indexOf(0);
+        String trimmedNodeId = idEnd >= 0 ? rawNodeId.substring(0, idEnd) : rawNodeId;
+        if (trimmedNodeId.isEmpty()) {
+            this.nodeId = null;
+        } else {
+            // 走 setNodeId 做格式校验，非法则直接保留原始字符串避免丢失
+            try {
+                setNodeId(trimmedNodeId);
+            } catch (IllegalArgumentException e) {
+                this.nodeId = trimmedNodeId;
+            }
+        }
         offset += NODE_ID_LENGTH;
 
         // 读取IP地址长度和IP地址
         int ipLength = data[offset++] & 0xFF;
+        if (offset + ipLength + 4 + 4 + 8 + 1 > data.length) {
+            throw new IllegalArgumentException("GossipNodeInfo IP/端口段数据不足");
+        }
         if (ipLength > 0) {
             byte[] ipBytes = new byte[ipLength];
             System.arraycopy(data, offset, ipBytes, 0, ipLength);
@@ -416,10 +460,13 @@ public class GossipNodeInfo implements Serializable {
                 ((long) (data[offset++] & 0xFF) << 24) |
                 ((long) (data[offset++] & 0xFF) << 16) |
                 ((long) (data[offset++] & 0xFF) << 8) |
-                ((long) (data[offset++] & 0xFF));
+                ((data[offset++] & 0xFF));
 
         // 读取状态标志数量
         int flagsCount = data[offset++] & 0xFF;
+        if (offset + flagsCount * 2L > data.length) {
+            throw new IllegalArgumentException("GossipNodeInfo 状态标志段数据不足: flagsCount=" + flagsCount);
+        }
 
         // 读取状态标志
         this.flags.clear();
@@ -432,10 +479,17 @@ public class GossipNodeInfo implements Serializable {
         }
 
         // 读取槽位字节数（4字节，大端序）+ 槽位位图
+        if (offset + 4 > data.length) {
+            throw new IllegalArgumentException("GossipNodeInfo 槽位长度字段数据不足");
+        }
         int slotsBytesLength = ((data[offset++] & 0xFF) << 24) |
                 ((data[offset++] & 0xFF) << 16) |
                 ((data[offset++] & 0xFF) << 8) |
                 (data[offset++] & 0xFF);
+        if (slotsBytesLength < 0 || offset + slotsBytesLength > data.length) {
+            throw new IllegalArgumentException(
+                    "GossipNodeInfo 槽位位图数据不足: slotsBytesLength=" + slotsBytesLength);
+        }
         if (slotsBytesLength > 0) {
             byte[] slotsBytes = new byte[slotsBytesLength];
             System.arraycopy(data, offset, slotsBytes, 0, slotsBytesLength);
@@ -443,6 +497,27 @@ public class GossipNodeInfo implements Serializable {
             offset += slotsBytesLength;
         } else {
             this.slots = null;
+        }
+
+        // 读取 masterNodeId：1 字节标志 + 可选 40 字节 node-id
+        if (offset + 1 <= data.length) {
+            int hasMasterId = data[offset++] & 0xFF;
+            if (hasMasterId == 1) {
+                if (offset + NODE_ID_LENGTH > data.length) {
+                    throw new IllegalArgumentException("GossipNodeInfo masterNodeId 数据不足");
+                }
+                byte[] masterIdBytes = new byte[NODE_ID_LENGTH];
+                System.arraycopy(data, offset, masterIdBytes, 0, NODE_ID_LENGTH);
+                String rawMasterId = new String(masterIdBytes, java.nio.charset.StandardCharsets.UTF_8);
+                int mid = rawMasterId.indexOf(0);
+                this.masterNodeId = mid >= 0 ? rawMasterId.substring(0, mid) : rawMasterId;
+                if (this.masterNodeId.isEmpty()) {
+                    this.masterNodeId = null;
+                }
+                offset += NODE_ID_LENGTH;
+            } else if (hasMasterId != 0) {
+                throw new IllegalArgumentException("GossipNodeInfo masterNodeId 标志非法: " + hasMasterId);
+            }
         }
 
         return offset;
@@ -457,8 +532,9 @@ public class GossipNodeInfo implements Serializable {
         int ipBytesLength = ip != null ? ip.getBytes(java.nio.charset.StandardCharsets.UTF_8).length : 0;
         int flagsCount = flags.size();
         int slotsBytesLength = slots != null ? slots.toByteArray().length : 0;
+        int masterNodeIdLength = masterNodeId != null ? NODE_ID_LENGTH : 0;
         return NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2
-                + 4 + slotsBytesLength;
+                + 4 + slotsBytesLength + 1 + masterNodeIdLength;
     }
 
     // ==================== 工具方法 ====================

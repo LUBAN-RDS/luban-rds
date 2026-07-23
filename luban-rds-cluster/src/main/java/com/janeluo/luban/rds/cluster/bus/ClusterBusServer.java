@@ -11,9 +11,6 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.handler.codec.serialization.ClassResolvers;
-import io.netty.handler.codec.serialization.ObjectDecoder;
-import io.netty.handler.codec.serialization.ObjectEncoder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -87,7 +84,7 @@ public class ClusterBusServer {
     /**
      * 启动集群总线服务器
      */
-    public void start() {
+    public synchronized void start() {
         if (running) {
             logger.warn("集群总线服务器已在运行中，端口: {}", port);
             return;
@@ -106,12 +103,10 @@ public class ClusterBusServer {
                     .childHandler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         protected void initChannel(SocketChannel ch) {
-                            // 添加对象编解码器
+                            // 二进制编解码器（基于 GossipMessage.encode/parseMessage）
                             ch.pipeline().addLast(
-                                    new ObjectDecoder(Integer.MAX_VALUE, 
-                                            ClassResolvers.cacheDisabled(null)));
-                            ch.pipeline().addLast(new ObjectEncoder());
-                            
+                                    new ClusterBusCodec.Encoder(),
+                                    new ClusterBusCodec.Decoder());
                             // 添加业务处理器
                             ch.pipeline().addLast(new ClusterBusHandler(clusterConfig, gossipProtocol));
                         }
@@ -125,16 +120,21 @@ public class ClusterBusServer {
             logger.info("集群总线服务器启动成功，监听端口: {}", port);
 
         } catch (InterruptedException e) {
-            logger.error("集群总线服务器启动失败", e);
+            logger.error("集群总线服务器启动被中断", e);
             shutdown();
             Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            // 绑定失败（如端口被占用）时释放已创建的 EventLoopGroup，避免资源泄漏
+            logger.error("集群总线服务器启动失败，端口: {}", port, e);
+            shutdown();
+            throw new RuntimeException("集群总线服务器绑定端口失败: " + port, e);
         }
     }
 
     /**
      * 停止集群总线服务器
      */
-    public void stop() {
+    public synchronized void stop() {
         if (!running) {
             logger.warn("集群总线服务器未运行");
             return;
@@ -145,7 +145,7 @@ public class ClusterBusServer {
     }
 
     /**
-     * 关闭资源
+     * 关闭资源（非线程安全，由 start/stop 的 synchronized 守护）
      */
     private void shutdown() {
         running = false;
@@ -167,6 +167,9 @@ public class ClusterBusServer {
         if (bossGroup != null) {
             bossGroup.shutdownGracefully();
         }
+        channel = null;
+        bossGroup = null;
+        workerGroup = null;
     }
 
     /**

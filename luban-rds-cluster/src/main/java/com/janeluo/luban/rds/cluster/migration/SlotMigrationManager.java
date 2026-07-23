@@ -8,8 +8,11 @@ import com.janeluo.luban.rds.core.store.MemoryStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectInputFilter;
 import java.io.ObjectOutputStream;
 import java.util.List;
 import java.util.Map;
@@ -245,9 +248,9 @@ public class SlotMigrationManager {
         // 检查是否正在迁移
         MigrationState migrationState = migratingSlots.get(slot);
         if (migrationState != null) {
-            // 键不存在时，MOVED 重定向到目标节点
+            // 键不存在时，ASK 临时重定向到目标节点（对齐 Redis：迁移中用 ASK，完成后才用 MOVED）
             if (!memoryStore.exists(DEFAULT_DATABASE, key)) {
-                return new String[]{"MOVED", migrationState.getTargetNodeId(), String.valueOf(slot)};
+                return new String[]{"ASK", migrationState.getTargetNodeId(), String.valueOf(slot)};
             }
         }
         
@@ -519,9 +522,27 @@ public class SlotMigrationManager {
         if (data == null || data.length == 0) {
             return null;
         }
-        
-        try (java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(data);
-             java.io.ObjectInputStream ois = new java.io.ObjectInputStream(bais)) {
+
+        try (ByteArrayInputStream bais = new ByteArrayInputStream(data);
+             ObjectInputStream ois = new ObjectInputStream(bais)) {
+            // 反序列化白名单（JDK 9+ ObjectInputFilter）：仅允许基本类型、数组、字符串及常用集合，
+            // 拒绝任意类的反序列化，防止跨节点反序列化 RCE
+            ois.setObjectInputFilter(filterInfo -> {
+                Class<?> clazz = filterInfo.serialClass();
+                if (clazz == null) {
+                    // 非类过滤（如数组长度、深度），允许
+                    return ObjectInputFilter.Status.UNDECIDED;
+                }
+                if (clazz.isPrimitive() || clazz.isArray()) {
+                    return ObjectInputFilter.Status.ALLOWED;
+                }
+                String name = clazz.getName();
+                if (name.startsWith("java.lang.") || name.startsWith("java.util.")
+                        || name.startsWith("java.math.")) {
+                    return ObjectInputFilter.Status.ALLOWED;
+                }
+                return ObjectInputFilter.Status.REJECTED;
+            });
             return ois.readObject();
         }
     }

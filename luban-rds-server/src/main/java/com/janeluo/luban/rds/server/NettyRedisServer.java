@@ -8,6 +8,8 @@ import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
 import com.janeluo.luban.rds.cluster.gossip.FailoverManager;
 import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
 import com.janeluo.luban.rds.cluster.handler.ClusterCommandHandler;
+import com.janeluo.luban.rds.cluster.migration.MigrateCommandHandler;
+import com.janeluo.luban.rds.cluster.migration.SlotMigrationManager;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 import com.janeluo.luban.rds.cluster.slot.DefaultSlotManager;
@@ -114,6 +116,11 @@ public class NettyRedisServer implements RedisServer {
      * 集群命令处理器
      */
     private ClusterCommandHandler clusterCommandHandler;
+
+    /**
+     * MIGRATE 命令处理器（集群模式下用于节点间键迁移）
+     */
+    private MigrateCommandHandler migrateCommandHandler;
     
     /**
      * 集群状态管理器
@@ -319,6 +326,14 @@ public class NettyRedisServer implements RedisServer {
         
         // 4. 初始化/更新当前节点信息（使用当前网络地址）
         initCurrentNode(nodeId);
+
+        // 4.5 首次启动（无 nodes.conf）时立即持久化当前节点配置，对齐 Redis 行为：
+        // Redis 在 cluster-enabled 首次启动时会自动创建 nodes.conf，确保 nodeId 持久化，
+        // 避免重启后 nodeId 变化导致集群中其他节点无法识别。仅当 loadedConfig 为 null
+        // （即未从文件恢复）时才需要此初始保存；恢复场景下配置未变更，无需重复写入。
+        if (loadedConfig == null) {
+            saveClusterConfig();
+        }
         
         // 5. 初始化 SlotManager
         this.slotManager = new DefaultSlotManager(nodeId);
@@ -352,11 +367,12 @@ public class NettyRedisServer implements RedisServer {
         // 9. 初始化 ClusterCommandHandler
         String clusterConfigFilePath = new File(config.getDir(), config.getClusterConfigFile()).getAbsolutePath();
         this.clusterCommandHandler = new ClusterCommandHandler(
-                clusterConfig, 
-                slotManager, 
-                clusterStateManager, 
+                clusterConfig,
+                slotManager,
+                clusterStateManager,
                 gossipProtocol,
-                clusterConfigFilePath);
+                clusterConfigFilePath,
+                memoryStore);
 
         // 10. 注入拓扑变更回调（参照 Redis 7 clusterSaveConfigIfNeeded 机制）
         // 当集群拓扑发生变更时自动触发 nodes.conf 持久化
@@ -376,6 +392,16 @@ public class NettyRedisServer implements RedisServer {
                 config.getClusterFailoverGracePeriod());
         this.gossipProtocol.setFailoverManager(failoverManager);
         logger.info("FailoverManager 已注入: gracePeriod={}ms", config.getClusterFailoverGracePeriod());
+
+        // 10.6 初始化 SlotMigrationManager 和 MigrateCommandHandler
+        // SlotMigrationManager 用于处理 MIGRATE_KEY 消息（目标节点 importKey），
+        // MigrateCommandHandler 处理 MIGRATE 命令（源端通过总线传输键到目标节点）
+        SlotMigrationManager slotMigrationManager = new SlotMigrationManager(
+                clusterConfig, slotManager, memoryStore);
+        this.gossipProtocol.setSlotMigrationManager(slotMigrationManager);
+        this.migrateCommandHandler = new MigrateCommandHandler(
+                slotMigrationManager, memoryStore, clusterBusClient, clusterConfig);
+        logger.info("SlotMigrationManager 和 MigrateCommandHandler 已初始化");
 
         // 11. 初始化 ClusterBusServer
         this.clusterBusServer = new ClusterBusServer(port, clusterConfig, gossipProtocol);
@@ -666,6 +692,9 @@ public class NettyRedisServer implements RedisServer {
                              clusterEnabled, clusterConfig, slotManager);
                      if (clusterEnabled && clusterCommandHandler != null) {
                          handler.setClusterCommandHandler(clusterCommandHandler);
+                     }
+                     if (clusterEnabled && migrateCommandHandler != null) {
+                         handler.setMigrateCommandHandler(migrateCommandHandler);
                      }
                      pipeline.addLast(businessGroup, "handler", handler);
                  }

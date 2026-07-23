@@ -183,7 +183,8 @@ class SlotMigrationManagerTest {
 
         String[] redirect = migrationManager.getRedirectInfo(key);
         assertNotNull(redirect);
-        assertEquals("MOVED", redirect[0]);
+        // 迁移中键不存在应返回 ASK（临时重定向），对齐 Redis 语义
+        assertEquals("ASK", redirect[0]);
         assertEquals("target-node-id", redirect[1]);
         assertEquals(String.valueOf(slot), redirect[2]);
     }

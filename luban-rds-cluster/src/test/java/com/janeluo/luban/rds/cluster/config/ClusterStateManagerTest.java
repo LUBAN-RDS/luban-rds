@@ -81,23 +81,23 @@ public class ClusterStateManagerTest {
 
     @Test
     public void testIsClusterOkWithSlaveAndFailMaster() {
-        // 创建主节点
+        // 创建主节点（FAIL）
         String masterId = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
         ClusterNode master = new ClusterNode(masterId);
         master.addState(ClusterNodeState.MASTER);
         master.addState(ClusterNodeState.FAIL);
         config.addNode(master);
 
-        // 创建从节点
+        // 创建从节点（指向 FAIL 主节点）
         String slaveId = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0";
         ClusterNode slave = new ClusterNode(slaveId);
         slave.addState(ClusterNodeState.SLAVE);
         slave.setMasterNodeId(masterId);
         config.addNode(slave);
 
-        // 分配所有槽位给从节点（异常情况，但测试逻辑）
+        // 槽位归属主节点（对齐 Redis：slot owner 只能是 master）。主节点 FAIL，集群不健康。
         for (int i = 0; i < ClusterNode.CLUSTER_SLOTS; i++) {
-            config.setSlotOwner(i, slaveId);
+            config.setSlotOwner(i, masterId);
         }
 
         // 主节点FAIL，集群不健康
@@ -255,49 +255,77 @@ public class ClusterStateManagerTest {
 
     @Test
     public void testCanFailover() {
-        // 创建3个主节点
-        for (int i = 0; i < 3; i++) {
-            String nodeId = String.format("a%039d", i);
-            ClusterNode master = new ClusterNode(nodeId);
-            master.addState(ClusterNodeState.MASTER);
-            config.addNode(master);
-        }
+        // myself 是 slave，其 master 已 FAIL
+        ClusterNode failedMaster = new ClusterNode(String.format("a%039d", 0));
+        failedMaster.addState(ClusterNodeState.MASTER);
+        failedMaster.addState(ClusterNodeState.FAIL);
+        ClusterNode me = new ClusterNode(String.format("a%039d", 1));
+        me.addState(ClusterNodeState.SLAVE);
+        me.addState(ClusterNodeState.MYSELF);
+        me.setMasterNodeId(failedMaster.getNodeId());
+        // 2 个可用 master 满足 quorum
+        ClusterNode m2 = new ClusterNode(String.format("a%039d", 2));
+        m2.addState(ClusterNodeState.MASTER);
+        ClusterNode m3 = new ClusterNode(String.format("a%039d", 3));
+        m3.addState(ClusterNodeState.MASTER);
+        config.addNode(failedMaster);
+        config.addNode(me);
+        config.addNode(m2);
+        config.addNode(m3);
+        config.setMyNodeId(me.getNodeId());
 
-        // 超过半数主节点可用（3个中3个可用）
+        // myself 是 slave、master FAIL、超过半数主节点可用
         assertTrue(stateManager.canFailover());
     }
 
     @Test
     public void testCanFailoverWithFailNodes() {
-        // 创建3个主节点
-        for (int i = 0; i < 3; i++) {
-            String nodeId = String.format("a%039d", i);
-            ClusterNode master = new ClusterNode(nodeId);
-            master.addState(ClusterNodeState.MASTER);
-            if (i >= 2) { // 最后一个节点FAIL
-                master.addState(ClusterNodeState.FAIL);
-            }
-            config.addNode(master);
-        }
+        // myself 是 slave，其 master 已 FAIL
+        ClusterNode failedMaster = new ClusterNode(String.format("a%039d", 0));
+        failedMaster.addState(ClusterNodeState.MASTER);
+        failedMaster.addState(ClusterNodeState.FAIL);
+        ClusterNode me = new ClusterNode(String.format("a%039d", 1));
+        me.addState(ClusterNodeState.SLAVE);
+        me.addState(ClusterNodeState.MYSELF);
+        me.setMasterNodeId(failedMaster.getNodeId());
+        // 2 个可用 master 满足 quorum（masterCount=3，可用 2 > 1）
+        ClusterNode m2 = new ClusterNode(String.format("a%039d", 2));
+        m2.addState(ClusterNodeState.MASTER);
+        ClusterNode m3 = new ClusterNode(String.format("a%039d", 3));
+        m3.addState(ClusterNodeState.MASTER);
+        config.addNode(failedMaster);
+        config.addNode(me);
+        config.addNode(m2);
+        config.addNode(m3);
+        config.setMyNodeId(me.getNodeId());
 
-        // 3个中2个可用，超过半数
+        // 可用 master 超过半数
         assertTrue(stateManager.canFailover());
     }
 
     @Test
     public void testCanFailoverWithMajorityFail() {
-        // 创建3个主节点
-        for (int i = 0; i < 3; i++) {
-            String nodeId = String.format("a%039d", i);
-            ClusterNode master = new ClusterNode(nodeId);
-            master.addState(ClusterNodeState.MASTER);
-            if (i >= 1) { // 2个节点FAIL
-                master.addState(ClusterNodeState.FAIL);
-            }
-            config.addNode(master);
-        }
+        // myself 是 slave，其 master 已 FAIL
+        ClusterNode failedMaster = new ClusterNode(String.format("a%039d", 0));
+        failedMaster.addState(ClusterNodeState.MASTER);
+        failedMaster.addState(ClusterNodeState.FAIL);
+        ClusterNode me = new ClusterNode(String.format("a%039d", 1));
+        me.addState(ClusterNodeState.SLAVE);
+        me.addState(ClusterNodeState.MYSELF);
+        me.setMasterNodeId(failedMaster.getNodeId());
+        // 3 个 master 中 2 个 FAIL（含 myMaster），仅 1 个可用 → 不过半
+        ClusterNode m2 = new ClusterNode(String.format("a%039d", 2));
+        m2.addState(ClusterNodeState.MASTER);
+        ClusterNode m3 = new ClusterNode(String.format("a%039d", 3));
+        m3.addState(ClusterNodeState.MASTER);
+        m3.addState(ClusterNodeState.FAIL);
+        config.addNode(failedMaster);
+        config.addNode(me);
+        config.addNode(m2);
+        config.addNode(m3);
+        config.setMyNodeId(me.getNodeId());
 
-        // 3个中只有1个可用，不超过半数
+        // 可用 master 仅 1 个，不超过半数（masterCount=3，需 >1）
         assertFalse(stateManager.canFailover());
     }
 

@@ -120,7 +120,8 @@ public class FailMessage extends GossipMessage {
     @Override
     protected void decodeBody(byte[] body) {
         if (body == null || body.length < 45) {
-            return;
+            throw new IllegalArgumentException("FAIL 消息体长度不足: 需要 45 字节，实际 "
+                    + (body == null ? 0 : body.length));
         }
 
         int offset = 0;
@@ -133,6 +134,9 @@ public class FailMessage extends GossipMessage {
 
         // 读取故障节点IP长度和IP
         int ipLength = body[offset++] & 0xFF;
+        if (offset + ipLength + 4 > body.length) {
+            throw new IllegalArgumentException("FAIL 消息 IP/端口段数据不足");
+        }
         if (ipLength > 0) {
             byte[] ipBytes = new byte[ipLength];
             System.arraycopy(body, offset, ipBytes, 0, ipLength);

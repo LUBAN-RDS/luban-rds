@@ -1,5 +1,7 @@
 package com.janeluo.luban.rds.cluster.slot;
 
+import java.nio.charset.StandardCharsets;
+
 import org.junit.Test;
 
 import static org.junit.Assert.*;
@@ -138,7 +140,8 @@ public class SlotUtilsTest {
 
     /**
      * 测试多个大括号的情况
-     * 只有第一个有效的 {...} 会被使用
+     * 对齐 Redis：只有第一个 '{...}' 会被使用；若第一个括号无效（空括号或无 '}'），
+     * 则对整个 key 计算，不继续向后查找。
      */
     @Test
     public void testKeyHashSlotMultipleBraces() {
@@ -147,21 +150,33 @@ public class SlotUtilsTest {
         int slotUser = SlotUtils.keyHashSlot("user");
         assertEquals(slot1, slotUser);
 
-        // 第一个括号内为空，使用第二个
+        // 第一个括号内为空 -> 对齐 Redis：对整个 key 计算，不使用第二个 "profile"
         int slot2 = SlotUtils.keyHashSlot("{}:{profile}");
-        int slotProfile = SlotUtils.keyHashSlot("profile");
-        assertEquals(slot2, slotProfile);
+        int slotFull = SlotUtils.keyHashSlot("{}:{profile}");
+        assertEquals(slotFull, slot2);
+        // 应该等于对整个字符串 "{}:{profile}" 计算，而非 "profile"
+        byte[] fullKey = "{}:{profile}".getBytes(StandardCharsets.UTF_8);
+        int crcFull = SlotUtils.crc16(fullKey, 0, fullKey.length);
+        assertEquals(crcFull % SlotUtils.CLUSTER_SLOTS, slot2);
+
+        // 空括号后还有有效括号且中间有内容 -> 仍对整个 key 计算
+        int slot3 = SlotUtils.keyHashSlot("a{}b{c}");
+        byte[] key3 = "a{}b{c}".getBytes(StandardCharsets.UTF_8);
+        int crc3 = SlotUtils.crc16(key3, 0, key3.length);
+        assertEquals(crc3 % SlotUtils.CLUSTER_SLOTS, slot3);
     }
 
     /**
      * 测试空括号
-     * 空括号 {} 应该被忽略，计算整个键
+     * 空括号 {} 应该被忽略，对整个键计算
      */
     @Test
     public void testKeyHashSlotEmptyBraces() {
+        // 空括号无效，应对整个 key 计算
         int slot1 = SlotUtils.keyHashSlot("user:{}:profile");
-        int slotFull = SlotUtils.keyHashSlot("user:{}:profile");
-        assertEquals(slot1, slotFull);
+        byte[] fullKey = "user:{}:profile".getBytes(StandardCharsets.UTF_8);
+        int crcFull = SlotUtils.crc16(fullKey, 0, fullKey.length);
+        assertEquals(crcFull % SlotUtils.CLUSTER_SLOTS, slot1);
     }
 
     /**

@@ -142,10 +142,17 @@ public class FailoverManager {
             return;
         }
 
+        // quorum 前置校验：多数 master 不可达时不发起选举（避免无意义的选举风暴）
+        if (!stateManager.canFailover()) {
+            logger.debug("可用 master 未过半，暂不发起选举: failedMasterId={}", masterId);
+            return;
+        }
+
         // 满足触发条件
         state = FailoverState.REQUESTING;
         electionStartTime = System.currentTimeMillis();
-        long jitter = Math.abs(me.getNodeId().hashCode()) % JITTER_BOUND_MS;
+        // 修复 Math.abs(Integer.MIN_VALUE) 仍为负的 bug：先取模再取绝对值
+        long jitter = Math.abs(me.getNodeId().hashCode() % JITTER_BOUND_MS);
         requestDeadline = electionStartTime + gracePeriod + jitter;
         failedMasterId = masterId;
         authVotes.clear();
@@ -188,8 +195,8 @@ public class FailoverManager {
         if (me == null) {
             return;
         }
-        electionEpoch = clusterConfig.getCurrentEpoch() + 1;
-        clusterConfig.setCurrentEpoch(electionEpoch);
+        // 原子自增 currentEpoch 作为本次选举纪元（避免 read+1/write 的竞态）
+        electionEpoch = clusterConfig.incrementEpoch();
         requestBroadcasted = true;
 
         FailoverAuthRequestMessage req = new FailoverAuthRequestMessage(
@@ -234,14 +241,29 @@ public class FailoverManager {
             return;
         }
 
+        // (1.5) 校验候选节点是 slave 且其 master 已 FAIL（对齐 Redis：仅 fail master 的 slave 可参选）
+        String candidateId = req.getSenderNodeId();
+        ClusterNode candidate = clusterConfig.getNode(candidateId);
+        if (candidate == null || !candidate.isSlave()) {
+            logger.debug("拒绝 AUTH_REQUEST：候选节点不存在或非 slave: candidate={}", candidateId);
+            return;
+        }
+        String candidateMasterId = candidate.getMasterNodeId();
+        ClusterNode candidateMaster = candidateMasterId != null ? clusterConfig.getNode(candidateMasterId) : null;
+        if (candidateMaster == null || !candidateMaster.isFail()) {
+            logger.debug("拒绝 AUTH_REQUEST：候选节点的 master 未 FAIL: candidate={}, master={}",
+                    candidateId, candidateMasterId);
+            return;
+        }
+        logger.debug("AUTH_REQUEST 候选校验通过: candidate={}, configEpoch={}, replOffset={}",
+                candidateId, req.getConfigEpoch(), req.getReplicationOffset());
+
         // (2) 落后则追平，新纪元清旧票
         if (reqEpoch > myEpoch) {
             clusterConfig.setCurrentEpoch(reqEpoch);
             lastVoteEpoch = reqEpoch;
             votesCast.clear();
         }
-
-        String candidateId = req.getSenderNodeId();
 
         // (3) 本纪元已投该 slave → 幂等重发
         Long votedAt = votesCast.get(candidateId);
@@ -290,6 +312,18 @@ public class FailoverManager {
         }
         String voterId = ack.getSenderNodeId();
         if (voterId == null) {
+            return;
+        }
+        // 校验投票者是健康 master（拒绝 slave/未知节点/FAIL 节点的伪造 ACK）
+        ClusterNode voter = clusterConfig.getNode(voterId);
+        if (voter == null || !voter.isMaster() || voter.isFail()) {
+            logger.debug("忽略非法投票: voter={} 非健康 master", voterId);
+            return;
+        }
+        // 校验 ACK 的 voteEpoch 与本次选举纪元一致（拒绝陈旧 ACK 污染票数）
+        if (ack.getVoteEpoch() != electionEpoch) {
+            logger.debug("忽略陈旧 ACK: voter={}, voteEpoch={}, electionEpoch={}",
+                    voterId, ack.getVoteEpoch(), electionEpoch);
             return;
         }
         if (!authVotes.add(voterId)) {
@@ -364,13 +398,15 @@ public class FailoverManager {
         slaveNode.addState(ClusterNodeState.MASTER);
         slaveNode.setMasterNodeId(null);
 
+        // 槽位继承：统一以 ClusterConfig.setSlotOwner 为单一入口（锁顺序 Config->Node），
+        // 其内部会同步 ClusterNode.slots 与 SlotManager，避免调用方先持 Node 锁再进 Config 锁导致死锁。
         BitSet masterSlots = masterNode.getSlots();
         for (int i = masterSlots.nextSetBit(0); i >= 0; i = masterSlots.nextSetBit(i + 1)) {
-            slaveNode.addSlot(i);
             slotManager.setSlotOwner(i, slaveNode.getNodeId());
             clusterConfig.setSlotOwner(i, slaveNode.getNodeId());
         }
 
+        // masterNode 的槽位已由 setSlotOwner 的 oldOwner 清理逻辑逐个 removeSlot，此处清残留
         masterNode.clearSlots();
         masterNode.removeState(ClusterNodeState.MASTER);
         masterNode.addState(ClusterNodeState.SLAVE);
@@ -405,6 +441,22 @@ public class FailoverManager {
             logger.warn("收到 FailoverResult 但 winner 不存在: winnerId={}",
                     msg.getWinnerNodeId());
             return;
+        }
+
+        // 相等 epoch 冲突解决（对齐 Redis clusterHandleConfigEpochCollision）：
+        // 当 newConfigEpoch == myEpoch 时，可能存在脑裂（两个 winner 声明相同 epoch）。
+        // 检查本地是否有其它节点已持有 inheritedSlots 中的槽位且 configEpoch 不低于 winner，
+        // 若有则按 nodeId 字典序决胜，落败者不应用拓扑变更。
+        if (msg.getNewConfigEpoch() == myEpoch) {
+            BitSet inherited = msg.getInheritedSlots();
+            String conflictOwnerId = findConflictingOwner(inherited, msg.getWinnerNodeId(), msg.getNewConfigEpoch());
+            if (conflictOwnerId != null
+                    && conflictOwnerId.compareTo(msg.getWinnerNodeId()) > 0) {
+                // 本地冲突 owner 的 nodeId 字典序更大，它胜出，忽略本消息
+                logger.warn("相等 epoch 冲突解决: 本地 owner={} 优先于 winner={}（epoch={}），忽略本 FailoverResult",
+                        conflictOwnerId, msg.getWinnerNodeId(), myEpoch);
+                return;
+            }
         }
 
         // winner 提权
@@ -471,6 +523,46 @@ public class FailoverManager {
             }
         }
         return false;
+    }
+
+    /**
+     * 查找与 winner 冲突的本地 owner：在 inheritedSlots 中存在槽位、
+     * 非 winner、且 configEpoch 不低于 winner 声明的 epoch 的节点。
+     * 用于相等 epoch 时的 nodeId 字典序决胜。
+     *
+     * @param slots         声明的槽位集合
+     * @param winnerId      winner 节点ID
+     * @param winnerEpoch   winner 声明的 epoch
+     * @return 冲突 owner 的节点ID，无冲突返回 null
+     */
+    private String findConflictingOwner(BitSet slots, String winnerId, long winnerEpoch) {
+        if (slots == null) {
+            return null;
+        }
+        for (ClusterNode node : clusterConfig.getAllNodes()) {
+            if (node.getNodeId().equals(winnerId)) {
+                continue;
+            }
+            if (sharesAnySlot(node, slots) && node.getConfigEpoch() >= winnerEpoch) {
+                return node.getNodeId();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 测试辅助：模拟"已进入 REQUESTING 并已广播 AUTH_REQUEST"的状态。
+     * <p>
+     * 仅供同包测试使用，设置 electionEpoch 并标记已广播，
+     * 使后续 onAuthAck 的 voteEpoch 校验能匹配测试构造的 ACK。
+     * </p>
+     *
+     * @param epoch 选举纪元
+     */
+    synchronized void prepareRequestedStateForTest(long epoch) {
+        this.state = FailoverState.REQUESTING;
+        this.electionEpoch = epoch;
+        this.requestBroadcasted = true;
     }
 
     private void notifyTopologyChanged() {

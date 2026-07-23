@@ -5,6 +5,7 @@ import com.janeluo.luban.rds.cluster.bus.ClusterBusServer;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
+import com.janeluo.luban.rds.cluster.migration.SlotMigrationManager;
 import com.janeluo.luban.rds.cluster.node.ClusterLink;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
@@ -80,6 +81,22 @@ public class GossipProtocol {
      * 故障转移管理器（由 NettyRedisServer 在创建后通过 setFailoverManager 注入）
      */
     private FailoverManager failoverManager;
+
+    /**
+     * 槽位迁移管理器（由 NettyRedisServer 在创建后通过 setSlotMigrationManager 注入）
+     * <p>
+     * 用于处理 MIGRATE_KEY 消息：目标节点收到键迁移请求后调用 importKey 导入键。
+     * </p>
+     */
+    private SlotMigrationManager slotMigrationManager;
+
+    /**
+     * 跨节点 PUBLISH 消息监听器（由上层 server 模块注入，避免 cluster 反向依赖 server）。
+     * <p>
+     * 收到 PUBLISH 消息时调用，将消息投递到本地订阅者。未注入时仅记录告警。
+     * </p>
+     */
+    private volatile ClusterMessageListener publishListener;
 
     /**
      * 集群状态管理器（用于消息计数统计）
@@ -181,6 +198,40 @@ public class GossipProtocol {
      */
     public FailoverManager getFailoverManager() {
         return failoverManager;
+    }
+
+    /**
+     * 注入槽位迁移管理器（由 NettyRedisServer 在创建后注入）。
+     * <p>
+     * 用于处理 MIGRATE_KEY 消息：目标节点收到键迁移请求后调用 importKey 导入键。
+     * </p>
+     *
+     * @param slotMigrationManager 槽位迁移管理器
+     */
+    public void setSlotMigrationManager(SlotMigrationManager slotMigrationManager) {
+        this.slotMigrationManager = slotMigrationManager;
+    }
+
+    /**
+     * 获取槽位迁移管理器。
+     *
+     * @return 槽位迁移管理器，未注入时返回 null
+     */
+    public SlotMigrationManager getSlotMigrationManager() {
+        return slotMigrationManager;
+    }
+
+    /**
+     * 设置跨节点 PUBLISH 消息监听器。
+     * <p>
+     * 由上层 server 模块注入（避免 cluster 反向依赖 server 模块的 PubSubManager）。
+     * 收到 PUBLISH 消息时调用此监听器，将消息投递到本地订阅者。
+     * </p>
+     *
+     * @param publishListener 消息监听器，null 表示清除
+     */
+    public void setPublishListener(ClusterMessageListener publishListener) {
+        this.publishListener = publishListener;
     }
 
     /**
@@ -584,6 +635,15 @@ public class GossipProtocol {
         logger.info("收到 FAIL 消息: failedNodeId={}, from={}",
                 fail.getFailedNodeId(), fail.getSenderNodeId());
 
+        // 校验发送方是已知节点（FAIL 消息应由达成多数共识的节点广播，
+        // 拒绝未知/伪造发送方的 FAIL 声明，避免恶意节点随意标记他人下线）
+        String senderNodeId = fail.getSenderNodeId();
+        if (senderNodeId == null || clusterConfig.getNode(senderNodeId) == null) {
+            logger.warn("收到 FAIL 消息但发送方未知，忽略: failedNodeId={}, sender={}",
+                    fail.getFailedNodeId(), senderNodeId);
+            return;
+        }
+
         String failedNodeId = fail.getFailedNodeId();
         ClusterNode failedNode = clusterConfig.getNode(failedNodeId);
 
@@ -632,6 +692,62 @@ public class GossipProtocol {
     public void handleFailoverResult(FailoverResultMessage msg) {
         if (failoverManager != null) {
             failoverManager.onFailoverResult(msg);
+        }
+    }
+
+    /**
+     * 处理键迁移请求（MIGRATE_KEY）。
+     * <p>
+     * 目标节点收到键迁移请求后，调用 SlotMigrationManager.importKey 导入键，
+     * 并返回 MIGRATE_KEY_ACK 给源节点。
+     * </p>
+     *
+     * @param msg 键迁移请求消息
+     * @return 键迁移确认消息（返回给源节点）
+     */
+    public MigrateKeyAckMessage handleMigrateKey(MigrateKeyMessage msg) {
+        ClusterNode myNode = clusterConfig.getMyNode();
+        String myNodeId = myNode != null ? myNode.getNodeId() : msg.getSenderNodeId();
+
+        boolean success = false;
+        String errorMessage = null;
+
+        if (slotMigrationManager != null) {
+            try {
+                success = slotMigrationManager.importKey(msg.getKey(), msg.getValue(), msg.getTtl());
+                if (!success) {
+                    errorMessage = "importKey 失败：槽位未处于 IMPORTING 状态或导入异常";
+                }
+            } catch (Exception e) {
+                errorMessage = "导入键异常: " + e.getMessage();
+                logger.error("处理 MIGRATE_KEY 消息失败: key={}", msg.getKey(), e);
+            }
+        } else {
+            errorMessage = "本节点未配置 SlotMigrationManager，无法导入键";
+            logger.warn("收到 MIGRATE_KEY 但 SlotMigrationManager 未注入: key={}", msg.getKey());
+        }
+
+        return new MigrateKeyAckMessage(myNodeId, msg.getKey(), success, errorMessage);
+    }
+
+    /**
+     * 处理跨节点 PUBLISH 消息。
+     * <p>
+     * 将消息投递给已注入的监听器（由 server 模块实现，负责转发到本地 PubSubManager）。
+     * 未注入监听器时记录告警，不丢失消息。
+     * </p>
+     *
+     * @param msg PUBLISH 消息
+     */
+    public void handlePublish(PublishMessage msg) {
+        if (publishListener != null) {
+            try {
+                publishListener.onMessage(msg.getChannel(), msg.getMessage(), msg.getSenderNodeId());
+            } catch (Exception e) {
+                logger.error("处理 PUBLISH 消息失败: channel={}", msg.getChannel(), e);
+            }
+        } else {
+            logger.debug("收到跨节点 PUBLISH 但未注入监听器，频道: {}", msg.getChannel());
         }
     }
 
@@ -872,9 +988,15 @@ public class GossipProtocol {
             node.setConfigEpochIfGreater(nodeInfo.getConfigEpoch());
 
             // 处理状态标志
+            // 角色切换/FAIL 标志需校验 configEpoch，避免陈旧 gossip 分片撤销故障转移
+            // （对齐 Redis：角色与 FAIL 变更应通过 configEpoch 校验的消息传播）
             Set<ClusterNodeState> flags = nodeInfo.getFlags();
+            long gossipEpoch = nodeInfo.getConfigEpoch();
+            long localEpoch = node.getConfigEpoch();
+            boolean gossipEpochAcceptable = gossipEpoch >= localEpoch;
             if (flags != null) {
-                if (flags.contains(ClusterNodeState.FAIL)) {
+                // FAIL 标志：仅当 gossip 纪元可接受时才应用，避免旧视图误标
+                if (gossipEpochAcceptable && flags.contains(ClusterNodeState.FAIL)) {
                     node.addState(ClusterNodeState.FAIL);
                     node.removeState(ClusterNodeState.PFAIL);
                 }
@@ -887,20 +1009,23 @@ public class GossipProtocol {
                     node.removeState(ClusterNodeState.PFAIL);
                 }
 
-                // 同步 MASTER/SLAVE 角色变更（Gossip 是 FailoverResult 丢失时的后备收敛机制）
-                if (flags.contains(ClusterNodeState.MASTER) && node.isSlave()) {
-                    node.removeState(ClusterNodeState.SLAVE);
-                    node.addState(ClusterNodeState.MASTER);
-                    node.setMasterNodeId(null);
-                }
-                if (flags.contains(ClusterNodeState.SLAVE) && node.isMaster()) {
-                    node.removeState(ClusterNodeState.MASTER);
-                    node.addState(ClusterNodeState.SLAVE);
+                // 同步 MASTER/SLAVE 角色变更：仅当 gossip 纪元严格大于本地时才切换角色，
+                // 相等时不切换，防止陈旧 gossip 把已提升的 master 翻回 slave（撤销故障转移）
+                if (gossipEpoch > localEpoch) {
+                    if (flags.contains(ClusterNodeState.MASTER) && node.isSlave()) {
+                        node.removeState(ClusterNodeState.SLAVE);
+                        node.addState(ClusterNodeState.MASTER);
+                        node.setMasterNodeId(null);
+                    }
+                    if (flags.contains(ClusterNodeState.SLAVE) && node.isMaster()) {
+                        node.removeState(ClusterNodeState.MASTER);
+                        node.addState(ClusterNodeState.SLAVE);
+                    }
                 }
 
                 // 同步 masterNodeId（从节点的主节点关系），
                 // 使 Gossip 成为 FailoverResult 丢包时的完整后备收敛机制
-                if (nodeInfo.getMasterNodeId() != null && node.isSlave()) {
+                if (gossipEpoch >= localEpoch && nodeInfo.getMasterNodeId() != null && node.isSlave()) {
                     node.setMasterNodeId(nodeInfo.getMasterNodeId());
                 }
             }

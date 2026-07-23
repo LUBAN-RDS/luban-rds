@@ -34,6 +34,39 @@ public class ClusterConfigPersisterTest {
     }
 
     @Test
+    public void testSaveCreatesMissingParentDirectoryAndCleansTempFile() throws IOException {
+        File nestedFile = new File(tempFile.getParentFile(), "missing-nodes-dir/nodes.conf");
+        try {
+            persister.save(createTestConfig(), nestedFile.getAbsolutePath());
+
+            assertTrue("父目录应自动创建", nestedFile.getParentFile().isDirectory());
+            assertTrue("nodes.conf 文件应存在", nestedFile.isFile());
+            assertTrue("nodes.conf 文件不应为空", nestedFile.length() > 0);
+            assertFalse("临时文件不应残留", new File(nestedFile.getAbsolutePath() + ".tmp").exists());
+        } finally {
+            File directory = nestedFile.getParentFile();
+            if (nestedFile.exists()) {
+                nestedFile.delete();
+            }
+            if (directory != null) {
+                directory.delete();
+            }
+        }
+    }
+
+    @Test
+    public void testSaveReplacesExistingFile() throws IOException {
+        persister.save(createTestConfig(), tempFile.getAbsolutePath());
+
+        ClusterConfig updated = createTestConfig();
+        updated.setCurrentEpoch(99);
+        persister.save(updated, tempFile.getAbsolutePath());
+
+        assertTrue(tempFile.length() > 0);
+        assertFalse(new File(tempFile.getAbsolutePath() + ".tmp").exists());
+        assertEquals(99, persister.load(tempFile.getAbsolutePath()).getCurrentEpoch());
+    }
+    @Test
     public void testGenerateNodeId() {
         String nodeId = ClusterConfigPersister.generateNodeId();
 

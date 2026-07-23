@@ -168,7 +168,8 @@ public class UpdateMessage extends GossipMessage {
     @Override
     protected void decodeBody(byte[] body) {
         if (body == null || body.length < 57) {
-            return;
+            throw new IllegalArgumentException("UPDATE 消息体长度不足: 至少需要 57 字节，实际 "
+                    + (body == null ? 0 : body.length));
         }
 
         int offset = 0;
@@ -191,6 +192,9 @@ public class UpdateMessage extends GossipMessage {
 
         // 读取IP地址长度和IP地址
         int ipLength = body[offset++] & 0xFF;
+        if (offset + ipLength + 8 > body.length) {
+            throw new IllegalArgumentException("UPDATE 消息 IP/端口段数据不足: ipLength=" + ipLength);
+        }
         if (ipLength > 0) {
             byte[] ipBytes = new byte[ipLength];
             System.arraycopy(body, offset, ipBytes, 0, ipLength);

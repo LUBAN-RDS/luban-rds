@@ -1,5 +1,6 @@
 package com.janeluo.luban.rds.server.cluster.testinfra;
 
+import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
 import com.janeluo.luban.rds.cluster.bus.ClusterBusServer;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
@@ -30,6 +31,7 @@ public class TestNode {
     private final SlotManager slotManager;
     private final ClusterStateManager stateManager;
     private final GossipProtocol gossipProtocol;
+    private final ClusterBusClient busClient;
     private final ClusterCommandHandler clusterCommandHandler;
     private ClusterBusServer clusterBusServer;
     private volatile Channel serverChannel;
@@ -54,15 +56,19 @@ public class TestNode {
         myNode.addState(ClusterNodeState.MASTER);
         clusterConfig.addNode(myNode);
 
-        this.gossipProtocol = new GossipProtocol(clusterConfig, null, 15000);
-        this.clusterCommandHandler = new ClusterCommandHandler(
-                clusterConfig, slotManager, stateManager, gossipProtocol, null);
-        this.clusterBusServer = new ClusterBusServer(
-                config.getPort(), clusterConfig, gossipProtocol);
+        // 创建 ClusterBusClient 并传给 GossipProtocol，使节点间能通过总线通信
+        this.busClient = new ClusterBusClient(clusterConfig, null);
+        this.gossipProtocol = new GossipProtocol(clusterConfig, busClient, 15000);
+        busClient.setGossipProtocol(gossipProtocol);
 
         this.memoryStore = new DefaultMemoryStore();
         this.commandHandler = new DefaultCommandHandler();
         this.protocolParser = new RedisProtocolParser();
+
+        this.clusterCommandHandler = new ClusterCommandHandler(
+                clusterConfig, slotManager, stateManager, gossipProtocol, null, memoryStore);
+        this.clusterBusServer = new ClusterBusServer(
+                config.getPort(), clusterConfig, gossipProtocol);
     }
 
     public void start() {
@@ -113,6 +119,7 @@ public class TestNode {
         System.out.println("停止测试节点 " + config.getNodeId());
         if (config.isClusterEnabled()) {
             gossipProtocol.stop();
+            busClient.close();
             clusterBusServer.stop();
         }
         closeServerChannel();
@@ -124,6 +131,7 @@ public class TestNode {
         if (!started) return;
         if (config.isClusterEnabled()) {
             gossipProtocol.stop();
+            busClient.close();
             clusterBusServer.stop();
         }
         closeServerChannel();
@@ -157,6 +165,7 @@ public class TestNode {
     public SlotManager getSlotManager() { return slotManager; }
     public ClusterCommandHandler getClusterCommandHandler() { return clusterCommandHandler; }
     public GossipProtocol getGossipProtocol() { return gossipProtocol; }
+    public ClusterBusClient getBusClient() { return busClient; }
     public ClusterBusServer getClusterBusServer() { return clusterBusServer; }
     public TestNodeConfig getConfig() { return config; }
     public boolean isStarted() { return started; }

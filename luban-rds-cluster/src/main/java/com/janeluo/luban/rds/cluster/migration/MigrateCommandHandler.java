@@ -1,6 +1,10 @@
 package com.janeluo.luban.rds.cluster.migration;
 
 import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
+import com.janeluo.luban.rds.cluster.config.ClusterConfig;
+import com.janeluo.luban.rds.cluster.gossip.GossipMessage;
+import com.janeluo.luban.rds.cluster.gossip.MigrateKeyAckMessage;
+import com.janeluo.luban.rds.cluster.gossip.MigrateKeyMessage;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.slot.SlotUtils;
 import com.janeluo.luban.rds.core.store.MemoryStore;
@@ -58,18 +62,26 @@ public class MigrateCommandHandler {
     private final ClusterBusClient busClient;
 
     /**
+     * 集群配置（用于根据 host:port 查找目标节点ID）
+     */
+    private final ClusterConfig clusterConfig;
+
+    /**
      * 构造方法
      *
      * @param migrationManager 迁移管理器
      * @param memoryStore      内存存储
      * @param busClient        集群总线客户端
+     * @param clusterConfig    集群配置
      */
     public MigrateCommandHandler(SlotMigrationManager migrationManager,
                                   MemoryStore memoryStore,
-                                  ClusterBusClient busClient) {
+                                  ClusterBusClient busClient,
+                                  ClusterConfig clusterConfig) {
         this.migrationManager = migrationManager;
         this.memoryStore = memoryStore;
         this.busClient = busClient;
+        this.clusterConfig = clusterConfig;
     }
 
     /**
@@ -163,27 +175,21 @@ public class MigrateCommandHandler {
             return "$-1\r\n"; // NOKEY
         }
 
-        // 检查键所属槽位是否正在迁移
-        int slot = SlotUtils.keyHashSlot(key);
-        if (migrationManager.isMigrating(slot)) {
-            MigrationState state = migrationManager.getMigrationState(slot);
-            if (state != null && !state.isCompleted()) {
-                return "-IOERR slot is being migrated\r\n";
-            }
+        // MIGRATE 命令应能独立工作，不强制依赖 SETSLOT MIGRATING 状态。
+        // 直接从内存存储导出键值（dumpKey 内部处理序列化）。
+        byte[] valueBytes = dumpKey(key);
+        if (valueBytes == null) {
+            return "-ERR error dumping key\r\n";
         }
 
-        // 导出键
-        ExportResult exportResult = migrationManager.exportKey(key);
-        if (!exportResult.isSuccess()) {
-            return "-ERR " + exportResult.getError() + "\r\n";
+        // 获取 TTL
+        long ttl = memoryStore.pttl(DEFAULT_DATABASE, key);
+        if (ttl < 0) {
+            ttl = 0;
         }
 
-        // 发送键到目标节点
-        boolean success = sendKeyToTarget(host, port, key, 
-                                          exportResult.getValue(), 
-                                          exportResult.getTtl(), 
-                                          timeout, 
-                                          replace);
+        // 发送键到目标节点（真正通过总线传输，等待目标节点 ACK）
+        boolean success = sendKeyToTarget(host, port, key, valueBytes, ttl, timeout, replace);
 
         if (success) {
             // 如果不是 COPY 模式，删除源键
@@ -193,6 +199,7 @@ public class MigrateCommandHandler {
             logger.info("成功迁移键 {} 到 {}:{}", key, host, port);
             return "+OK\r\n";
         } else {
+            // 发送失败时不删除源键，避免数据丢失
             return "-IOERR error transferring key\r\n";
         }
     }
@@ -225,20 +232,20 @@ public class MigrateCommandHandler {
                     continue;
                 }
 
-                // 导出键
-                ExportResult exportResult = migrationManager.exportKey(key);
-                if (!exportResult.isSuccess()) {
+                // 直接导出键值（不依赖 SETSLOT MIGRATING 状态）
+                byte[] valueBytes = dumpKey(key);
+                if (valueBytes == null) {
                     failedCount++;
                     failedKeys.add(key);
                     continue;
                 }
+                long ttl = memoryStore.pttl(DEFAULT_DATABASE, key);
+                if (ttl < 0) {
+                    ttl = 0;
+                }
 
                 // 发送键到目标节点
-                boolean success = sendKeyToTarget(host, port, key,
-                                                  exportResult.getValue(),
-                                                  exportResult.getTtl(),
-                                                  timeout,
-                                                  replace);
+                boolean success = sendKeyToTarget(host, port, key, valueBytes, ttl, timeout, replace);
 
                 if (success) {
                     // 如果不是 COPY 模式，删除源键
@@ -295,46 +302,81 @@ public class MigrateCommandHandler {
     }
 
     /**
-     * 发送键到目标节点
+     * 发送键到目标节点（通过集群总线传输，等待目标节点 ACK 确认）
      *
      * @param host    目标主机
      * @param port    目标端口
      * @param key     键名
-     * @param value   键值数据
+     * @param value   键值数据（序列化后的字节数组）
      * @param ttl     过期时间
      * @param timeout 超时时间
      * @param replace 是否替换
-     * @return 是否发送成功
+     * @return 是否发送成功（目标节点 ACK 成功才返回 true）
      */
     public boolean sendKeyToTarget(String host, int port, String key,
                                      byte[] value, long ttl, long timeout,
                                      boolean replace) {
-        // 这里需要通过集群总线或直接连接发送键到目标节点
-        // 实际实现中，需要：
-        // 1. 连接到目标节点
-        // 2. 发送 RESTORE 命令
-        // 3. 等待响应
-        
-        // 简化实现：通过 ClusterBusClient 发送迁移消息
-        // 实际生产环境需要更完善的错误处理和重试机制
-        
+        if (busClient == null || clusterConfig == null) {
+            logger.error("无法迁移键 {}: busClient 或 clusterConfig 未注入", key);
+            return false;
+        }
+
+        // 根据 host:port 查找目标节点ID
+        String targetNodeId = findNodeIdByAddress(host, port);
+        if (targetNodeId == null) {
+            logger.error("无法迁移键 {}: 未找到目标节点 {}:{}", key, host, port);
+            return false;
+        }
+
+        // 获取本节点ID作为发送者
+        ClusterNode myNode = clusterConfig.getMyNode();
+        String senderNodeId = myNode != null ? myNode.getNodeId() : null;
+        if (senderNodeId == null) {
+            logger.error("无法迁移键 {}: 本节点ID未设置", key);
+            return false;
+        }
+
         try {
-            // 构建迁移消息
-            MigrationMessage message = new MigrationMessage(
-                    key, value, ttl, replace, System.currentTimeMillis()
-            );
-            
-            // 这里需要根据 host:port 找到对应的节点ID
-            // 简化实现，假设直接发送
-            // busClient.send(targetNodeId, message);
-            
-            logger.debug("发送键 {} 到目标节点 {}:{}", key, host, port);
-            return true;
-            
+            MigrateKeyMessage message = new MigrateKeyMessage(senderNodeId, key, value, ttl, replace);
+            logger.debug("发送键 {} 到目标节点 {}:{} (nodeId={})", key, host, port, targetNodeId);
+
+            // 通过总线发送并等待 ACK
+            GossipMessage response = busClient.sendAndWait(targetNodeId, message, timeout);
+
+            if (response instanceof MigrateKeyAckMessage) {
+                MigrateKeyAckMessage ack = (MigrateKeyAckMessage) response;
+                if (ack.isSuccess()) {
+                    logger.debug("键 {} 迁移成功，目标节点已确认", key);
+                    return true;
+                } else {
+                    logger.error("键 {} 迁移失败: 目标节点返回错误: {}", key, ack.getErrorMessage());
+                    return false;
+                }
+            }
+
+            logger.error("键 {} 迁移失败: 未收到有效 ACK（响应为 null 或类型错误）", key);
+            return false;
+
         } catch (Exception e) {
             logger.error("发送键 {} 到目标节点 {}:{} 失败", key, host, port, e);
             return false;
         }
+    }
+
+    /**
+     * 根据 host:port 在集群配置中查找节点ID
+     *
+     * @param host 主机
+     * @param port 端口
+     * @return 节点ID，未找到返回 null
+     */
+    private String findNodeIdByAddress(String host, int port) {
+        for (ClusterNode node : clusterConfig.getAllNodes()) {
+            if (host.equals(node.getIp()) && port == node.getPort()) {
+                return node.getNodeId();
+            }
+        }
+        return null;
     }
 
     // ==================== 参数解析工具方法 ====================
@@ -348,7 +390,7 @@ public class MigrateCommandHandler {
     private int parsePort(String portStr) {
         try {
             int port = Integer.parseInt(portStr);
-            if (port < 0 || port > 65535) {
+            if (port <= 0 || port > 65535) {
                 throw new IllegalArgumentException("port out of range");
             }
             return port;
@@ -405,52 +447,11 @@ public class MigrateCommandHandler {
             return new byte[0];
         }
 
-        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
              ObjectOutputStream oos = new ObjectOutputStream(baos)) {
             oos.writeObject(value);
             oos.flush();
             return baos.toByteArray();
-        }
-    }
-
-    /**
-     * 迁移消息内部类
-     */
-    private static class MigrationMessage implements java.io.Serializable {
-        private static final long serialVersionUID = 1L;
-        
-        private final String key;
-        private final byte[] value;
-        private final long ttl;
-        private final boolean replace;
-        private final long timestamp;
-
-        public MigrationMessage(String key, byte[] value, long ttl, boolean replace, long timestamp) {
-            this.key = key;
-            this.value = value;
-            this.ttl = ttl;
-            this.replace = replace;
-            this.timestamp = timestamp;
-        }
-
-        public String getKey() {
-            return key;
-        }
-
-        public byte[] getValue() {
-            return value;
-        }
-
-        public long getTtl() {
-            return ttl;
-        }
-
-        public boolean isReplace() {
-            return replace;
-        }
-
-        public long getTimestamp() {
-            return timestamp;
         }
     }
 }

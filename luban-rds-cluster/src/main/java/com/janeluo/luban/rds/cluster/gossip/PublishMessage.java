@@ -100,13 +100,17 @@ public class PublishMessage extends GossipMessage {
     @Override
     protected void decodeBody(byte[] body) {
         if (body == null || body.length < 6) {
-            return;
+            throw new IllegalArgumentException("PUBLISH 消息体长度不足: 至少需要 6 字节，实际 "
+                    + (body == null ? 0 : body.length));
         }
 
         int offset = 0;
 
         // 读取频道名长度和频道名
         int channelLength = ((body[offset++] & 0xFF) << 8) | (body[offset++] & 0xFF);
+        if (offset + channelLength + 4 > body.length) {
+            throw new IllegalArgumentException("PUBLISH 消息频道段数据不足: channelLength=" + channelLength);
+        }
         if (channelLength > 0) {
             byte[] channelBytes = new byte[channelLength];
             System.arraycopy(body, offset, channelBytes, 0, channelLength);
@@ -119,6 +123,9 @@ public class PublishMessage extends GossipMessage {
                 ((body[offset++] & 0xFF) << 16) |
                 ((body[offset++] & 0xFF) << 8) |
                 (body[offset++] & 0xFF);
+        if (messageLength < 0 || offset + messageLength > body.length) {
+            throw new IllegalArgumentException("PUBLISH 消息内容段数据不足: messageLength=" + messageLength);
+        }
         if (messageLength > 0) {
             this.message = new byte[messageLength];
             System.arraycopy(body, offset, this.message, 0, messageLength);

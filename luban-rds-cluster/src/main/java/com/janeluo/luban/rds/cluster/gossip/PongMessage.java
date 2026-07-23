@@ -141,8 +141,9 @@ public class PongMessage extends GossipMessage {
         for (GossipNodeInfo nodeInfo : gossipNodes) {
             gossipNodesLength += nodeInfo.getEncodedLength();
         }
+        byte[] slotsBytes = senderSlots != null ? senderSlots.toByteArray() : new byte[0];
 
-        int totalLength = 8 + 2 + gossipNodesLength;
+        int totalLength = 8 + 2 + gossipNodesLength + 4 + slotsBytes.length;
         byte[] data = new byte[totalLength];
         int offset = 0;
 
@@ -167,13 +168,24 @@ public class PongMessage extends GossipMessage {
             offset += nodeData.length;
         }
 
+        // 写入发送方槽位集合（4字节长度 + 位图）
+        data[offset++] = (byte) (slotsBytes.length >> 24);
+        data[offset++] = (byte) (slotsBytes.length >> 16);
+        data[offset++] = (byte) (slotsBytes.length >> 8);
+        data[offset++] = (byte) slotsBytes.length;
+        if (slotsBytes.length > 0) {
+            System.arraycopy(slotsBytes, 0, data, offset, slotsBytes.length);
+            offset += slotsBytes.length;
+        }
+
         return data;
     }
 
     @Override
     protected void decodeBody(byte[] body) {
         if (body == null || body.length < 10) {
-            return;
+            throw new IllegalArgumentException("PONG 消息体长度不足: 至少需要 10 字节，实际 "
+                    + (body == null ? 0 : body.length));
         }
 
         int offset = 0;
@@ -197,6 +209,19 @@ public class PongMessage extends GossipMessage {
             GossipNodeInfo nodeInfo = new GossipNodeInfo();
             offset = nodeInfo.decode(body, offset);
             this.gossipNodes.add(nodeInfo);
+        }
+
+        // 读取发送方槽位集合（4字节长度 + 位图）
+        if (offset + 4 <= body.length) {
+            int slotsBytesLength = ((body[offset++] & 0xFF) << 24) |
+                    ((body[offset++] & 0xFF) << 16) |
+                    ((body[offset++] & 0xFF) << 8) |
+                    (body[offset++] & 0xFF);
+            if (slotsBytesLength > 0 && offset + slotsBytesLength <= body.length) {
+                byte[] slotsBytes = new byte[slotsBytesLength];
+                System.arraycopy(body, offset, slotsBytes, 0, slotsBytesLength);
+                this.senderSlots = BitSet.valueOf(slotsBytes);
+            }
         }
     }
 

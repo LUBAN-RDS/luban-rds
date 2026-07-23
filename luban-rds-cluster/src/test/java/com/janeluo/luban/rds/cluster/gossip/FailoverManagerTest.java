@@ -26,6 +26,7 @@ class FailoverManagerTest {
     static final String NODE_ID_2 = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0";
     static final String NODE_ID_3 = "c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0";
     static final String NODE_ID_4 = "d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0";
+    static final String NODE_ID_5 = "e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0";
     static final long NODE_TIMEOUT = 15000L;
 
     ClusterConfig config;
@@ -59,8 +60,13 @@ class FailoverManagerTest {
         master.addState(ClusterNodeState.FAIL);
         ClusterNode me = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
         me.addState(ClusterNodeState.MYSELF);
+        // 额外 2 个可用 master 满足 quorum（canFailover 要求多数 master 可用）
+        ClusterNode m2 = createMasterNode(NODE_ID_3, 7002);
+        ClusterNode m3 = createMasterNode(NODE_ID_4, 7003);
         config.addNode(master);
         config.addNode(me);
+        config.addNode(m2);
+        config.addNode(m3);
         config.setMyNodeId(NODE_ID_2);
 
         failoverManager.tick();
@@ -105,8 +111,13 @@ class FailoverManagerTest {
         master.addState(ClusterNodeState.FAIL);
         ClusterNode me = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
         me.addState(ClusterNodeState.MYSELF);
+        // 额外 2 个可用 master 满足 quorum
+        ClusterNode m2 = createMasterNode(NODE_ID_3, 7002);
+        ClusterNode m3 = createMasterNode(NODE_ID_4, 7003);
         config.addNode(master);
         config.addNode(me);
+        config.addNode(m2);
+        config.addNode(m3);
         config.setMyNodeId(NODE_ID_2);
 
         failoverManager.tick();  // 进入 REQUESTING
@@ -127,7 +138,13 @@ class FailoverManagerTest {
     void testMasterVotesForFirstRequest() {
         ClusterNode me = createMasterNode(NODE_ID_1, 7000);
         me.addState(ClusterNodeState.MYSELF);
+        // 候选 NODE_ID_2 是 slave，其 master NODE_ID_3 已 FAIL
+        ClusterNode failedMaster = createMasterNode(NODE_ID_3, 7002);
+        failedMaster.addState(ClusterNodeState.FAIL);
+        ClusterNode candidate = createSlaveNode(NODE_ID_2, 7001, NODE_ID_3);
         config.addNode(me);
+        config.addNode(failedMaster);
+        config.addNode(candidate);
         config.setMyNodeId(NODE_ID_1);
 
         FailoverAuthRequestMessage req = new FailoverAuthRequestMessage(
@@ -145,7 +162,12 @@ class FailoverManagerTest {
     void testIdempotentAckResend() {
         ClusterNode me = createMasterNode(NODE_ID_1, 7000);
         me.addState(ClusterNodeState.MYSELF);
+        ClusterNode failedMaster = createMasterNode(NODE_ID_3, 7002);
+        failedMaster.addState(ClusterNodeState.FAIL);
+        ClusterNode candidate = createSlaveNode(NODE_ID_2, 7001, NODE_ID_3);
         config.addNode(me);
+        config.addNode(failedMaster);
+        config.addNode(candidate);
         config.setMyNodeId(NODE_ID_1);
 
         FailoverAuthRequestMessage req = new FailoverAuthRequestMessage(NODE_ID_2, 5L, 10L, 0L);
@@ -161,13 +183,24 @@ class FailoverManagerTest {
     void testRejectOtherSlaveInSameEpoch() {
         ClusterNode me = createMasterNode(NODE_ID_1, 7000);
         me.addState(ClusterNodeState.MYSELF);
+        // 两个候选 slave，其 master 均已 FAIL
+        ClusterNode failedMaster1 = createMasterNode(NODE_ID_3, 7002);
+        failedMaster1.addState(ClusterNodeState.FAIL);
+        ClusterNode failedMaster2 = createMasterNode(NODE_ID_4, 7003);
+        failedMaster2.addState(ClusterNodeState.FAIL);
+        ClusterNode candidate2 = createSlaveNode(NODE_ID_2, 7001, NODE_ID_3);
+        ClusterNode candidate5 = createSlaveNode(NODE_ID_5, 7004, NODE_ID_4);
         config.addNode(me);
+        config.addNode(failedMaster1);
+        config.addNode(failedMaster2);
+        config.addNode(candidate2);
+        config.addNode(candidate5);
         config.setMyNodeId(NODE_ID_1);
 
         failoverManager.onAuthRequest(new FailoverAuthRequestMessage(NODE_ID_2, 5L, 10L, 0L));
         Mockito.clearInvocations(busClient);
 
-        failoverManager.onAuthRequest(new FailoverAuthRequestMessage(NODE_ID_4, 5L, 10L, 0L));
+        failoverManager.onAuthRequest(new FailoverAuthRequestMessage(NODE_ID_5, 5L, 10L, 0L));
 
         Mockito.verifyNoInteractions(busClient);
     }
@@ -210,6 +243,8 @@ class FailoverManagerTest {
         // 进入候选态
         failoverManager.tick();
         assertEquals(FailoverState.REQUESTING, failoverManager.getState());
+        // 模拟已广播 AUTH_REQUEST（设置 electionEpoch=1，使 ACK 的 voteEpoch 校验通过）
+        failoverManager.prepareRequestedStateForTest(1L);
 
         // 收到 2 个 master 授权（≥ masterCount/2+1 = 2）
         // FailoverAuthAckMessage 构造: (senderNodeId, configEpoch, currentEpoch, voteEpoch)

@@ -52,15 +52,19 @@ public class SlotUtils {
      * </p>
      *
      * <pre>
-     * 示例：
+     * 示例（与 Redis CLUSTER KEYSLOT 语义一致）：
      * - "user:1000" -> 对整个字符串计算
      * - "user:{1000}" -> 只对 "1000" 计算
      * - "{user}:1000" -> 只对 "user" 计算
      * - "user:{1000}:profile" -> 只对 "1000" 计算
      * - "user:{1000}:{profile}" -> 只对第一个 "1000" 计算
      * - "user:{}:profile" -> 对整个字符串计算（空括号无效）
-     * - "{}:{profile}" -> 只对 "profile" 计算（第一个空括号无效）
+     * - "{}:{profile}" -> 对整个字符串计算（第一个空括号无效，不继续找后续括号）
      * </pre>
+     * <p>
+     * 对齐 Redis keyHashSlot 规则：只查找第一个 '{' 及其后第一个 '}'，
+     * 若 '}' 不存在或 '{}' 之间为空，则对整个 key 计算，不继续向后查找。
+     * </p>
      *
      * @param key 键名
      * @return 槽位号 (0-16383)
@@ -74,24 +78,15 @@ public class SlotUtils {
         int start = 0;
         int end = keyBytes.length;
 
-        // 查找第一个有效的 '{...}' 模式
-        int searchPos = 0;
-        while (searchPos < keyBytes.length) {
-            // 查找 '{' 的位置
-            int s = indexOf(keyBytes, (byte) '{', searchPos);
-            if (s < 0) {
-                break;
-            }
-            // 查找对应的 '}'
+        // 对齐 Redis：只找第一个 '{'，再找其后第一个 '}'
+        // 若 '}' 不存在或 '{}' 之间为空（e == s+1），则对整个 key 计算，不继续向后查找
+        int s = indexOf(keyBytes, (byte) '{', 0);
+        if (s >= 0) {
             int e = indexOf(keyBytes, (byte) '}', s + 1);
-            // 如果找到了 '}' 且中间有内容（非空括号）
             if (e > s + 1) {
                 start = s + 1;
                 end = e;
-                break;
             }
-            // 空括号或没有找到 '}'，继续查找下一个 '{'
-            searchPos = s + 1;
         }
 
         // 计算 CRC16 并取模

@@ -125,6 +125,10 @@ class GossipProtocolTest {
         failedNode.addState(ClusterNodeState.MASTER);
         failedNode.addState(ClusterNodeState.PFAIL);
         clusterConfig.addNode(failedNode);
+        // 发送方节点需存在于集群配置中（handleNow 校验发送方身份）
+        ClusterNode senderNode = createTestNode("cccccccccccccccccccccccccccccccccccccccc", "127.0.0.1", 6390, 16390);
+        senderNode.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(senderNode);
 
         FailMessage fail = new FailMessage();
         fail.setSenderNodeId("cccccccccccccccccccccccccccccccccccccccc");

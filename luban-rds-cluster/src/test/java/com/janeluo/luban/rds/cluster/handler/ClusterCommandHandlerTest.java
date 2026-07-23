@@ -7,11 +7,17 @@ import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 import com.janeluo.luban.rds.cluster.slot.DefaultSlotManager;
 import com.janeluo.luban.rds.cluster.slot.SlotManager;
+import com.janeluo.luban.rds.core.store.MemoryStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * ClusterCommandHandler 单元测试
@@ -48,8 +54,8 @@ class ClusterCommandHandlerTest {
         // 创建状态管理器
         stateManager = new ClusterStateManager(clusterConfig);
 
-        // 创建命令处理器（不使用 Gossip 协议，不配置持久化路径）
-        handler = new ClusterCommandHandler(clusterConfig, slotManager, stateManager, null, null);
+        // 创建命令处理器（不使用 Gossip 协议，不配置持久化路径，不注入 MemoryStore）
+        handler = new ClusterCommandHandler(clusterConfig, slotManager, stateManager, null, null, null);
     }
 
     @Test
@@ -464,7 +470,7 @@ class ClusterCommandHandlerTest {
     @DisplayName("测试 CLUSTER COUNTKEYSINSLOT 命令")
     void testClusterCountkeysinslot() {
         String result = handler.handle(new String[]{"COUNTKEYSINSLOT", "0"});
-        // 当前实现返回0
+        // memoryStore 未注入且槽位 0 未分配给本节点，返回 0
         assertEquals(":0\r\n", result);
     }
 
@@ -472,8 +478,31 @@ class ClusterCommandHandlerTest {
     @DisplayName("测试 CLUSTER GETKEYSINSLOT 命令")
     void testClusterGetkeysinslot() {
         String result = handler.handle(new String[]{"GETKEYSINSLOT", "0", "10"});
-        // 当前实现返回空数组
+        // memoryStore 未注入且槽位 0 未分配给本节点，返回空数组
         assertEquals("*0\r\n", result);
+    }
+
+    @Test
+    @DisplayName("测试 GETKEYSINSLOT/COUNTKEYSINSLOT 接入 MemoryStore 后返回真实数据")
+    void testGetkeysinslotWithMemoryStore() {
+        // 分配槽位 0 给本节点
+        slotManager.addSlots(0);
+
+        MemoryStore mockStore = mock(MemoryStore.class);
+        List<String> keys = Arrays.asList("key1", "key2");
+        when(mockStore.getKeysInSlot(0, 0, 10)).thenReturn(keys);
+        when(mockStore.countKeysInSlot(0, 0)).thenReturn(2);
+
+        ClusterCommandHandler handlerWithStore = new ClusterCommandHandler(
+                clusterConfig, slotManager, stateManager, null, null, mockStore);
+
+        String getKeysResult = handlerWithStore.handle(new String[]{"GETKEYSINSLOT", "0", "10"});
+        assertTrue(getKeysResult.startsWith("*2\r\n"));
+        assertTrue(getKeysResult.contains("key1"));
+        assertTrue(getKeysResult.contains("key2"));
+
+        String countResult = handlerWithStore.handle(new String[]{"COUNTKEYSINSLOT", "0"});
+        assertEquals(":2\r\n", countResult);
     }
 
     @Test
@@ -502,7 +531,7 @@ class ClusterCommandHandlerTest {
     void testClusterSaveconfigNullPath() {
         // handler 创建时传入 null 路径
         ClusterCommandHandler nullPathHandler = new ClusterCommandHandler(
-                clusterConfig, slotManager, stateManager, null, null);
+                clusterConfig, slotManager, stateManager, null, null, null);
         String result = nullPathHandler.handle(new String[]{"SAVECONFIG"});
         assertTrue(result.contains("-ERR"), "路径为 null 时应返回错误");
         assertTrue(result.contains("not configured"));
@@ -517,7 +546,7 @@ class ClusterCommandHandlerTest {
         try {
             // 创建带文件路径的 handler
             ClusterCommandHandler persistHandler = new ClusterCommandHandler(
-                    clusterConfig, slotManager, stateManager, null, tempFilePath);
+                    clusterConfig, slotManager, stateManager, null, tempFilePath, null);
             String result = persistHandler.handle(new String[]{"SAVECONFIG"});
             assertEquals("+OK\r\n", result);
 

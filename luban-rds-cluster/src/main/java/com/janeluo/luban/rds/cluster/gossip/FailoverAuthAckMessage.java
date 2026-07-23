@@ -123,7 +123,8 @@ public class FailoverAuthAckMessage extends GossipMessage {
     @Override
     protected void decodeBody(byte[] body) {
         if (body == null || body.length < 24) {
-            return;
+            throw new IllegalArgumentException("FAILOVER_AUTH_ACK 消息体长度不足: 需要 24 字节，实际 "
+                    + (body == null ? 0 : body.length));
         }
 
         int offset = 0;

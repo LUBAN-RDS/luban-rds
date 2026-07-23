@@ -170,7 +170,7 @@ class ClusterCommandIntegrationTest extends AbstractClusterHandlerTest {
 
         ClusterStateManager stateManager = new ClusterStateManager(clusterConfig);
         ClusterCommandHandler clusterCommandHandler = new ClusterCommandHandler(
-                clusterConfig, slotManager, stateManager, null, null);
+                clusterConfig, slotManager, stateManager, null, null, null);
 
         RedisServerHandler handler = new RedisServerHandler(
                 memoryStore, commandHandler, protocolParser, 0,

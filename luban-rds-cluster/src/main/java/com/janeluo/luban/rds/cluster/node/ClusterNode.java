@@ -55,32 +55,32 @@ public class ClusterNode implements Serializable {
     /**
      * 主节点ID（仅从节点使用，存储其主节点的ID）
      */
-    private String masterNodeId;
+    private volatile String masterNodeId;
 
     /**
      * 分配的槽位（16384位，每位代表一个槽位）
      */
-    private BitSet slots;
+    private volatile BitSet slots;
 
     /**
      * 配置纪元（用于集群配置版本控制）
      */
-    private long configEpoch;
+    private volatile long configEpoch;
 
     /**
      * 最后一次发送PING的时间（毫秒时间戳）
      */
-    private long lastPingTime;
+    private volatile long lastPingTime;
 
     /**
      * 最后一次收到PONG的时间（毫秒时间戳）
      */
-    private long lastPongTime;
+    private volatile long lastPongTime;
 
     /**
      * 连接信息
      */
-    private ClusterLink link;
+    private volatile ClusterLink link;
 
     /**
      * 默认构造方法
@@ -172,21 +172,27 @@ public class ClusterNode implements Serializable {
         this.busPort = busPort;
     }
 
-    public Set<ClusterNodeState> getState() {
-        return state;
+    /**
+     * 获取节点状态标志集合（返回防御性副本，避免外部绕过 addState/removeState 直接修改）
+     *
+     * @return 状态标志集合的副本
+     */
+    public synchronized Set<ClusterNodeState> getState() {
+        if (state.isEmpty()) {
+            return EnumSet.noneOf(ClusterNodeState.class);
+        }
+        return EnumSet.copyOf(state);
     }
 
-    public void setState(Set<ClusterNodeState> state) {
-        if (state == null) {
+    public synchronized void setState(Set<ClusterNodeState> state) {
+        if (state == null || state.isEmpty()) {
             this.state = EnumSet.noneOf(ClusterNodeState.class);
-        } else if (state instanceof EnumSet) {
-            this.state = EnumSet.copyOf(state);
         } else {
             this.state = EnumSet.copyOf(state);
         }
     }
 
-    public String getMasterNodeId() {
+    public synchronized String getMasterNodeId() {
         return masterNodeId;
     }
 
@@ -194,15 +200,24 @@ public class ClusterNode implements Serializable {
         this.masterNodeId = masterNodeId;
     }
 
-    public BitSet getSlots() {
-        return slots;
+    /**
+     * 获取此节点拥有的槽位集合（返回防御性副本）。
+     * <p>
+     * 返回 clone 而非内部引用，避免外部直接 set/clear 破坏一致性，
+     * 也避免并发遍历与 addSlot/removeSlot 竞态。
+     * </p>
+     *
+     * @return 槽位集合的副本
+     */
+    public synchronized BitSet getSlots() {
+        return (BitSet) slots.clone();
     }
 
     public synchronized void setSlots(BitSet slots) {
         this.slots = slots != null ? slots : new BitSet(CLUSTER_SLOTS);
     }
 
-    public long getConfigEpoch() {
+    public synchronized long getConfigEpoch() {
         return configEpoch;
     }
 
@@ -336,7 +351,7 @@ public class ClusterNode implements Serializable {
      * @param start 起始槽位（包含）
      * @param end   结束槽位（包含）
      */
-    public void addSlotRange(int start, int end) {
+    public synchronized void addSlotRange(int start, int end) {
         validateSlot(start);
         validateSlot(end);
         if (start > end) {
@@ -416,7 +431,7 @@ public class ClusterNode implements Serializable {
      *
      * @return 时间间隔（毫秒）
      */
-    public long getTimeSinceLastPong() {
+    public synchronized long getTimeSinceLastPong() {
         return System.currentTimeMillis() - lastPongTime;
     }
 
@@ -436,7 +451,7 @@ public class ClusterNode implements Serializable {
      *
      * @return 新的配置纪元值
      */
-    public long incrementConfigEpoch() {
+    public synchronized long incrementConfigEpoch() {
         return ++this.configEpoch;
     }
 
@@ -477,7 +492,7 @@ public class ClusterNode implements Serializable {
     /**
      * 重置节点状态（保留ID和地址信息）
      */
-    public void reset() {
+    public synchronized void reset() {
         this.state.clear();
         this.masterNodeId = null;
         this.slots.clear();

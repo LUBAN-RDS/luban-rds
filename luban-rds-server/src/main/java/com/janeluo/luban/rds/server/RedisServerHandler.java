@@ -13,6 +13,7 @@ import com.janeluo.luban.rds.core.slowlog.SlowLogManager;
 import com.janeluo.luban.rds.protocol.Command;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.handler.ClusterCommandHandler;
+import com.janeluo.luban.rds.cluster.migration.MigrateCommandHandler;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.slot.SlotManager;
 import com.janeluo.luban.rds.cluster.slot.SlotUtils;
@@ -84,7 +85,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 "XADD","XLEN","XRANGE","XREVRANGE","XDEL","XTRIM","XREAD","XINFO",
                 "XGROUP","XREADGROUP","XACK","XPENDING","XCLAIM","XAUTOCLAIM",
                 // 集群命令
-                "ASKING","READONLY","READWRITE","CLUSTER",
+                "ASKING","READONLY","READWRITE","CLUSTER","MIGRATE",
                 // 复制命令
                 "SLAVEOF","REPLICAOF","PSYNC","SYNC","REPLCONF","WAIT"
         };
@@ -188,6 +189,9 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     
     // 集群命令处理器
     private ClusterCommandHandler clusterCommandHandler;
+
+    // MIGRATE 命令处理器（集群模式下节点间键迁移）
+    private MigrateCommandHandler migrateCommandHandler;
     
     public RedisServerHandler(MemoryStore memoryStore, DefaultCommandHandler commandHandler, RedisProtocolParser protocolParser) {
         this(memoryStore, commandHandler, protocolParser, 0, false, null, null);
@@ -241,6 +245,13 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
      */
     public void setClusterCommandHandler(ClusterCommandHandler handler) {
         this.clusterCommandHandler = handler;
+    }
+
+    /**
+     * 设置 MIGRATE 命令处理器
+     */
+    public void setMigrateCommandHandler(MigrateCommandHandler handler) {
+        this.migrateCommandHandler = handler;
     }
     
     @Override
@@ -561,6 +572,28 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     }
                 } else {
                     ByteBuf errorBuffer = protocolParser.serialize("-ERR cluster command not configured\r\n");
+                    if (errorBuffer != null && errorBuffer.isReadable()) {
+                        ctx.writeAndFlush(errorBuffer);
+                    } else if (errorBuffer != null) {
+                        errorBuffer.release();
+                    }
+                }
+                return;
+            } else if ("MIGRATE".equals(commandName) && clusterEnabled) {
+                // 处理 MIGRATE 命令（通过集群总线将键迁移到目标节点）
+                logger.debug("Handling MIGRATE command");
+                if (migrateCommandHandler != null) {
+                    String response = migrateCommandHandler.handle(args);
+                    if (response != null) {
+                        ByteBuf responseBuffer = protocolParser.serialize(response);
+                        if (responseBuffer != null && responseBuffer.isReadable()) {
+                            ctx.writeAndFlush(responseBuffer);
+                        } else if (responseBuffer != null) {
+                            responseBuffer.release();
+                        }
+                    }
+                } else {
+                    ByteBuf errorBuffer = protocolParser.serialize("-ERR migrate command not configured\r\n");
                     if (errorBuffer != null && errorBuffer.isReadable()) {
                         ctx.writeAndFlush(errorBuffer);
                     } else if (errorBuffer != null) {

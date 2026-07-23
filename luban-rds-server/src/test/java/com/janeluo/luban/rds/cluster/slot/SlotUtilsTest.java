@@ -110,10 +110,12 @@ class SlotUtilsTest {
         }
 
         @Test
-        @DisplayName("空括号后跟随有效括号，使用第一个有效括号")
+        @DisplayName("空括号后跟随有效括号，对整个键计算（对齐 Redis）")
         void testEmptyThenValidBraces() {
-            // "{}:{profile}" 第一个空括号无效，使用 "profile"
-            assertEquals(SlotUtils.keyHashSlot("profile"), SlotUtils.keyHashSlot("{}:{profile}"));
+            // "{}:{profile}" 第一个空括号无效，对齐 Redis 对整个 key 计算，不使用 "profile"
+            byte[] fullKey = "{}:{profile}".getBytes(StandardCharsets.UTF_8);
+            int crc = SlotUtils.crc16(fullKey, 0, fullKey.length);
+            assertEquals(crc % SlotUtils.CLUSTER_SLOTS, SlotUtils.keyHashSlot("{}:{profile}"));
         }
 
         @Test

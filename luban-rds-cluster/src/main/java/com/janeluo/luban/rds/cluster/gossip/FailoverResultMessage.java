@@ -123,13 +123,18 @@ public class FailoverResultMessage extends GossipMessage {
     @Override
     protected void decodeBody(byte[] body) {
         if (body == null || body.length < 40 + 8) {
-            return;
+            throw new IllegalArgumentException(
+                    "FAILOVER_RESULT 消息体长度不足: 至少需要 48 字节，实际 "
+                            + (body == null ? 0 : body.length));
         }
         int offset = 0;
 
         byte[] idBytes = new byte[40];
         System.arraycopy(body, offset, idBytes, 0, 40);
         this.winnerNodeId = new String(idBytes, StandardCharsets.UTF_8).trim();
+        if (this.winnerNodeId.isEmpty()) {
+            throw new IllegalArgumentException("FAILOVER_RESULT 消息 winnerNodeId 为空");
+        }
         offset += 40;
 
         this.newConfigEpoch = 0L;
@@ -137,7 +142,7 @@ public class FailoverResultMessage extends GossipMessage {
             this.newConfigEpoch = (this.newConfigEpoch << 8) | (body[offset++] & 0xFFL);
         }
 
-        // inheritedSlots：补齐到 SLOTS_BYTES 长度
+        // inheritedSlots：补齐到 SLOTS_BYTES 长度（不足时剩余位补 0，不抛异常以兼容正常广播）
         int slotLen = Math.min(SLOTS_BYTES, body.length - offset);
         byte[] slotBytes = new byte[SLOTS_BYTES];
         System.arraycopy(body, offset, slotBytes, 0, slotLen);

@@ -66,6 +66,11 @@ public class ClusterBusCodec {
          */
         private static final int HEADER_LENGTH = GossipMessage.HEADER_LENGTH;
 
+        /**
+         * 单条消息体最大长度（16MB），超过视为非法并关闭连接
+         */
+        private static final int MAX_BODY_LENGTH = 16 * 1024 * 1024;
+
         @Override
         protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
             // 循环处理可能存在的多条消息（粘包）
@@ -81,8 +86,8 @@ public class ClusterBusCodec {
                 byte typeCode = in.readByte();
                 GossipMessageType type = GossipMessageType.fromCode(typeCode);
                 if (type == null) {
-                    logger.error("未知的消息类型编码: {}", typeCode);
-                    in.clear();
+                    logger.error("未知的消息类型编码: {}，关闭连接", typeCode);
+                    ctx.close();
                     return;
                 }
 
@@ -90,9 +95,9 @@ public class ClusterBusCodec {
                 int messageLength = in.readInt();
 
                 // 检查消息长度是否合法
-                if (messageLength < 0) {
-                    logger.error("消息长度无效: {}", messageLength);
-                    in.clear();
+                if (messageLength < 0 || messageLength > MAX_BODY_LENGTH) {
+                    logger.error("消息长度非法: {}，关闭连接", messageLength);
+                    ctx.close();
                     return;
                 }
 
@@ -121,9 +126,11 @@ public class ClusterBusCodec {
                                 message.getType(), totalLength, message.getSenderNodeId());
                     }
                 } catch (Exception e) {
-                    logger.error("解码消息失败: type={}, length={}, error={}",
+                    // 解码失败（毒消息）关闭连接，避免反复触发
+                    logger.error("解码消息失败: type={}, length={}, error={}，关闭连接",
                             type, totalLength, e.getMessage(), e);
-                    // 继续处理下一条消息
+                    ctx.close();
+                    return;
                 }
             }
         }
