@@ -1,9 +1,13 @@
 package com.janeluo.luban.rds.cluster.gossip;
 
+import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * PING 消息
@@ -41,11 +45,32 @@ public class PingMessage extends GossipMessage {
     private BitSet senderSlots;
 
     /**
+     * 发送方（myNode）配置纪元
+     * <p>
+     * 与 {@link #senderFlags}、{@link #senderMasterNodeId} 配合，使接收方能基于纪元裁决
+     * 同步发送方角色。{@code selectGossipNodes} 排除本节点，发送方自己的角色无法经
+     * gossip section 传播，因此必须在消息头显式携带。
+     * </p>
+     */
+    private long senderConfigEpoch;
+
+    /**
+     * 发送方（myNode）角色状态标志（MASTER/SLAVE 等）
+     */
+    private Set<ClusterNodeState> senderFlags;
+
+    /**
+     * 发送方（myNode）的主节点ID，仅从节点有效；主节点为 null
+     */
+    private String senderMasterNodeId;
+
+    /**
      * 默认构造方法
      */
     public PingMessage() {
         this.type = GossipMessageType.PING;
         this.gossipNodes = new ArrayList<>();
+        this.senderFlags = EnumSet.noneOf(ClusterNodeState.class);
     }
 
     /**
@@ -58,6 +83,7 @@ public class PingMessage extends GossipMessage {
         super(senderNodeId, GossipMessageType.PING);
         this.pingTime = pingTime;
         this.gossipNodes = new ArrayList<>();
+        this.senderFlags = EnumSet.noneOf(ClusterNodeState.class);
     }
 
     /**
@@ -71,6 +97,7 @@ public class PingMessage extends GossipMessage {
         super(senderNodeId, GossipMessageType.PING);
         this.pingTime = pingTime;
         this.gossipNodes = gossipNodes != null ? new ArrayList<>(gossipNodes) : new ArrayList<>();
+        this.senderFlags = EnumSet.noneOf(ClusterNodeState.class);
     }
 
     // ==================== Getter/Setter 方法 ====================
@@ -109,7 +136,59 @@ public class PingMessage extends GossipMessage {
         this.senderSlots = senderSlots;
     }
 
-    // ==================== 节点管理方法 ====================
+    /**
+     * 获取发送方配置纪元
+     *
+     * @return 配置纪元
+     */
+    public long getSenderConfigEpoch() {
+        return senderConfigEpoch;
+    }
+
+    /**
+     * 设置发送方配置纪元
+     *
+     * @param senderConfigEpoch 配置纪元
+     */
+    public void setSenderConfigEpoch(long senderConfigEpoch) {
+        this.senderConfigEpoch = senderConfigEpoch;
+    }
+
+    /**
+     * 获取发送方角色状态标志
+     *
+     * @return 状态标志集合，不为 null
+     */
+    public Set<ClusterNodeState> getSenderFlags() {
+        return senderFlags;
+    }
+
+    /**
+     * 设置发送方角色状态标志
+     *
+     * @param senderFlags 状态标志集合，null 视为空集
+     */
+    public void setSenderFlags(Set<ClusterNodeState> senderFlags) {
+        this.senderFlags = senderFlags != null ? EnumSet.copyOf(senderFlags) : EnumSet.noneOf(ClusterNodeState.class);
+    }
+
+    /**
+     * 获取发送方主节点ID
+     *
+     * @return 主节点ID，主节点或未知时为 null
+     */
+    public String getSenderMasterNodeId() {
+        return senderMasterNodeId;
+    }
+
+    /**
+     * 设置发送方主节点ID
+     *
+     * @param senderMasterNodeId 主节点ID
+     */
+    public void setSenderMasterNodeId(String senderMasterNodeId) {
+        this.senderMasterNodeId = senderMasterNodeId;
+    }
 
     /**
      * 添加 Gossip 节点信息
@@ -143,7 +222,11 @@ public class PingMessage extends GossipMessage {
         }
         byte[] slotsBytes = senderSlots != null ? senderSlots.toByteArray() : new byte[0];
 
-        int totalLength = 8 + 2 + gossipNodesLength + 4 + slotsBytes.length;
+        int flagsCount = senderFlags.size();
+        int masterNodeIdLength = senderMasterNodeId != null ? GossipNodeInfo.NODE_ID_LENGTH : 0;
+
+        int totalLength = 8 + 2 + gossipNodesLength + 4 + slotsBytes.length
+                + 8 + 1 + flagsCount * 2 + 1 + masterNodeIdLength;
         byte[] data = new byte[totalLength];
         int offset = 0;
 
@@ -176,6 +259,34 @@ public class PingMessage extends GossipMessage {
         if (slotsBytes.length > 0) {
             System.arraycopy(slotsBytes, 0, data, offset, slotsBytes.length);
             offset += slotsBytes.length;
+        }
+
+        // 写入发送方配置纪元（8字节，大端序）
+        data[offset++] = (byte) (senderConfigEpoch >> 56);
+        data[offset++] = (byte) (senderConfigEpoch >> 48);
+        data[offset++] = (byte) (senderConfigEpoch >> 40);
+        data[offset++] = (byte) (senderConfigEpoch >> 32);
+        data[offset++] = (byte) (senderConfigEpoch >> 24);
+        data[offset++] = (byte) (senderConfigEpoch >> 16);
+        data[offset++] = (byte) (senderConfigEpoch >> 8);
+        data[offset++] = (byte) senderConfigEpoch;
+
+        // 写入发送方角色状态标志（1字节数量 + 每个2字节）
+        data[offset++] = (byte) flagsCount;
+        for (ClusterNodeState flag : senderFlags) {
+            short flagCode = (short) flag.ordinal();
+            data[offset++] = (byte) (flagCode >> 8);
+            data[offset++] = (byte) flagCode;
+        }
+
+        // 写入发送方 masterNodeId（1字节标志 + 可选40字节）
+        if (senderMasterNodeId != null) {
+            data[offset++] = 1;
+            byte[] masterIdBytes = senderMasterNodeId.getBytes(StandardCharsets.UTF_8);
+            System.arraycopy(masterIdBytes, 0, data, offset, GossipNodeInfo.NODE_ID_LENGTH);
+            offset += GossipNodeInfo.NODE_ID_LENGTH;
+        } else {
+            data[offset++] = 0;
         }
 
         return data;
@@ -221,6 +332,56 @@ public class PingMessage extends GossipMessage {
                 byte[] slotsBytes = new byte[slotsBytesLength];
                 System.arraycopy(body, offset, slotsBytes, 0, slotsBytesLength);
                 this.senderSlots = BitSet.valueOf(slotsBytes);
+                offset += slotsBytesLength;
+            }
+        }
+
+        // 读取发送方配置纪元（8字节，大端序）
+        if (offset + 8 <= body.length) {
+            this.senderConfigEpoch = ((long) (body[offset++] & 0xFF) << 56) |
+                    ((long) (body[offset++] & 0xFF) << 48) |
+                    ((long) (body[offset++] & 0xFF) << 40) |
+                    ((long) (body[offset++] & 0xFF) << 32) |
+                    ((long) (body[offset++] & 0xFF) << 24) |
+                    ((long) (body[offset++] & 0xFF) << 16) |
+                    ((long) (body[offset++] & 0xFF) << 8) |
+                    ((long) (body[offset++] & 0xFF));
+        }
+
+        // 读取发送方角色状态标志（1字节数量 + 每个2字节）
+        if (this.senderFlags == null) {
+            this.senderFlags = EnumSet.noneOf(ClusterNodeState.class);
+        } else {
+            this.senderFlags.clear();
+        }
+        if (offset + 1 <= body.length) {
+            int flagsCount = body[offset++] & 0xFF;
+            if (offset + flagsCount * 2L <= body.length) {
+                ClusterNodeState[] states = ClusterNodeState.values();
+                for (int i = 0; i < flagsCount; i++) {
+                    short flagCode = (short) (((body[offset++] & 0xFF) << 8) | (body[offset++] & 0xFF));
+                    if (flagCode >= 0 && flagCode < states.length) {
+                        this.senderFlags.add(states[flagCode]);
+                    }
+                }
+            }
+        }
+
+        // 读取发送方 masterNodeId（1字节标志 + 可选40字节）
+        if (offset + 1 <= body.length) {
+            int hasMasterId = body[offset++] & 0xFF;
+            if (hasMasterId == 1) {
+                if (offset + GossipNodeInfo.NODE_ID_LENGTH <= body.length) {
+                    byte[] masterIdBytes = new byte[GossipNodeInfo.NODE_ID_LENGTH];
+                    System.arraycopy(body, offset, masterIdBytes, 0, GossipNodeInfo.NODE_ID_LENGTH);
+                    String rawMasterId = new String(masterIdBytes, StandardCharsets.UTF_8);
+                    int mid = rawMasterId.indexOf(0);
+                    this.senderMasterNodeId = mid >= 0 ? rawMasterId.substring(0, mid) : rawMasterId;
+                    if (this.senderMasterNodeId.isEmpty()) {
+                        this.senderMasterNodeId = null;
+                    }
+                    offset += GossipNodeInfo.NODE_ID_LENGTH;
+                }
             }
         }
     }

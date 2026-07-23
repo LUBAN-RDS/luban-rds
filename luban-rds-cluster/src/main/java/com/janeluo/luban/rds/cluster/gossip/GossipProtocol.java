@@ -346,6 +346,11 @@ public class GossipProtocol {
         );
         // 携带发送方槽位，使对端能同步槽位归属
         ping.setSenderSlots(myNode.getSlots());
+        // 携带发送方角色与 masterNodeId，使对端能同步发送方的 master/slave 角色
+        // （selectGossipNodes 排除本节点，自身角色无法经 gossip section 传播）
+        ping.setSenderConfigEpoch(myNode.getConfigEpoch());
+        ping.setSenderFlags(buildSenderFlags(myNode));
+        ping.setSenderMasterNodeId(myNode.getMasterNodeId());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -400,6 +405,10 @@ public class GossipProtocol {
         PongMessage pong = new PongMessage(myNode.getNodeId(), System.currentTimeMillis());
         // 携带发送方槽位，使对端能同步槽位归属
         pong.setSenderSlots(myNode.getSlots());
+        // 携带发送方角色与 masterNodeId，使对端能同步发送方的 master/slave 角色
+        pong.setSenderConfigEpoch(myNode.getConfigEpoch());
+        pong.setSenderFlags(buildSenderFlags(myNode));
+        pong.setSenderMasterNodeId(myNode.getMasterNodeId());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -479,6 +488,9 @@ public class GossipProtocol {
         meet.setCurrentEpoch(clusterConfig.getCurrentEpoch());
         // 携带发送方槽位，使对端能同步槽位归属
         meet.setSenderSlots(myNode.getSlots());
+        // 携带发送方角色与 masterNodeId，使对端能同步发送方的 master/slave 角色
+        meet.setSenderFlags(buildSenderFlags(myNode));
+        meet.setSenderMasterNodeId(myNode.getMasterNodeId());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -843,6 +855,11 @@ public class GossipProtocol {
             // 同步发送方槽位归属（基于发送方已记录的配置纪元裁决冲突）
             clusterConfig.syncSlotsFromNode(senderNodeId, ping.getSenderSlots(),
                     senderNode.getConfigEpoch());
+
+            // 同步发送方角色（master/slave）与 masterNodeId
+            // selectGossipNodes 排除本节点，发送方自身角色只能通过消息头传播
+            syncSenderRole(senderNode, ping.getSenderFlags(),
+                    ping.getSenderMasterNodeId(), ping.getSenderConfigEpoch());
         }
     }
 
@@ -871,6 +888,10 @@ public class GossipProtocol {
             // 同步发送方槽位归属（基于发送方已记录的配置纪元裁决冲突）
             clusterConfig.syncSlotsFromNode(senderNodeId, pong.getSenderSlots(),
                     senderNode.getConfigEpoch());
+
+            // 同步发送方角色（master/slave）与 masterNodeId
+            syncSenderRole(senderNode, pong.getSenderFlags(),
+                    pong.getSenderMasterNodeId(), pong.getSenderConfigEpoch());
         }
     }
 
@@ -919,6 +940,10 @@ public class GossipProtocol {
             // 同步发送方槽位归属（使用 MEET 携带的发送方配置纪元裁决冲突）
             clusterConfig.syncSlotsFromNode(senderNodeId, meet.getSenderSlots(),
                     meet.getSenderConfigEpoch());
+
+            // 同步发送方角色（master/slave）与 masterNodeId
+            syncSenderRole(senderNode, meet.getSenderFlags(),
+                    meet.getSenderMasterNodeId(), meet.getSenderConfigEpoch());
         }
     }
 
@@ -1083,6 +1108,9 @@ public class GossipProtocol {
         meet.setCurrentEpoch(clusterConfig.getCurrentEpoch());
         // 携带发送方槽位，使对端能同步槽位归属
         meet.setSenderSlots(myNode.getSlots());
+        // 携带发送方角色与 masterNodeId，使对端能同步发送方的 master/slave 角色
+        meet.setSenderFlags(buildSenderFlags(myNode));
+        meet.setSenderMasterNodeId(myNode.getMasterNodeId());
 
         // 携带 Gossip 节点信息，便于对端同步拓扑
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -1103,6 +1131,68 @@ public class GossipProtocol {
                         node.getNodeId(), node.getFullAddress(), future.cause());
             }
         });
+    }
+
+    /**
+     * 构建发送方角色状态标志集合，用于在 PING/PONG/MEET 消息头中携带发送方角色。
+     *
+     * @param node 发送方节点（myNode）
+     * @return 角色状态标志集合（MASTER/SLAVE），不含 MYSELF/HANDSHAKE 等本地态
+     */
+    private Set<ClusterNodeState> buildSenderFlags(ClusterNode node) {
+        Set<ClusterNodeState> flags = EnumSet.noneOf(ClusterNodeState.class);
+        if (node.isMaster()) {
+            flags.add(ClusterNodeState.MASTER);
+        }
+        if (node.isSlave()) {
+            flags.add(ClusterNodeState.SLAVE);
+        }
+        return flags;
+    }
+
+    /**
+     * 基于消息头携带的发送方角色信息同步本地对发送方节点的角色视图。
+     * <p>
+     * 与 {@link #processGossipNodes} 中同步第三方节点角色的策略一致：
+     * <ul>
+     *   <li>仅当 {@code configEpoch > localEpoch} 时切换发送方角色（MASTER↔SLAVE），
+     *       防止陈旧消息回退已完成的故障转移；</li>
+     *   <li>仅当 {@code configEpoch >= localEpoch} 且发送方已是 slave 时同步 masterNodeId。</li>
+     * </ul>
+     * 这是修复 {@code CLUSTER REPLICATE} 后从节点角色无法经 Gossip 传播的关键：
+     * {@code selectGossipNodes} 排除本节点，节点自身角色只能通过消息头传播。
+     * </p>
+     *
+     * @param sender        发送方节点（本地视图）
+     * @param flags         消息头携带的发送方角色标志
+     * @param masterNodeId  消息头携带的发送方 masterNodeId，null 表示主节点或不适用
+     * @param configEpoch   消息头携带的发送方配置纪元
+     */
+    private void syncSenderRole(ClusterNode sender, Set<ClusterNodeState> flags,
+                                String masterNodeId, long configEpoch) {
+        if (sender == null || flags == null) {
+            return;
+        }
+        long localEpoch = sender.getConfigEpoch();
+        boolean epochAcceptable = configEpoch >= localEpoch;
+
+        // 角色切换：仅当消息纪元严格大于本地纪元时才切换，防止陈旧 gossip 回退已提升的 master
+        if (configEpoch > localEpoch) {
+            if (flags.contains(ClusterNodeState.MASTER) && sender.isSlave()) {
+                sender.removeState(ClusterNodeState.SLAVE);
+                sender.addState(ClusterNodeState.MASTER);
+                sender.setMasterNodeId(null);
+            }
+            if (flags.contains(ClusterNodeState.SLAVE) && sender.isMaster()) {
+                sender.removeState(ClusterNodeState.MASTER);
+                sender.addState(ClusterNodeState.SLAVE);
+            }
+        }
+
+        // 同步 masterNodeId：纪元可接受、携带了 masterNodeId 且节点已是 slave 时才同步
+        if (epochAcceptable && masterNodeId != null && sender.isSlave()) {
+            sender.setMasterNodeId(masterNodeId);
+        }
     }
 
     /**
