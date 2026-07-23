@@ -61,7 +61,7 @@ public class ClusterConfig implements Serializable {
     /**
      * 集群状态：ok/fail
      */
-    private String state;
+    private volatile String state;
 
     /**
      * 集群配置脏标记（用于自动触发 nodes.conf 持久化）
@@ -269,6 +269,13 @@ public class ClusterConfig implements Serializable {
             ClusterNode node = nodes.get(nodeId);
             if (node != null) {
                 node.addSlot(slot);
+            }
+        }
+        // 所有权转移时，清理旧节点的槽位记录，避免残留
+        if (oldNodeId != null && !oldNodeId.equals(nodeId)) {
+            ClusterNode oldNode = nodes.get(oldNodeId);
+            if (oldNode != null) {
+                oldNode.removeSlot(slot);
             }
         }
     }

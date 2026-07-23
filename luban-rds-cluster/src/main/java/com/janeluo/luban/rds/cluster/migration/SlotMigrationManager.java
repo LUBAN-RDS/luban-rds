@@ -406,6 +406,8 @@ public class SlotMigrationManager {
         
         // 更新槽位归属
         slotManager.setSlotOwner(slot, newOwnerId);
+        // 同步更新 ClusterConfig 的槽位分配表
+        clusterConfig.setSlotOwner(slot, newOwnerId);
     }
 
     /**

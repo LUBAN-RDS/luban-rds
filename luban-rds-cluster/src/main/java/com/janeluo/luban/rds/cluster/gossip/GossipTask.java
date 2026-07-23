@@ -190,7 +190,12 @@ public class GossipTask implements Runnable {
             int majority = (totalMasters / 2) + 1;
 
             if (availableMasters >= majority) {
-                newState = "ok";
+                // 多数主节点存活，还需确保所有 16384 个槽位已分配
+                if (gossipProtocol.getClusterConfig().areAllSlotsAssigned()) {
+                    newState = "ok";
+                } else {
+                    newState = "fail";
+                }
             } else {
                 newState = "fail";
             }

@@ -584,6 +584,7 @@ public class ClusterCommandHandler {
         // 如果是从节点，可以直接移除
         if (node.isSlave()) {
             clusterConfig.removeNode(nodeId);
+            clearSlotManagerForNode(nodeId);
             logger.info("CLUSTER FORGET: removed slave node {}", nodeId);
             notifyTopologyChanged();
             return "+OK\r\n";
@@ -597,6 +598,7 @@ public class ClusterCommandHandler {
         // 添加到延迟移除列表
         forgetNodes.put(nodeId, System.currentTimeMillis() + FORGET_DELAY_MS);
         clusterConfig.removeNode(nodeId);
+        clearSlotManagerForNode(nodeId);
 
         logger.info("CLUSTER FORGET: removed master node {} (with 60s delay)", nodeId);
         notifyTopologyChanged();
@@ -760,11 +762,16 @@ public class ClusterCommandHandler {
             if (myNode != null) {
                 for (int slot : slots) {
                     myNode.removeSlot(slot);
+                    // 同步更新 ClusterConfig 的槽位分配表
+                    clusterConfig.clearSlot(slot);
                 }
             }
 
             // 增加配置纪元
             clusterConfig.incrementEpoch();
+
+            // 更新集群状态（移除槽位可能使集群状态变化）
+            stateManager.updateClusterState();
 
             logger.info("CLUSTER DELSLOTS: removed {} slots", slots.length);
             notifyTopologyChanged();
@@ -811,6 +818,8 @@ public class ClusterCommandHandler {
                 }
                 slotMigrationState.put(slot, "IMPORTING");
                 slotMigrationTarget.put(slot, sourceNodeId);
+                // 同步更新 SlotManager 的导入状态
+                slotManager.setSlotImporting(slot, sourceNodeId);
                 logger.info("CLUSTER SETSLOT: slot {} set to IMPORTING from {}", slot, sourceNodeId);
                 return "+OK\r\n";
 
@@ -829,6 +838,8 @@ public class ClusterCommandHandler {
                 }
                 slotMigrationState.put(slot, "MIGRATING");
                 slotMigrationTarget.put(slot, targetNodeId);
+                // 同步更新 SlotManager 的迁移状态
+                slotManager.setSlotMigrating(slot, targetNodeId);
                 logger.info("CLUSTER SETSLOT: slot {} set to MIGRATING to {}", slot, targetNodeId);
                 return "+OK\r\n";
 
@@ -836,6 +847,9 @@ public class ClusterCommandHandler {
                 // 清除槽位迁移状态
                 slotMigrationState.remove(slot);
                 slotMigrationTarget.remove(slot);
+                // 同步清除 SlotManager 的迁移/导入状态
+                slotManager.setSlotImporting(slot, null);
+                slotManager.setSlotMigrating(slot, null);
                 logger.info("CLUSTER SETSLOT: slot {} set to STABLE", slot);
                 return "+OK\r\n";
 
@@ -857,6 +871,9 @@ public class ClusterCommandHandler {
                 if (targetNode != null) {
                     targetNode.addSlot(slot);
                 }
+
+                // 同步更新 ClusterConfig 的槽位分配表
+                clusterConfig.setSlotOwner(slot, nodeId);
 
                 // 清除迁移状态
                 slotMigrationState.remove(slot);
@@ -1194,14 +1211,26 @@ public class ClusterCommandHandler {
      * @return 响应
      */
     private String clusterFlushslots() {
+        // 先获取当前节点的槽位副本，用于同步清理 ClusterConfig
+        ClusterNode myNode = clusterConfig.getMyNode();
+        BitSet mySlots = (myNode != null) ? (BitSet) myNode.getSlots().clone() : new BitSet();
+
         // 清空槽位管理器中的槽位
         slotManager.clearMySlots();
 
         // 清空当前节点的槽位信息
-        ClusterNode myNode = clusterConfig.getMyNode();
         if (myNode != null) {
             myNode.clearSlots();
         }
+
+        // 同步更新 ClusterConfig 的槽位分配表
+        String myNodeId = clusterConfig.getMyNodeId();
+        for (int i = mySlots.nextSetBit(0); i >= 0; i = mySlots.nextSetBit(i + 1)) {
+            clusterConfig.clearSlot(i);
+        }
+
+        // 更新集群状态（清空槽位可能使集群状态变化）
+        stateManager.updateClusterState();
 
         logger.info("CLUSTER FLUSHSLOTS: all slots cleared");
         notifyTopologyChanged();
@@ -1303,5 +1332,22 @@ public class ClusterCommandHandler {
     public void cleanupForgetNodes() {
         long now = System.currentTimeMillis();
         forgetNodes.entrySet().removeIf(entry -> now > entry.getValue());
+    }
+
+    /**
+     * 清理指定节点在 SlotManager 中的槽位记录。
+     * <p>
+     * 在 CLUSTER FORGET 时调用，确保 slotManager.slotOwners[] 与
+     * clusterConfig.slotAssignment[] 保持一致。
+     * </p>
+     *
+     * @param nodeId 被移除的节点ID
+     */
+    private void clearSlotManagerForNode(String nodeId) {
+        for (int i = 0; i < SlotUtils.CLUSTER_SLOTS; i++) {
+            if (nodeId.equals(slotManager.getSlotOwner(i))) {
+                slotManager.setSlotOwner(i, null);
+            }
+        }
     }
 }

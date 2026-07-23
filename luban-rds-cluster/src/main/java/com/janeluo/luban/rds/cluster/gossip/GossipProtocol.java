@@ -882,6 +882,20 @@ public class GossipProtocol {
                     if (!node.isFail()) {
                         node.addState(ClusterNodeState.PFAIL);
                     }
+                } else if (node.isPfail() && !node.isFail()) {
+                    // 发送方不认为该节点 PFAIL，传播此视图以清除本地 PFAIL
+                    node.removeState(ClusterNodeState.PFAIL);
+                }
+
+                // 同步 MASTER/SLAVE 角色变更（Gossip 是 FailoverResult 丢失时的后备收敛机制）
+                if (flags.contains(ClusterNodeState.MASTER) && node.isSlave()) {
+                    node.removeState(ClusterNodeState.SLAVE);
+                    node.addState(ClusterNodeState.MASTER);
+                    node.setMasterNodeId(null);
+                }
+                if (flags.contains(ClusterNodeState.SLAVE) && node.isMaster()) {
+                    node.removeState(ClusterNodeState.MASTER);
+                    node.addState(ClusterNodeState.SLAVE);
                 }
             }
 

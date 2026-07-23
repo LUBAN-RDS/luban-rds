@@ -145,6 +145,18 @@ class GossipTaskTest {
             clusterConfig.addNode(node);
         }
 
+        // 分配所有 16384 个槽位（集群状态 OK 的必要条件）
+        int slotsPerNode = 16384 / 4;  // myNode + 3 added = 4 masters
+        int slotIdx = 0;
+        for (ClusterNode node : clusterConfig.getAllNodes()) {
+            for (int s = 0; s < slotsPerNode && slotIdx < 16384; s++, slotIdx++) {
+                node.addSlot(slotIdx);
+                clusterConfig.setSlotOwner(slotIdx, node.getNodeId());
+            }
+        }
+        // 确保所有槽位已分配
+        assertTrue(clusterConfig.areAllSlotsAssigned(), "所有槽位应已分配");
+
         // 启动 Gossip 协议
         gossipProtocol.start();
 
