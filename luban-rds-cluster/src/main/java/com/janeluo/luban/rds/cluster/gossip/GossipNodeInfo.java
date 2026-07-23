@@ -69,6 +69,15 @@ public class GossipNodeInfo implements Serializable {
     private BitSet slots;
 
     /**
+     * 主节点ID（仅从节点使用，存储其主节点的ID）。
+     * <p>
+     * 在 Gossip 中传播 master-slave 关系，作为 FailoverResult 消息丢包时的
+     * 后备收敛机制。null 表示未知或不适用（主节点无 masterNodeId）。
+     * </p>
+     */
+    private String masterNodeId;
+
+    /**
      * 默认构造方法
      */
     public GossipNodeInfo() {
@@ -190,6 +199,24 @@ public class GossipNodeInfo implements Serializable {
      */
     public void setSlots(BitSet slots) {
         this.slots = slots;
+    }
+
+    /**
+     * 获取主节点ID（仅从节点有效）
+     *
+     * @return 主节点ID，未知或不适用时返回 null
+     */
+    public String getMasterNodeId() {
+        return masterNodeId;
+    }
+
+    /**
+     * 设置主节点ID
+     *
+     * @param masterNodeId 主节点ID，null 表示清除
+     */
+    public void setMasterNodeId(String masterNodeId) {
+        this.masterNodeId = masterNodeId;
     }
 
     // ==================== 状态管理方法 ====================
@@ -480,6 +507,7 @@ public class GossipNodeInfo implements Serializable {
                 ", busPort=" + busPort +
                 ", configEpoch=" + configEpoch +
                 ", flags=" + flags +
+                ", masterNodeId='" + masterNodeId + '\'' +
                 ", slotsCount=" + (slots != null ? slots.cardinality() : 0) +
                 '}';
     }

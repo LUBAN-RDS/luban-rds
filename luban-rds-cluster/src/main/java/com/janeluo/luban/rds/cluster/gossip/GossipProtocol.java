@@ -897,6 +897,12 @@ public class GossipProtocol {
                     node.removeState(ClusterNodeState.MASTER);
                     node.addState(ClusterNodeState.SLAVE);
                 }
+
+                // 同步 masterNodeId（从节点的主节点关系），
+                // 使 Gossip 成为 FailoverResult 丢包时的完整后备收敛机制
+                if (nodeInfo.getMasterNodeId() != null && node.isSlave()) {
+                    node.setMasterNodeId(nodeInfo.getMasterNodeId());
+                }
             }
 
             // 同步该节点拥有的槽位归属（基于其配置纪元裁决冲突）
@@ -1006,6 +1012,10 @@ public class GossipProtocol {
 
         // 携带节点拥有的槽位集合，使对端能同步槽位归属
         info.setSlots(node.getSlots());
+
+        // 携带 masterNodeId，使对端能同步 master-slave 关系
+        //（作为 FailoverResult 丢包时的后备收敛机制）
+        info.setMasterNodeId(node.getMasterNodeId());
 
         return info;
     }
