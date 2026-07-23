@@ -1160,6 +1160,7 @@ public class ClusterCommandHandler {
         for (int i = masterSlots.nextSetBit(0); i >= 0; i = masterSlots.nextSetBit(i + 1)) {
             slaveNode.addSlot(i);
             slotManager.setSlotOwner(i, slaveNode.getNodeId());
+            clusterConfig.setSlotOwner(i, slaveNode.getNodeId());
         }
 
         masterNode.clearSlots();

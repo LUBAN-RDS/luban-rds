@@ -368,6 +368,7 @@ public class FailoverManager {
         for (int i = masterSlots.nextSetBit(0); i >= 0; i = masterSlots.nextSetBit(i + 1)) {
             slaveNode.addSlot(i);
             slotManager.setSlotOwner(i, slaveNode.getNodeId());
+            clusterConfig.setSlotOwner(i, slaveNode.getNodeId());
         }
 
         masterNode.clearSlots();
@@ -420,6 +421,7 @@ public class FailoverManager {
             winner.setSlots((BitSet) inherited.clone());
             for (int i = inherited.nextSetBit(0); i >= 0; i = inherited.nextSetBit(i + 1)) {
                 slotManager.setSlotOwner(i, winner.getNodeId());
+                clusterConfig.setSlotOwner(i, winner.getNodeId());
             }
         }
 
