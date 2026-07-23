@@ -190,7 +190,7 @@ public class ClusterNode implements Serializable {
         return masterNodeId;
     }
 
-    public void setMasterNodeId(String masterNodeId) {
+    public synchronized void setMasterNodeId(String masterNodeId) {
         this.masterNodeId = masterNodeId;
     }
 
@@ -198,7 +198,7 @@ public class ClusterNode implements Serializable {
         return slots;
     }
 
-    public void setSlots(BitSet slots) {
+    public synchronized void setSlots(BitSet slots) {
         this.slots = slots != null ? slots : new BitSet(CLUSTER_SLOTS);
     }
 
@@ -206,7 +206,7 @@ public class ClusterNode implements Serializable {
         return configEpoch;
     }
 
-    public void setConfigEpoch(long configEpoch) {
+    public synchronized void setConfigEpoch(long configEpoch) {
         this.configEpoch = configEpoch;
     }
 
@@ -241,7 +241,7 @@ public class ClusterNode implements Serializable {
      *
      * @param state 要添加的状态
      */
-    public void addState(ClusterNodeState state) {
+    public synchronized void addState(ClusterNodeState state) {
         this.state.add(state);
     }
 
@@ -250,7 +250,7 @@ public class ClusterNode implements Serializable {
      *
      * @param state 要移除的状态
      */
-    public void removeState(ClusterNodeState state) {
+    public synchronized void removeState(ClusterNodeState state) {
         this.state.remove(state);
     }
 
@@ -260,7 +260,7 @@ public class ClusterNode implements Serializable {
      * @param state 要检查的状态
      * @return 是否具有该状态
      */
-    public boolean hasState(ClusterNodeState state) {
+    public synchronized boolean hasState(ClusterNodeState state) {
         return this.state.contains(state);
     }
 
@@ -325,7 +325,7 @@ public class ClusterNode implements Serializable {
      *
      * @param slot 槽位号（0-16383）
      */
-    public void addSlot(int slot) {
+    public synchronized void addSlot(int slot) {
         validateSlot(slot);
         slots.set(slot);
     }
@@ -350,7 +350,7 @@ public class ClusterNode implements Serializable {
      *
      * @param slot 槽位号（0-16383）
      */
-    public void removeSlot(int slot) {
+    public synchronized void removeSlot(int slot) {
         validateSlot(slot);
         slots.clear(slot);
     }
@@ -361,7 +361,7 @@ public class ClusterNode implements Serializable {
      * @param slot 槽位号（0-16383）
      * @return 是否由此节点负责
      */
-    public boolean hasSlot(int slot) {
+    public synchronized boolean hasSlot(int slot) {
         validateSlot(slot);
         return slots.get(slot);
     }
@@ -371,14 +371,14 @@ public class ClusterNode implements Serializable {
      *
      * @return 槽位数量
      */
-    public int getSlotCount() {
+    public synchronized int getSlotCount() {
         return slots.cardinality();
     }
 
     /**
      * 清空所有槽位
      */
-    public void clearSlots() {
+    public synchronized void clearSlots() {
         slots.clear();
     }
 
@@ -400,14 +400,14 @@ public class ClusterNode implements Serializable {
     /**
      * 更新最后PING时间为当前时间
      */
-    public void updateLastPingTime() {
+    public synchronized void updateLastPingTime() {
         this.lastPingTime = System.currentTimeMillis();
     }
 
     /**
      * 更新最后PONG时间为当前时间
      */
-    public void updateLastPongTime() {
+    public synchronized void updateLastPongTime() {
         this.lastPongTime = System.currentTimeMillis();
     }
 
@@ -446,7 +446,7 @@ public class ClusterNode implements Serializable {
      * @param newEpoch 新的配置纪元值
      * @return 是否更新成功
      */
-    public boolean setConfigEpochIfGreater(long newEpoch) {
+    public synchronized boolean setConfigEpochIfGreater(long newEpoch) {
         if (newEpoch > this.configEpoch) {
             this.configEpoch = newEpoch;
             return true;
