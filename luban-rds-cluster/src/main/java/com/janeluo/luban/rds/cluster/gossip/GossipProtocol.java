@@ -852,6 +852,10 @@ public class GossipProtocol {
                 link.updateInteractionTime();
             }
 
+            // 先捕获本地纪元基线，供 syncSenderRole 门控使用，
+            // 避免本地纪元被先前消息提升后门控失效。
+            long epochBaseline = senderNode.getConfigEpoch();
+
             // 同步发送方槽位归属（基于发送方已记录的配置纪元裁决冲突）
             clusterConfig.syncSlotsFromNode(senderNodeId, ping.getSenderSlots(),
                     senderNode.getConfigEpoch());
@@ -859,7 +863,7 @@ public class GossipProtocol {
             // 同步发送方角色（master/slave）与 masterNodeId
             // selectGossipNodes 排除本节点，发送方自身角色只能通过消息头传播
             syncSenderRole(senderNode, ping.getSenderFlags(),
-                    ping.getSenderMasterNodeId(), ping.getSenderConfigEpoch());
+                    ping.getSenderMasterNodeId(), ping.getSenderConfigEpoch(), epochBaseline);
         }
     }
 
@@ -885,13 +889,17 @@ public class GossipProtocol {
                 link.updateInteractionTime();
             }
 
+            // 先捕获本地纪元基线，供 syncSenderRole 门控使用，
+            // 避免本地纪元被先前消息提升后门控失效。
+            long epochBaseline = senderNode.getConfigEpoch();
+
             // 同步发送方槽位归属（基于发送方已记录的配置纪元裁决冲突）
             clusterConfig.syncSlotsFromNode(senderNodeId, pong.getSenderSlots(),
                     senderNode.getConfigEpoch());
 
             // 同步发送方角色（master/slave）与 masterNodeId
             syncSenderRole(senderNode, pong.getSenderFlags(),
-                    pong.getSenderMasterNodeId(), pong.getSenderConfigEpoch());
+                    pong.getSenderMasterNodeId(), pong.getSenderConfigEpoch(), epochBaseline);
         }
     }
 
@@ -928,6 +936,11 @@ public class GossipProtocol {
             // 握手完成：移除 HANDSHAKE，设置 MASTER
             completeHandshake(senderNode);
 
+            // 先捕获本地纪元基线，供 syncSenderRole 门控使用。
+            // setConfigEpochIfGreater 会把本地纪元提升到 senderConfigEpoch，
+            // 若在 syncSenderRole 内才读取 localEpoch，configEpoch>localEpoch 恒为 false，
+            // 导致 slave 角色永不切换（回归缺陷）。
+            long epochBaseline = senderNode.getConfigEpoch();
             senderNode.setConfigEpochIfGreater(meet.getSenderConfigEpoch());
             clusterConfig.setEpochIfGreater(meet.getCurrentEpoch());
             senderNode.updateLastPongTime();
@@ -943,7 +956,7 @@ public class GossipProtocol {
 
             // 同步发送方角色（master/slave）与 masterNodeId
             syncSenderRole(senderNode, meet.getSenderFlags(),
-                    meet.getSenderMasterNodeId(), meet.getSenderConfigEpoch());
+                    meet.getSenderMasterNodeId(), meet.getSenderConfigEpoch(), epochBaseline);
         }
     }
 
@@ -1009,6 +1022,12 @@ public class GossipProtocol {
                 initiateMeetForDiscoveredNode(node);
             }
 
+            // 先捕获本地纪元基线，供后续角色切换门控使用。
+            // setConfigEpochIfGreater 会把本地纪元提升到 gossipEpoch，
+            // 若在角色判断处才读取 localEpoch，gossipEpoch>localEpoch 恒为 false，
+            // 导致第三方节点角色永不切换（与 syncSenderRole 同类回归缺陷）。
+            long epochBaseline = node.getConfigEpoch();
+
             // 更新配置纪元
             node.setConfigEpochIfGreater(nodeInfo.getConfigEpoch());
 
@@ -1017,7 +1036,7 @@ public class GossipProtocol {
             // （对齐 Redis：角色与 FAIL 变更应通过 configEpoch 校验的消息传播）
             Set<ClusterNodeState> flags = nodeInfo.getFlags();
             long gossipEpoch = nodeInfo.getConfigEpoch();
-            long localEpoch = node.getConfigEpoch();
+            long localEpoch = epochBaseline;
             boolean gossipEpochAcceptable = gossipEpoch >= localEpoch;
             if (flags != null) {
                 // FAIL 标志：仅当 gossip 纪元可接受时才应用，避免旧视图误标
@@ -1034,7 +1053,7 @@ public class GossipProtocol {
                     node.removeState(ClusterNodeState.PFAIL);
                 }
 
-                // 同步 MASTER/SLAVE 角色变更：仅当 gossip 纪元严格大于本地时才切换角色，
+                // 同步 MASTER/SLAVE 角色变更：仅当 gossip 纪元严格大于本地基线时才切换角色，
                 // 相等时不切换，防止陈旧 gossip 把已提升的 master 翻回 slave（撤销故障转移）
                 if (gossipEpoch > localEpoch) {
                     if (flags.contains(ClusterNodeState.MASTER) && node.isSlave()) {
@@ -1045,6 +1064,7 @@ public class GossipProtocol {
                     if (flags.contains(ClusterNodeState.SLAVE) && node.isMaster()) {
                         node.removeState(ClusterNodeState.MASTER);
                         node.addState(ClusterNodeState.SLAVE);
+                        node.setMasterNodeId(nodeInfo.getMasterNodeId());
                     }
                 }
 
@@ -1155,29 +1175,36 @@ public class GossipProtocol {
      * <p>
      * 与 {@link #processGossipNodes} 中同步第三方节点角色的策略一致：
      * <ul>
-     *   <li>仅当 {@code configEpoch > localEpoch} 时切换发送方角色（MASTER↔SLAVE），
+     *   <li>仅当 {@code senderConfigEpoch > localEpochBaseline} 时切换发送方角色（MASTER↔SLAVE），
      *       防止陈旧消息回退已完成的故障转移；</li>
-     *   <li>仅当 {@code configEpoch >= localEpoch} 且发送方已是 slave 时同步 masterNodeId。</li>
+     *   <li>仅当 {@code senderConfigEpoch >= localEpochBaseline} 且发送方已是 slave 时同步 masterNodeId。</li>
      * </ul>
      * 这是修复 {@code CLUSTER REPLICATE} 后从节点角色无法经 Gossip 传播的关键：
      * {@code selectGossipNodes} 排除本节点，节点自身角色只能通过消息头传播。
      * </p>
+     * <p>
+     * <b>纪元基线语义</b>：{@code localEpochBaseline} 必须是调用方在
+     * {@link ClusterNode#setConfigEpochIfGreater(long)} 之前捕获的本地纪元快照。
+     * 否则若先执行 {@code setConfigEpochIfGreater} 把本地纪元提升到与消息纪元相等，
+     * {@code senderConfigEpoch > localEpoch} 会恒为 false，角色切换永不发生
+     * （回归缺陷：slave 经 MEET/PING/PONG 无法被对端识别为 slave）。
+     * </p>
      *
-     * @param sender        发送方节点（本地视图）
-     * @param flags         消息头携带的发送方角色标志
-     * @param masterNodeId  消息头携带的发送方 masterNodeId，null 表示主节点或不适用
-     * @param configEpoch   消息头携带的发送方配置纪元
+     * @param sender              发送方节点（本地视图）
+     * @param flags               消息头携带的发送方角色标志
+     * @param masterNodeId        消息头携带的发送方 masterNodeId，null 表示主节点或不适用
+     * @param senderConfigEpoch   消息头携带的发送方配置纪元
+     * @param localEpochBaseline  调用前捕获的发送方本地配置纪元快照（用于门控）
      */
     private void syncSenderRole(ClusterNode sender, Set<ClusterNodeState> flags,
-                                String masterNodeId, long configEpoch) {
+                                String masterNodeId, long senderConfigEpoch,
+                                long localEpochBaseline) {
         if (sender == null || flags == null) {
             return;
         }
-        long localEpoch = sender.getConfigEpoch();
-        boolean epochAcceptable = configEpoch >= localEpoch;
 
-        // 角色切换：仅当消息纪元严格大于本地纪元时才切换，防止陈旧 gossip 回退已提升的 master
-        if (configEpoch > localEpoch) {
+        // 角色切换：仅当消息纪元严格大于本地基线时才切换，防止陈旧 gossip 回退已提升的 master
+        if (senderConfigEpoch > localEpochBaseline) {
             if (flags.contains(ClusterNodeState.MASTER) && sender.isSlave()) {
                 sender.removeState(ClusterNodeState.SLAVE);
                 sender.addState(ClusterNodeState.MASTER);
@@ -1186,11 +1213,12 @@ public class GossipProtocol {
             if (flags.contains(ClusterNodeState.SLAVE) && sender.isMaster()) {
                 sender.removeState(ClusterNodeState.MASTER);
                 sender.addState(ClusterNodeState.SLAVE);
+                sender.setMasterNodeId(masterNodeId);
             }
         }
 
         // 同步 masterNodeId：纪元可接受、携带了 masterNodeId 且节点已是 slave 时才同步
-        if (epochAcceptable && masterNodeId != null && sender.isSlave()) {
+        if (senderConfigEpoch >= localEpochBaseline && masterNodeId != null && sender.isSlave()) {
             sender.setMasterNodeId(masterNodeId);
         }
     }

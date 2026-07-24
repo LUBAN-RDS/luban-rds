@@ -517,6 +517,8 @@ public class GossipNodeInfo implements Serializable {
                 offset += NODE_ID_LENGTH;
             } else if (hasMasterId != 0) {
                 throw new IllegalArgumentException("GossipNodeInfo masterNodeId 标志非法: " + hasMasterId);
+            } else {
+                this.masterNodeId = null;
             }
         }
 
