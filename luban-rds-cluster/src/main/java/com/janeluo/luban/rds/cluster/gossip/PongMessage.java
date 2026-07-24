@@ -65,6 +65,16 @@ public class PongMessage extends GossipMessage {
     private String senderMasterNodeId;
 
     /**
+     * 发送方（myNode）所在的集群当前纪元（currentEpoch）
+     * <p>
+     * 使接收方能通过心跳同步集群级 currentEpoch。重启节点本地 currentEpoch 可能滞后，
+     * 导致 epoch 仲裁门控恒为 false。尾部追加字段，旧版本节点解码时忽略多余字节，
+     * 新版本节点解码旧消息时字段不足则保留默认值 0（setEpochIfGreater(0) 无副作用）。
+     * </p>
+     */
+    private long senderCurrentEpoch;
+
+    /**
      * 默认构造方法
      */
     public PongMessage() {
@@ -191,6 +201,24 @@ public class PongMessage extends GossipMessage {
     }
 
     /**
+     * 获取发送方集群当前纪元
+     *
+     * @return 集群当前纪元
+     */
+    public long getSenderCurrentEpoch() {
+        return senderCurrentEpoch;
+    }
+
+    /**
+     * 设置发送方集群当前纪元
+     *
+     * @param senderCurrentEpoch 集群当前纪元
+     */
+    public void setSenderCurrentEpoch(long senderCurrentEpoch) {
+        this.senderCurrentEpoch = senderCurrentEpoch;
+    }
+
+    /**
      * 添加 Gossip 节点信息
      *
      * @param nodeInfo 节点信息
@@ -226,7 +254,7 @@ public class PongMessage extends GossipMessage {
         int masterNodeIdLength = senderMasterNodeId != null ? GossipNodeInfo.NODE_ID_LENGTH : 0;
 
         int totalLength = 8 + 2 + gossipNodesLength + 4 + slotsBytes.length
-                + 8 + 1 + flagsCount * 2 + 1 + masterNodeIdLength;
+                + 8 + 1 + flagsCount * 2 + 1 + masterNodeIdLength + 8;
         byte[] data = new byte[totalLength];
         int offset = 0;
 
@@ -288,6 +316,16 @@ public class PongMessage extends GossipMessage {
         } else {
             data[offset++] = 0;
         }
+
+        // 写入发送方集群当前纪元（8字节，大端序）- 尾部追加，向后兼容
+        data[offset++] = (byte) (senderCurrentEpoch >> 56);
+        data[offset++] = (byte) (senderCurrentEpoch >> 48);
+        data[offset++] = (byte) (senderCurrentEpoch >> 40);
+        data[offset++] = (byte) (senderCurrentEpoch >> 32);
+        data[offset++] = (byte) (senderCurrentEpoch >> 24);
+        data[offset++] = (byte) (senderCurrentEpoch >> 16);
+        data[offset++] = (byte) (senderCurrentEpoch >> 8);
+        data[offset++] = (byte) senderCurrentEpoch;
 
         return data;
     }
@@ -383,6 +421,18 @@ public class PongMessage extends GossipMessage {
                     offset += GossipNodeInfo.NODE_ID_LENGTH;
                 }
             }
+        }
+
+        // 读取发送方集群当前纪元（8字节，大端序）- 向后兼容：旧消息无此字段时保留默认值 0
+        if (offset + 8 <= body.length) {
+            this.senderCurrentEpoch = ((long) (body[offset++] & 0xFF) << 56) |
+                    ((long) (body[offset++] & 0xFF) << 48) |
+                    ((long) (body[offset++] & 0xFF) << 40) |
+                    ((long) (body[offset++] & 0xFF) << 32) |
+                    ((long) (body[offset++] & 0xFF) << 24) |
+                    ((long) (body[offset++] & 0xFF) << 16) |
+                    ((long) (body[offset++] & 0xFF) << 8) |
+                    ((long) (body[offset++] & 0xFF));
         }
     }
 
