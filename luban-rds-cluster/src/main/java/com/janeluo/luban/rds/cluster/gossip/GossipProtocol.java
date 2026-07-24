@@ -374,6 +374,8 @@ public class GossipProtocol {
         ping.setSenderConfigEpoch(myNode.getConfigEpoch());
         ping.setSenderFlags(buildSenderFlags(myNode));
         ping.setSenderMasterNodeId(myNode.getMasterNodeId());
+        // 携带发送方集群当前纪元，使对端（尤其是重启节点）能通过心跳同步 currentEpoch
+        ping.setSenderCurrentEpoch(clusterConfig.getCurrentEpoch());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -432,6 +434,7 @@ public class GossipProtocol {
         pong.setSenderConfigEpoch(myNode.getConfigEpoch());
         pong.setSenderFlags(buildSenderFlags(myNode));
         pong.setSenderMasterNodeId(myNode.getMasterNodeId());
+        pong.setSenderCurrentEpoch(clusterConfig.getCurrentEpoch());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -909,6 +912,9 @@ public class GossipProtocol {
             // selectGossipNodes 排除本节点，发送方自身角色只能通过消息头传播
             syncSenderRole(senderNode, ping.getSenderFlags(),
                     ping.getSenderMasterNodeId(), ping.getSenderConfigEpoch(), epochBaseline);
+
+            // 同步集群级 currentEpoch（重启节点本地可能滞后，导致 epoch 仲裁门控失效）
+            clusterConfig.setEpochIfGreater(ping.getSenderCurrentEpoch());
         }
     }
 
@@ -945,6 +951,9 @@ public class GossipProtocol {
             // 同步发送方角色（master/slave）与 masterNodeId
             syncSenderRole(senderNode, pong.getSenderFlags(),
                     pong.getSenderMasterNodeId(), pong.getSenderConfigEpoch(), epochBaseline);
+
+            // 同步集群级 currentEpoch（重启节点本地可能滞后，导致 epoch 仲裁门控失效）
+            clusterConfig.setEpochIfGreater(pong.getSenderCurrentEpoch());
         }
     }
 
