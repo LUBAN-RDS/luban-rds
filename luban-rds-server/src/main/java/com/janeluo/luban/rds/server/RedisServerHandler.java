@@ -722,6 +722,18 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             if (clusterEnabled && commandRequiresKey(commandName)) {
                 String key = extractKeyFromCommand(commandName, args);
                 if (key != null) {
+                    // EVAL/EVALSHA 多 key 脚本需校验所有 KEYS 同 slot（Redis 集群硬约束）
+                    String crossSlot = checkCrossSlotForScript(commandName, args);
+                    if (crossSlot != null) {
+                        ByteBuf redirectBuffer = protocolParser.serialize(crossSlot);
+                        if (redirectBuffer != null && redirectBuffer.isReadable()) {
+                            ctx.writeAndFlush(redirectBuffer);
+                        } else if (redirectBuffer != null) {
+                            redirectBuffer.release();
+                        }
+                        return;
+                    }
+
                     // 先检查 MOVED 重定向
                     String redirect = checkSlotAndRedirect(key);
                     if (redirect != null) {
@@ -2405,8 +2417,10 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         
         // 脚本命令
         NO_KEY_COMMANDS.add("SCRIPT");
-        NO_KEY_COMMANDS.add("EVAL");
-        NO_KEY_COMMANDS.add("EVALSHA");
+        // NOTE: EVAL/EVALSHA 不在此列表中。集群模式下它们需要按 KEYS[1] 所在 slot
+        // 进行 MOVED/ASK 重定向，并对多 key 脚本校验 CROSSSLOT（所有 KEYS 必须同 slot），
+        // 以对齐 Redis 原生集群语义。EVAL 的 key 提取由 extractKeyFromCommand 的专用分支
+        // 处理，CROSSSLOT 校验在集群重定向检查块中完成。
     }
     
     /**
@@ -2474,6 +2488,48 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         return args[1];
     }
     
+    /**
+     * 检查 EVAL/EVALSHA 脚本的多个 KEYS 是否属于同一 slot。
+     * <p>
+     * Redis 集群要求脚本中所有 KEYS 必须落在同一 hash slot（通常通过 {@code {tag}} 保证），
+     * 否则返回 {@code -CROSSSLOT} 错误，拒绝执行。此方法对齐该语义。
+     * </p>
+     *
+     * @param commandName 命令名称（EVAL/EVALSHA）
+     * @param args        命令参数（包含命令名）
+     * @return null 表示所有 KEYS 同 slot（或非脚本命令/单 key/无 key），否则返回 CROSSSLOT 错误响应
+     */
+    private String checkCrossSlotForScript(String commandName, String[] args) {
+        if (args == null || args.length < 3) {
+            return null;
+        }
+        String cmd = commandName.toUpperCase();
+        if (!"EVAL".equals(cmd) && !"EVALSHA".equals(cmd)) {
+            return null;
+        }
+        // EVAL/EVALSHA 格式: <cmd> <script|sha1> <numkeys> <key...> <arg...>
+        int numkeys;
+        try {
+            numkeys = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (numkeys <= 1) {
+            // 单 key 或无 key，无需 CROSSSLOT 校验
+            return null;
+        }
+        if (args.length < 3 + numkeys) {
+            return null;
+        }
+        int firstSlot = SlotUtils.keyHashSlot(args[3]);
+        for (int i = 4; i < 3 + numkeys; i++) {
+            if (SlotUtils.keyHashSlot(args[i]) != firstSlot) {
+                return "-CROSSSLOT Keys in request don't hash to the same slot\r\n";
+            }
+        }
+        return null;
+    }
+
     /**
      * 检查键所属槽位是否在本节点（MOVED 重定向检查）
      *
