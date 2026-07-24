@@ -1033,12 +1033,18 @@ public class GossipProtocol {
 
         for (GossipNodeInfo nodeInfo : gossipNodes) {
             String nodeId = nodeInfo.getNodeId();
-            ClusterNode node = clusterConfig.getNode(nodeId);
+            boolean isMyselfEntry = nodeId != null && nodeId.equals(clusterConfig.getMyNodeId());
 
-            // 跳过本节点
-            if (nodeId != null && nodeId.equals(clusterConfig.getMyNodeId())) {
+            // MYSELF 走自降级分支（不再无条件跳过）：当对端对 MYSELF 的视图携带
+            // 更高 configEpoch 且角色为 SLAVE 时，采纳该视图自降级为新主的 slave。
+            // 这是故障转移后原主重启收敛的关键路径--FailoverResult 广播仅一次，
+            // 重启节点错过后只能经 gossip 心跳的 epoch 仲裁自降级。
+            if (isMyselfEntry) {
+                handleMyselfGossipEntry(nodeInfo);
                 continue;
             }
+
+            ClusterNode node = clusterConfig.getNode(nodeId);
 
             if (node == null) {
                 ClusterNode existingByAddr = findNodeByAddress(nodeInfo.getIp(), nodeInfo.getPort());
@@ -1134,6 +1140,48 @@ public class GossipProtocol {
 
             // 将发送方对该节点的 PFAIL 投票登记到故障检测器，用于跨节点 FAIL 共识
             failureDetector.processGossipPfailVote(nodeInfo, senderNodeId);
+        }
+    }
+
+    /**
+     * 处理 gossip section 中关于 MYSELF 的条目
+     * <p>
+     * 当对端节点对 MYSELF 的视图携带严格更大的 configEpoch 且角色为 SLAVE 时，
+     * 触发 MYSELF 自降级为新主的 slave。严格 epoch 门控（>localEpochBaseline）
+     * 防止陈旧 gossip 回退已合法提升的 master。
+     * </p>
+     *
+     * @param nodeInfo gossip section 中 MYSELF 的条目
+     */
+    private void handleMyselfGossipEntry(GossipNodeInfo nodeInfo) {
+        ClusterNode myNode = clusterConfig.getMyNode();
+        if (myNode == null) {
+            return;
+        }
+        Set<ClusterNodeState> flags = nodeInfo.getFlags();
+        if (flags == null || !flags.contains(ClusterNodeState.SLAVE)) {
+            return;
+        }
+        // 捕获本地基线，避免 setConfigEpochIfGreater 提升后门控失效
+        long localEpochBaseline = myNode.getConfigEpoch();
+        long gossipEpoch = nodeInfo.getConfigEpoch();
+        if (gossipEpoch <= localEpochBaseline) {
+            // 严格大于才切换；相等/小于忽略（防回退）
+            return;
+        }
+        if (!myNode.isMaster()) {
+            // 已是 slave 则幂等跳过（masterNodeId 同步由下方逻辑处理）
+            return;
+        }
+        String newMasterId = nodeInfo.getMasterNodeId();
+        if (newMasterId == null) {
+            return;
+        }
+        // 委托 FailoverManager 原子完成自降级（synchronized，与 onFailoverResult 串行）
+        if (failoverManager != null) {
+            failoverManager.applySelfDemotion(newMasterId, gossipEpoch);
+        } else {
+            logger.warn("FailoverManager 未注入，MYSELF 自降级未执行: newMasterId={}", newMasterId);
         }
     }
 
