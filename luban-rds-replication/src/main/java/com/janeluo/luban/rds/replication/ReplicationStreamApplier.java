@@ -15,6 +15,12 @@ import org.slf4j.LoggerFactory;
  * <p>累积主节点传播的 RESP 字节流，使用 {@link RedisProtocolParser} 解析出完整的命令帧，
  * 并通过 {@link DefaultCommandHandler} 在从节点本地 {@link MemoryStore} 上重放每条命令。
  *
+ * <p><b>多数据库限制：</b>从节点复制重放只支持单数据库语义。复制流中的 SELECT 命令仅用于
+ * 追踪当前目标数据库索引（{@link #currentDatabase}），后续命令会按该索引在 MemoryStore 上重放。
+ * 由于 {@link DefaultCommandHandler} 的命令执行未真正按 database 参数隔离存储，实际多 DB
+ * 数据仍会落在同一存储视图；此处的 SELECT 处理保证偏移量与主节点对齐，并尽可能将 database
+ * 索引透传给处理器，而非真正实现 Redis 的多 DB 切换。
+ *
  * <p>处理以下场景：
  * <ul>
  *   <li>拆包（半包）：累积缓冲区中数据不足时，保留已接收字节等待后续数据到达后继续解析</li>
@@ -35,9 +41,6 @@ public class ReplicationStreamApplier {
     /** 累积缓冲区初始容量 */
     private static final int INITIAL_BUFFER_CAPACITY = 1024;
 
-    /** 默认数据库索引（复制命令统一在 db 0 重放，SELECT 命令由处理器处理） */
-    private static final int REPLICATION_DATABASE = 0;
-
     private final MemoryStore memoryStore;
     private final DefaultCommandHandler commandHandler;
     private final RedisProtocolParser protocolParser;
@@ -45,6 +48,17 @@ public class ReplicationStreamApplier {
 
     /** 已应用字节偏移量，对应主节点 backlog 的 masterReplOffset */
     private long appliedOffset;
+
+    /**
+     * 当前复制目标数据库索引。
+     *
+     * <p>复制流中的 SELECT 命令会更新此值，后续命令重放时透传给 {@link DefaultCommandHandler}。
+     * 默认为 0。注意：这是单 DB 复制限制下的简化处理，见类级 Javadoc。
+     */
+    private int currentDatabase = 0;
+
+    /** 是否已关闭，防止 close() 重复释放累积缓冲区 */
+    private volatile boolean closed = false;
 
     /**
      * 创建复制流应用器。
@@ -73,6 +87,12 @@ public class ReplicationStreamApplier {
             if (data != null) {
                 data.release();
             }
+            return;
+        }
+
+        // 已关闭：直接释放传入数据，不再累积/解析，避免使用已释放的累积缓冲区
+        if (closed) {
+            data.release();
             return;
         }
 
@@ -116,6 +136,8 @@ public class ReplicationStreamApplier {
     /**
      * 执行单条复制命令。
      *
+     * <p>SELECT 命令不真正执行，仅解析参数更新 {@link #currentDatabase}，后续命令按该索引重放。
+     *
      * @param command 已解析的命令
      * @throws ReplicationApplyException 命令执行失败
      */
@@ -127,8 +149,18 @@ public class ReplicationStreamApplier {
             logger.debug("Applying replicated command: {}", commandName);
         }
 
+        // SELECT 命令仅切换当前数据库索引，不真正执行；保证与主节点偏移对齐
+        if ("SELECT".equalsIgnoreCase(commandName) && args.length >= 2) {
+            try {
+                currentDatabase = Integer.parseInt(args[1]);
+            } catch (NumberFormatException e) {
+                logger.warn("复制流 SELECT 命令参数无效: {}", args[1]);
+            }
+            return; // SELECT 不需要执行，只切换数据库
+        }
+
         try {
-            Object result = commandHandler.handle(commandName, REPLICATION_DATABASE, args, memoryStore);
+            Object result = commandHandler.handle(commandName, currentDatabase, args, memoryStore);
             if (logger.isTraceEnabled() && result instanceof String) {
                 logger.trace("Replicated command '{}' result: {}", commandName, result);
             }
@@ -151,17 +183,28 @@ public class ReplicationStreamApplier {
      * 重置应用器状态。
      *
      * <p>清空累积缓冲区并归零偏移量，用于全量同步后重新开始追踪增量偏移。
+     * 已关闭的应用器重置为 no-op。
      */
     public void reset() {
+        if (closed) {
+            return;
+        }
         accumulationBuffer.clear();
         appliedOffset = 0L;
     }
 
     /**
      * 关闭应用器，释放累积缓冲区。
+     *
+     * <p>可重复调用：内部用 {@link #closed} 标志保证只释放一次，避免重复释放导致引用计数为负。
      */
     public void close() {
-        accumulationBuffer.clear();
-        accumulationBuffer.release();
+        if (closed) {
+            return;
+        }
+        closed = true;
+        if (accumulationBuffer.refCnt() > 0) {
+            accumulationBuffer.release();
+        }
     }
 }

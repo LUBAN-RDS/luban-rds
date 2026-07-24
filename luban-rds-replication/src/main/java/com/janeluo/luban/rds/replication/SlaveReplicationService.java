@@ -48,8 +48,10 @@ public class SlaveReplicationService implements ReplicationCallback {
     private RdbDataLoader rdbDataLoader;
     private MemoryStore memoryStore;
 
-    // 复制流应用器：解析并重放主节点传播的 RESP 命令流
-    private ReplicationStreamApplier streamApplier;
+    // 复制流应用器：解析并重放主节点传播的 RESP 命令流。
+    // volatile：由 setMemoryStore（启动线程）写入，由 onCommandPropagation（Netty 事件循环）读取，
+    // 需保证跨线程可见性。
+    private volatile ReplicationStreamApplier streamApplier;
     
     // 只读模式管理器
     private final ReadOnlyModeManager readOnlyModeManager;
