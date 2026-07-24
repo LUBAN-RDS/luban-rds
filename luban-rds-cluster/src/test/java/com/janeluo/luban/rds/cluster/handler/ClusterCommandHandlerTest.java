@@ -230,6 +230,51 @@ class ClusterCommandHandlerTest {
     }
 
     @Test
+    @DisplayName("CLUSTER ADDSLOTS 后当前节点 configEpoch 应非零且等于 currentEpoch")
+    void testClusterAddslotsSetsConfigEpoch() {
+        // ADDSLOTS 前 configEpoch 为 0
+        ClusterNode myNode = clusterConfig.getMyNode();
+        assertEquals(0L, myNode.getConfigEpoch(), "ADDSLOTS 前 configEpoch 应为 0");
+
+        String result = handler.handle(new String[]{"ADDSLOTS", "0", "1", "2"});
+        assertEquals("+OK\r\n", result);
+
+        // ADDSLOTS 后 configEpoch 应等于 currentEpoch（>0），与 REPLICATE/故障转移路径一致
+        assertTrue(myNode.getConfigEpoch() > 0, "ADDSLOTS 后 configEpoch 应非零");
+        assertEquals(clusterConfig.getCurrentEpoch(), myNode.getConfigEpoch(),
+                "ADDSLOTS 后 configEpoch 应等于 currentEpoch");
+    }
+
+    @Test
+    @DisplayName("CLUSTER SET-CONFIG-EPOCH 设置节点与集群配置纪元")
+    void testClusterSetConfigEpoch() {
+        String result = handler.handle(new String[]{"SET-CONFIG-EPOCH", "4"});
+        assertEquals("+OK\r\n", result);
+
+        ClusterNode myNode = clusterConfig.getMyNode();
+        assertEquals(4L, myNode.getConfigEpoch(),
+                "SET-CONFIG-EPOCH 后 myNode.configEpoch 应为 4");
+        assertTrue(clusterConfig.getCurrentEpoch() >= 4L,
+                "集群 currentEpoch 应至少为 4");
+    }
+
+    @Test
+    @DisplayName("CLUSTER SET-CONFIG-EPOCH 无效参数")
+    void testClusterSetConfigEpochInvalid() {
+        // 缺少参数
+        String result1 = handler.handle(new String[]{"SET-CONFIG-EPOCH"});
+        assertTrue(result1.contains("-ERR"));
+
+        // 非数字
+        String result2 = handler.handle(new String[]{"SET-CONFIG-EPOCH", "abc"});
+        assertTrue(result2.contains("-ERR"));
+
+        // 负数
+        String result3 = handler.handle(new String[]{"SET-CONFIG-EPOCH", "-1"});
+        assertTrue(result3.contains("-ERR"));
+    }
+
+    @Test
     @DisplayName("测试 CLUSTER REPLICATE 命令")
     void testClusterReplicate() {
         // 添加另一个主节点

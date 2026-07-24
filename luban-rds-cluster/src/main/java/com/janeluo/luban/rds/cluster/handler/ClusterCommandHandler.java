@@ -200,6 +200,8 @@ public class ClusterCommandHandler {
                     return clusterFlushslots();
                 case "BUMPEPOCH":
                     return clusterBumpepoch();
+                case "SET-CONFIG-EPOCH":
+                    return clusterSetConfigEpoch(args);
                 case "SAVECONFIG":
                     return clusterSaveconfig();
                 case "REPLICAS":
@@ -737,8 +739,11 @@ public class ClusterCommandHandler {
                 myNode.addState(ClusterNodeState.MASTER);
             }
 
-            // 增加配置纪元
+            // 增加配置纪元，并同步设置当前节点的配置纪元，
+            // 与 clusterReplicate / 故障转移路径保持一致，
+            // 确保基于纪元的槽位/角色冲突裁决可靠（ADDSLOTS 后 configEpoch 不应为 0）
             clusterConfig.incrementEpoch();
+            myNode.setConfigEpoch(clusterConfig.getCurrentEpoch());
 
             // 更新集群状态（槽位分配可能使集群变为健康）
             stateManager.updateClusterState();
@@ -1299,6 +1304,44 @@ public class ClusterCommandHandler {
         stateManager.updateClusterState();
 
         logger.info("CLUSTER FLUSHSLOTS: all slots cleared");
+        notifyTopologyChanged();
+        return "+OK\r\n";
+    }
+
+    /**
+     * CLUSTER SET-CONFIG-EPOCH <epoch> 命令
+     * <p>
+     * 设置当前节点的配置纪元，并把集群 currentEpoch 提升到至少该值。
+     * 用于 redis-cli --cluster create 在节点加入集群前逐节点建立初始配置纪元。
+     * </p>
+     *
+     * @param args 命令参数，args[1] 为目标纪元
+     * @return 响应
+     */
+    private String clusterSetConfigEpoch(String[] args) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'cluster|set-config-epoch' command\r\n";
+        }
+
+        long epoch;
+        try {
+            epoch = Long.parseLong(args[1]);
+        } catch (NumberFormatException e) {
+            return "-ERR Invalid config epoch\r\n";
+        }
+        if (epoch < 0) {
+            return "-ERR Invalid config epoch\r\n";
+        }
+
+        ClusterNode myNode = clusterConfig.getMyNode();
+        if (myNode == null) {
+            return "-ERR Current node not found in cluster\r\n";
+        }
+
+        myNode.setConfigEpoch(epoch);
+        clusterConfig.setEpochIfGreater(epoch);
+
+        logger.info("CLUSTER SET-CONFIG-EPOCH: epoch={}", epoch);
         notifyTopologyChanged();
         return "+OK\r\n";
     }
