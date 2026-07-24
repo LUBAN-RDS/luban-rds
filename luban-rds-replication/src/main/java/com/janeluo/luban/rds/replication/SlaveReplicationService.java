@@ -91,6 +91,38 @@ public class SlaveReplicationService implements ReplicationCallback {
         this.streamApplier = new ReplicationStreamApplier(memoryStore);
         logger.info("Replication stream applier initialized with memory store");
     }
+
+    /**
+     * 显式设置主节点地址（host:port）。
+     * <p>
+     * 集群模式下由 {@code ReplicationCoordinator} 注入从 CLUSTER REPLICATE /
+     * failover 解析出的 master 地址，避免修改共享 {@link RdsConfig#getReplicaof()}
+     * 引发的线程安全问题。若已显式设置，{@link #start()} 将优先使用该地址，
+     * 不再回退读取 {@code config.getReplicaof()}。
+     * </p>
+     *
+     * @param masterAddress master 地址（host:port），null 时清除并回退到 config
+     */
+    public void setMasterAddress(String masterAddress) {
+        if (masterAddress == null || masterAddress.isEmpty()) {
+            this.masterHost = null;
+            this.masterPort = 0;
+            return;
+        }
+        String trimmed = masterAddress.trim();
+        int idx = trimmed.lastIndexOf(':');
+        if (idx < 0) {
+            this.masterHost = trimmed;
+            this.masterPort = 6379;
+        } else {
+            this.masterHost = trimmed.substring(0, idx).trim();
+            try {
+                this.masterPort = Integer.parseInt(trimmed.substring(idx + 1).trim());
+            } catch (NumberFormatException e) {
+                this.masterPort = 6379;
+            }
+        }
+    }
     
     /**
      * 启动复制服务
@@ -102,16 +134,18 @@ public class SlaveReplicationService implements ReplicationCallback {
         
         logger.info("启动从节点复制服务");
         
-        // 解析主节点地址
-        String replicaof = config.getReplicaof();
-        if (replicaof == null || replicaof.isEmpty()) {
-            logger.warn("未配置主节点地址");
-            return;
+        // 解析主节点地址：优先使用 setMasterAddress() 显式注入的地址（集群模式），
+        // 否则回退到 config.getReplicaof()（配置文件 replicaof 驱动）。
+        if (masterHost == null || masterHost.isEmpty()) {
+            String replicaof = config.getReplicaof();
+            if (replicaof == null || replicaof.isEmpty()) {
+                logger.warn("未配置主节点地址");
+                return;
+            }
+            String[] parts = replicaof.split(":");
+            this.masterHost = parts[0].trim();
+            this.masterPort = parts.length > 1 ? Integer.parseInt(parts[1].trim()) : 6379;
         }
-        
-        String[] parts = replicaof.split(":");
-        this.masterHost = parts[0].trim();
-        this.masterPort = parts.length > 1 ? Integer.parseInt(parts[1].trim()) : 6379;
         
         // 启动客户端
         client.start();

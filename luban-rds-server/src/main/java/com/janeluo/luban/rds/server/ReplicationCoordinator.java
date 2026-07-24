@@ -44,17 +44,17 @@ public class ReplicationCoordinator implements ReplicationLifecycleListener {
     /**
      * 主节点复制管理器（单例），setup() 后非 null
      */
-    private MasterReplicationManager masterManager;
+    private volatile MasterReplicationManager masterManager;
 
     /**
      * 复制命令处理器，setup() 后非 null
      */
-    private ReplicationCommandHandler replicationCommandHandler;
+    private volatile ReplicationCommandHandler replicationCommandHandler;
 
     /**
      * 当前从节点复制服务（若本节点为 slave），可能为 null
      */
-    private SlaveReplicationService slaveService;
+    private volatile SlaveReplicationService slaveService;
 
     /**
      * 当前已建立复制连接的 master 地址（ip:port），用于幂等判断
@@ -142,13 +142,13 @@ public class ReplicationCoordinator implements ReplicationLifecycleListener {
         // 停止旧连接
         stopSlaveInternal();
 
-        // 更新配置，使 SlaveReplicationService.start() 能从 config.getReplicaof() 读取地址
-        config.setReplicaof(normalized);
-
         try {
             SlaveReplicationService service = new SlaveReplicationService(config);
             service.setMemoryStore(memoryStore);
             service.setRdbPersistService(rdbPersistService);
+            // 显式注入 master 地址，避免修改共享 RdsConfig.replicaof（线程安全）。
+            // SlaveReplicationService.start() 会优先使用注入地址，不回退读 config。
+            service.setMasterAddress(normalized);
             service.start();
             this.slaveService = service;
             this.currentMasterAddress = normalized;
@@ -161,11 +161,15 @@ public class ReplicationCoordinator implements ReplicationLifecycleListener {
     }
 
     /**
-     * 停止从节点复制服务并清除 replicaof 配置。
+     * 停止从节点复制服务。
+     * <p>
+     * 仅停止复制连接并清除协调器内部跟踪的 master 地址，不修改共享
+     * {@link RdsConfig#getReplicaof()}（避免线程安全问题）。config.replicaof
+     * 仅在启动时由配置文件设置一次，运行时复制生命周期由本协调器管理。
+     * </p>
      */
     public synchronized void stopSlave() {
         stopSlaveInternal();
-        config.setReplicaof(null);
     }
 
     private void stopSlaveInternal() {
@@ -212,7 +216,13 @@ public class ReplicationCoordinator implements ReplicationLifecycleListener {
     public void promoteToMaster() {
         logger.info("集群生命周期 promoteToMaster: 停止上游复制，本节点提升为 master");
         // 提升为 master：停止上游复制连接，但保留本地已同步数据。
-        // 注意：不清理 replicaof 配置以外的状态，MasterReplicationManager 继续承载 slave 连接。
+        // MasterReplicationManager 继续承载 slave 连接。
+        //
+        // 注意：集群模式下的复制生命周期（slave/master 切换）完全由本协调器通过
+        // currentMasterAddress 跟踪，不依赖 RdsConfig.replicaof。config.replicaof
+        // 仅在启动时由配置文件设置一次（standalone 模式），运行时不再被修改，
+        // 因此提升为 master 后即便重启，只要集群配置（nodes.conf）驱动 CLUSTER
+        // REPLICATE 重建复制关系，就不会误将本节点重新降为 slave。
         stopSlaveInternal();
     }
 

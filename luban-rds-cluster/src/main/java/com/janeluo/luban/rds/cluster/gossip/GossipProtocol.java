@@ -122,7 +122,7 @@ public class GossipProtocol {
      * 默认 NoOp，保证未注入时不触发复制逻辑。
      * </p>
      */
-    private ReplicationLifecycleListener replicationLifecycleListener =
+    private volatile ReplicationLifecycleListener replicationLifecycleListener =
             new NoOpReplicationLifecycleListener();
 
     /**

@@ -720,13 +720,18 @@ public class NettyRedisServer implements RedisServer {
                      if (clusterEnabled && migrateCommandHandler != null) {
                          handler.setMigrateCommandHandler(migrateCommandHandler);
                      }
-                     // 注入复制命令处理器：非集群模式下由 replicaof 配置驱动复制，
-                     // 集群模式下由 ReplicationCoordinator 统一管理复制组件生命周期。
-                     if (replicationCoordinator != null
-                             && replicationCoordinator.getReplicationCommandHandler() != null) {
-                         handler.setReplicationCommandHandler(
-                                 replicationCoordinator.getReplicationCommandHandler());
-                     }
+                    // 注入复制命令处理器：非集群模式下由 replicaof 配置驱动复制，
+                    // 集群模式下由 ReplicationCoordinator 统一管理复制组件生命周期。
+                    if (replicationCoordinator != null
+                            && replicationCoordinator.getReplicationCommandHandler() != null) {
+                        handler.setReplicationCommandHandler(
+                                replicationCoordinator.getReplicationCommandHandler());
+                    }
+                    // 注入复制协调器：用于命令传播时获取主节点复制管理器并判断角色，
+                    // 避免在 RedisServerHandler 中直接调用 MasterReplicationManager.getInstance()。
+                    if (replicationCoordinator != null) {
+                        handler.setReplicationCoordinator(replicationCoordinator);
+                    }
                      pipeline.addLast(businessGroup, "handler", handler);
                  }
              });

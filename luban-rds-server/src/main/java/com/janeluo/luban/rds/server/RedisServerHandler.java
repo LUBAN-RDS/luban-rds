@@ -17,6 +17,7 @@ import com.janeluo.luban.rds.cluster.migration.MigrateCommandHandler;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.slot.SlotManager;
 import com.janeluo.luban.rds.cluster.slot.SlotUtils;
+import com.janeluo.luban.rds.replication.MasterReplicationManager;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
@@ -186,6 +187,9 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     
     // 复制模式相关字段
     private com.janeluo.luban.rds.replication.handler.ReplicationCommandHandler replicationCommandHandler;
+
+    // 复制协调器（集群模式下由 NettyRedisServer 注入，用于获取主节点复制管理器与判断角色）
+    private ReplicationCoordinator replicationCoordinator;
     
     // 集群命令处理器
     private ClusterCommandHandler clusterCommandHandler;
@@ -227,7 +231,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         com.janeluo.luban.rds.common.config.RdsConfig config = 
             com.janeluo.luban.rds.common.context.ServerContext.getConfig();
         if (config != null) {
-            com.janeluo.luban.rds.replication.MasterReplicationManager.initialize(
+            MasterReplicationManager.initialize(
                 (int) config.getReplBacklogSize());
         }
     }
@@ -238,6 +242,20 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     public void setReplicationCommandHandler(
             com.janeluo.luban.rds.replication.handler.ReplicationCommandHandler handler) {
         this.replicationCommandHandler = handler;
+    }
+
+    /**
+     * 设置复制协调器（集群模式下由 NettyRedisServer 注入）。
+     * <p>
+     * 命令传播通过协调器获取主节点复制管理器，避免直接调用
+     * {@link MasterReplicationManager#getInstance()} 懒创建非预期的单例，
+     * 并在从节点角色下跳过传播。
+     * </p>
+     *
+     * @param coordinator 复制协调器，可为 null（非复制模式）
+     */
+    public void setReplicationCoordinator(ReplicationCoordinator coordinator) {
+        this.replicationCoordinator = coordinator;
     }
     
     /**
@@ -1457,7 +1475,6 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             case "WATCH":
             case "UNWATCH":
             case "LATENCY":
-            case "RESET":
             case "QUIT":
             case "XLEN":
             case "XRANGE":
@@ -1465,8 +1482,6 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             case "XREAD":
             case "XINFO":
             case "XPENDING":
-            case "XCLAIM":
-            case "XAUTOCLAIM":
                 return true;
             default:
                 return false;
@@ -1476,7 +1491,13 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     /**
      * 将原始 RESP 帧传播到主节点复制 backlog 与在线从节点。
      * <p>
-     * 委托给 {@link com.janeluo.luban.rds.replication.MasterReplicationManager#propagateCommand(byte[])}，
+     * 通过复制协调器获取 {@link MasterReplicationManager} 并委托其
+     * {@link MasterReplicationManager#propagateCommand(byte[])}。
+     * 若协调器未注入或本节点为从节点，跳过传播，避免：
+     * <ul>
+     *   <li>直接调用 {@code getInstance()} 懒创建非预期的单例（I2）</li>
+     *   <li>从节点误传播写命令（I3）</li>
+     * </ul>
      * 异常被捕获并记录告警，不影响主命令处理流程。
      * </p>
      *
@@ -1484,10 +1505,38 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
      */
     private void propagateCommand(byte[] rawRespFrame) {
         try {
-            com.janeluo.luban.rds.replication.MasterReplicationManager.getInstance().propagateCommand(rawRespFrame);
+            if (replicationCoordinator == null || replicationCoordinator.isSlave()) {
+                return;
+            }
+            MasterReplicationManager manager = replicationCoordinator.getMasterManager();
+            if (manager != null) {
+                manager.propagateCommand(rawRespFrame);
+            }
         } catch (Exception e) {
-            logger.warn("复制传播命令失败", e);
+            logger.warn("命令传播失败（不影响客户端响应）", e);
         }
+    }
+
+    /**
+     * 将 Command 序列化为 RESP 格式字节数组（用于事务命令传播）。
+     * <p>
+     * 事务（MULTI/EXEC）中入队的命令没有原始 RESP 帧可用（入队时仅保存了
+     * {@link Command} 对象），因此 EXEC 成功后需重新序列化每条写命令以传播到
+     * backlog 与从节点。
+     * </p>
+     *
+     * @param args 命令参数数组（args[0] 为命令名）
+     * @return RESP 格式字节数组
+     */
+    private byte[] serializeCommandToResp(String[] args) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(args.length).append("\r\n");
+        for (String arg : args) {
+            byte[] argBytes = arg.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            sb.append("$").append(argBytes.length).append("\r\n");
+            sb.append(arg).append("\r\n");
+        }
+        return sb.toString().getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
     }
 
     // 处理 WATCH 命令
@@ -1736,7 +1785,14 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 
                 results.add(result);
                 logger.debug("[EXEC] 结果已添加, 数量: {}", results.size());
-                
+
+                // 传播事务中的写命令（EXEC 成功后逐条传播）。
+                // 事务入队命令没有原始 RESP 帧，故重新序列化后传播。
+                if (shouldPropagate(commandName, result)) {
+                    byte[] respFrame = serializeCommandToResp(args);
+                    propagateCommand(respFrame);
+                }
+
                 if ("SELECT".equals(commandName) && args.length >= 2) {
                     try {
                         int database = Integer.parseInt(args[1]);

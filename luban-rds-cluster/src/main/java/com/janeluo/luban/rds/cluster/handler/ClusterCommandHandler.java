@@ -109,7 +109,7 @@ public class ClusterCommandHandler {
      * 默认使用 NoOp 实现，保证未注入时（如单元测试）不触发复制逻辑。
      * </p>
      */
-    private ReplicationLifecycleListener replicationLifecycleListener =
+    private volatile ReplicationLifecycleListener replicationLifecycleListener =
             new NoOpReplicationLifecycleListener();
 
     /**

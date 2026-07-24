@@ -59,7 +59,7 @@ public class FailoverManager {
      * 复制生命周期监听器（由 NettyRedisServer 注入，用于在 failover 提升/降级时启停复制连接）。
      * 默认 NoOp，保证未注入时不触发复制逻辑。
      */
-    private ReplicationLifecycleListener replicationLifecycleListener =
+    private volatile ReplicationLifecycleListener replicationLifecycleListener =
             new NoOpReplicationLifecycleListener();
 
     // ==================== 候选侧状态（slave 发起选举用） ====================
