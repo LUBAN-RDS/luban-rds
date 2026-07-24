@@ -1,0 +1,14 @@
+{
+  "change": "fix-cluster-restart-demote",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "14ec7ce068623622c3cc2c34087f8f7b05563bd6885adcf495f085b2dd134f8c",
+  "files": [
+    { "path": "openspec/changes/fix-cluster-restart-demote/proposal.md", "sha256": "1ccbade68ea10c578057b03ae85210805205c995182576dcdebf2a5fd9a4a817" },
+    { "path": "openspec/changes/fix-cluster-restart-demote/design.md", "sha256": "ba390c25b9e3ef49327343c34f08d457473f4eb6e229d2dcd3916728116de599" },
+    { "path": "openspec/changes/fix-cluster-restart-demote/tasks.md", "sha256": "8f3feda8f680092d9afc57e9aeb8562652c243dacb134f24c364d043fc8f5291" },
+    { "path": "openspec/changes/fix-cluster-restart-demote/specs/cluster-automatic-failover/spec.md", "sha256": "cfbad5778083071e6e7e66a507899f0a22eeba548c2d20d1e908c4eea92ae024" }
+  ]
+}
