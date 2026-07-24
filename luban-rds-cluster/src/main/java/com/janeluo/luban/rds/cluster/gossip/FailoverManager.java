@@ -577,6 +577,16 @@ public class FailoverManager {
             return;
         }
 
+        // 新主在本地可能仍是 SLAVE（重启节点的旧 nodes.conf 记录的是故障转移前的拓扑），
+        // 对齐 onFailoverResult 的 winner 提权逻辑，立即将其提升为 MASTER，避免 cluster nodes
+        // 短暂显示"slave 持有 slots"的不一致视图（否则需等下一轮 gossip 心跳纠正）。
+        if (newMaster.isSlave()) {
+            newMaster.removeState(ClusterNodeState.SLAVE);
+            newMaster.addState(ClusterNodeState.MASTER);
+            newMaster.setMasterNodeId(null);
+        }
+        newMaster.setConfigEpoch(newConfigEpoch);
+
         // 清空 MYSELF slots，归属转移到新主
         BitSet oldSlots = myNode.getSlots();
         if (oldSlots != null) {
@@ -589,6 +599,9 @@ public class FailoverManager {
         myNode.removeState(ClusterNodeState.MASTER);
         myNode.addState(ClusterNodeState.SLAVE);
         myNode.setMasterNodeId(newMasterNodeId);
+        // 降级时清除 FAIL/PFAIL（原 master 已恢复为新主的 slave 角色）
+        myNode.removeState(ClusterNodeState.FAIL);
+        myNode.removeState(ClusterNodeState.PFAIL);
         myNode.setConfigEpoch(newConfigEpoch);
         clusterConfig.setCurrentEpoch(newConfigEpoch);
 
