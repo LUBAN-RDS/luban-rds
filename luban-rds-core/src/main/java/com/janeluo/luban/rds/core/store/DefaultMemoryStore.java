@@ -291,6 +291,13 @@ public class DefaultMemoryStore implements MemoryStore {
                     .removalListener(new RemovalListener<String, StoreValue>() {
                         @Override
                         public void onRemoval(String key, StoreValue value, RemovalCause cause) {
+                            // REPLACED 表示 entry 被新值覆盖（如 pexpire/lrem 的 storage.put），
+                            // key 仍在 cache 中，不应从 keySet/slotToKeys 移除。
+                            // 仅在 key 真正离开 cache 时（显式删除、GC 回收、过期、容量淘汰）
+                            // 清理辅助索引，避免 scan/dbsize/RDB 持久化扫不到仍存在的 key。
+                            if (cause == RemovalCause.REPLACED) {
+                                return;
+                            }
                             // 当键被移除时，从keySet和slotToKeys中也移除
                             keySet.remove(key);
                             removeFromSlotIndex(key);
