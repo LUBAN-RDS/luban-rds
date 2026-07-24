@@ -1,0 +1,14 @@
+{
+  "change": "fix-cluster-failover-data-loss",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "b2ccac1290093165980ac3db1d2cbf99c8ea9059acaf6fcde56e731315fe1ce7",
+  "files": [
+    { "path": "openspec/changes/fix-cluster-failover-data-loss/proposal.md", "sha256": "16709829b2f926f5a50870b5a5ed84d1ae16cbe906a2975b8ba63984655e1dd3" },
+    { "path": "openspec/changes/fix-cluster-failover-data-loss/design.md", "sha256": "349eb6068292c8d4d28dc4f2accd926a4d62640e81dfcb9d9300f112273cc887" },
+    { "path": "openspec/changes/fix-cluster-failover-data-loss/tasks.md", "sha256": "eac358a0c962300cbc4e1cfbb069bcde0e31053091e577ec1a5d28b0da72800b" },
+    { "path": "openspec/changes/fix-cluster-failover-data-loss/specs/cluster-automatic-failover/spec.md", "sha256": "74b7e469f6bb1238ff5376b9d74a5d15072ee06a172ab4075deecf5772e45179" }
+  ]
+}

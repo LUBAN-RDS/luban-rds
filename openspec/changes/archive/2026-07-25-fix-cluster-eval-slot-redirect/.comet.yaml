@@ -1,0 +1,14 @@
+workflow: hotfix
+phase: archive
+build_mode: direct
+isolation: branch
+verify_mode: full
+base_ref: 4cdf20586c0f6a229144d7067060edd6535e70c9
+design_doc: null
+plan: null
+verify_result: pass
+verification_report: docs/superpowers/reports/2026-07-24-fix-cluster-eval-slot-redirect-verify.md
+branch_status: handled
+created_at: 2026-07-25
+verified_at: 2026-07-25
+archived: true

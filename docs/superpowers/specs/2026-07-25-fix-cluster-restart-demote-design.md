@@ -2,6 +2,8 @@
 comet_change: fix-cluster-restart-demote
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-25-fix-cluster-restart-demote
+status: final
 ---
 
 # Design Doc: 集群故障转移后旧主重启自降级

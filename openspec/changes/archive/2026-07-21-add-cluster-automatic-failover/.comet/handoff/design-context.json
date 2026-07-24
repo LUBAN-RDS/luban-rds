@@ -1,0 +1,14 @@
+{
+  "change": "add-cluster-automatic-failover",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "840dfed52519d25b1328bd2e60c612be87023b7c1a3032dd65f9c3c12d26b6cd",
+  "files": [
+    { "path": "openspec/changes/add-cluster-automatic-failover/proposal.md", "sha256": "a98ce679e820ac99ad7bbe84d236f7b92782dffe4edb9be89c8292c71ad33c15" },
+    { "path": "openspec/changes/add-cluster-automatic-failover/design.md", "sha256": "015863133d7edae2c41b6c77c4108070dac7018db45015f3f1907973b8d60713" },
+    { "path": "openspec/changes/add-cluster-automatic-failover/tasks.md", "sha256": "59a0c362afd1a197205e87448368696229ba81b1417beb74d0f59587211b5480" },
+    { "path": "openspec/changes/add-cluster-automatic-failover/specs/cluster-automatic-failover/spec.md", "sha256": "9a9219c34cd7f6ff2ca3b5f4ccddab69b939838aa8a599e83c1e8ad703e91f85" }
+  ]
+}

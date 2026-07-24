@@ -11,7 +11,7 @@ verification_report: docs/superpowers/reports/2026-07-25-fix-cluster-restart-dem
 branch_status: handled
 created_at: 2026-07-25
 verified_at: 2026-07-25
-archived: false
+archived: true
 handoff_context: openspec/changes/fix-cluster-restart-demote/.comet/handoff/design-context.json
 handoff_hash: 14ec7ce068623622c3cc2c34087f8f7b05563bd6885adcf495f085b2dd134f8c
 build_command: mvn -pl luban-rds-cluster test -Dtest=GossipSelfDemoteTest

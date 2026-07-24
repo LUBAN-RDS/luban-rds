@@ -1,0 +1,14 @@
+workflow: hotfix
+phase: archive
+build_mode: direct
+isolation: branch
+verify_mode: light
+base_ref: 4eb0b821fb1ddbf7cafa17163635693604966076
+design_doc: null
+plan: null
+verify_result: pass
+verification_report: docs/superpowers/reports/2026-07-21-fix-cluster-failover-pfail-vote-propagation-verify.md
+branch_status: handled
+created_at: 2026-07-21
+verified_at: 2026-07-21
+archived: true
