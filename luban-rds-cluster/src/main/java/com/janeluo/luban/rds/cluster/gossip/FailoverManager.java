@@ -3,6 +3,8 @@ package com.janeluo.luban.rds.cluster.gossip;
 import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
+import com.janeluo.luban.rds.cluster.lifecycle.NoOpReplicationLifecycleListener;
+import com.janeluo.luban.rds.cluster.lifecycle.ReplicationLifecycleListener;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 import com.janeluo.luban.rds.cluster.slot.SlotManager;
@@ -53,6 +55,13 @@ public class FailoverManager {
     private final long nodeTimeout;
     private final long gracePeriod;
 
+    /**
+     * 复制生命周期监听器（由 NettyRedisServer 注入，用于在 failover 提升/降级时启停复制连接）。
+     * 默认 NoOp，保证未注入时不触发复制逻辑。
+     */
+    private ReplicationLifecycleListener replicationLifecycleListener =
+            new NoOpReplicationLifecycleListener();
+
     // ==================== 候选侧状态（slave 发起选举用） ====================
     private FailoverState state = FailoverState.IDLE;
     private long electionStartTime;
@@ -90,6 +99,16 @@ public class FailoverManager {
         this.onTopologyChanged = onTopologyChanged;
         this.nodeTimeout = nodeTimeout;
         this.gracePeriod = gracePeriod;
+    }
+
+    /**
+     * 设置复制生命周期监听器（由 NettyRedisServer 在装配时注入）。
+     *
+     * @param listener 复制生命周期监听器，null 时回退为 NoOp 实现
+     */
+    public void setReplicationLifecycleListener(ReplicationLifecycleListener listener) {
+        this.replicationLifecycleListener =
+                listener != null ? listener : new NoOpReplicationLifecycleListener();
     }
 
     public synchronized FailoverState getState() {
@@ -416,6 +435,16 @@ public class FailoverManager {
         masterNode.removeState(ClusterNodeState.PFAIL);
 
         stateManager.updateClusterState();
+
+        // 通知复制生命周期：本节点角色变更。
+        // performFailover 由手动 CLUSTER FAILOVER 与自动胜选 performFailoverAndBroadcast 共用，
+        // 两个入口都直接调用本方法，因此在此统一通知即可覆盖两条路径。
+        if (slaveNode.isMyself()) {
+            replicationLifecycleListener.promoteToMaster();
+        }
+        if (masterNode.isMyself()) {
+            replicationLifecycleListener.demoteToSlave(slaveNode);
+        }
     }
 
     // ==================== 全节点：处理 FailoverResult ====================
@@ -494,6 +523,20 @@ public class FailoverManager {
         }
 
         clusterConfig.setCurrentEpoch(msg.getNewConfigEpoch());
+
+        // 通知复制生命周期：本节点角色因 FailoverResult 广播而变更。
+        // 必须在 notifyTopologyChanged 之前完成角色判定，确保 winner 已是 master、
+        // 本地 demoted 节点已是 slave（其 masterNodeId 已指向 winner）。
+        ClusterNode myNode = clusterConfig.getMyNode();
+        if (myNode != null) {
+            if (myNode.getNodeId().equals(winner.getNodeId()) && myNode.isMaster()) {
+                replicationLifecycleListener.promoteToMaster();
+            } else if (myNode.isSlave() && myNode.getMasterNodeId() != null
+                    && myNode.getMasterNodeId().equals(winner.getNodeId())) {
+                replicationLifecycleListener.demoteToSlave(winner);
+            }
+        }
+
         notifyTopologyChanged();
         logger.warn("应用 FailoverResult: winner={}, epoch={}, slotCount={}",
                 winner.getNodeId(), msg.getNewConfigEpoch(), winner.getSlotCount());

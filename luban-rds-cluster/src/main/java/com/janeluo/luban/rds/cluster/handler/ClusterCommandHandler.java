@@ -5,6 +5,8 @@ import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
 import com.janeluo.luban.rds.cluster.config.ClusterStats;
 import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
+import com.janeluo.luban.rds.cluster.lifecycle.NoOpReplicationLifecycleListener;
+import com.janeluo.luban.rds.cluster.lifecycle.ReplicationLifecycleListener;
 import com.janeluo.luban.rds.cluster.node.ClusterLink;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
@@ -102,6 +104,15 @@ public class ClusterCommandHandler {
     private Runnable onTopologyChanged;
 
     /**
+     * 复制生命周期监听器（由 NettyRedisServer 注入，用于在角色变更时启停复制连接）。
+     * <p>
+     * 默认使用 NoOp 实现，保证未注入时（如单元测试）不触发复制逻辑。
+     * </p>
+     */
+    private ReplicationLifecycleListener replicationLifecycleListener =
+            new NoOpReplicationLifecycleListener();
+
+    /**
      * 构造方法
      *
      * @param clusterConfig           集群配置
@@ -136,6 +147,16 @@ public class ClusterCommandHandler {
      */
     public void setOnTopologyChanged(Runnable onTopologyChanged) {
         this.onTopologyChanged = onTopologyChanged;
+    }
+
+    /**
+     * 设置复制生命周期监听器（由 NettyRedisServer 在装配时注入）。
+     *
+     * @param listener 复制生命周期监听器，null 时回退为 NoOp 实现
+     */
+    public void setReplicationLifecycleListener(ReplicationLifecycleListener listener) {
+        this.replicationLifecycleListener =
+                listener != null ? listener : new NoOpReplicationLifecycleListener();
     }
 
     /**
@@ -684,6 +705,9 @@ public class ClusterCommandHandler {
 
         logger.info("CLUSTER REPLICATE: current node is now slave of {}", masterNodeId);
         notifyTopologyChanged();
+        // 通知复制生命周期：本节点成为 slave，应停止旧连接并向新 master 发起 PSYNC。
+        // 放在 notifyTopologyChanged 之后、返回响应之前，确保拓扑已持久化后再启动复制。
+        replicationLifecycleListener.replicateTo(masterNode);
         return "+OK\r\n";
     }
 

@@ -5,6 +5,8 @@ import com.janeluo.luban.rds.cluster.bus.ClusterBusServer;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
+import com.janeluo.luban.rds.cluster.lifecycle.NoOpReplicationLifecycleListener;
+import com.janeluo.luban.rds.cluster.lifecycle.ReplicationLifecycleListener;
 import com.janeluo.luban.rds.cluster.migration.SlotMigrationManager;
 import com.janeluo.luban.rds.cluster.node.ClusterLink;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
@@ -111,6 +113,17 @@ public class GossipProtocol {
      * </p>
      */
     private Runnable onTopologyChanged;
+
+    /**
+     * 复制生命周期监听器（由 NettyRedisServer 注入）。
+     * <p>
+     * 当前仅持有引用，供未来 Gossip 直接感知角色变更时使用。
+     * 实际复制启停由 ClusterCommandHandler / FailoverManager 各自注入的实例处理。
+     * 默认 NoOp，保证未注入时不触发复制逻辑。
+     * </p>
+     */
+    private ReplicationLifecycleListener replicationLifecycleListener =
+            new NoOpReplicationLifecycleListener();
 
     /**
      * 随机数生成器（ThreadLocal 避免竞争）
@@ -245,6 +258,16 @@ public class GossipProtocol {
      */
     public void setOnTopologyChanged(Runnable onTopologyChanged) {
         this.onTopologyChanged = onTopologyChanged;
+    }
+
+    /**
+     * 设置复制生命周期监听器（由 NettyRedisServer 在装配时注入）。
+     *
+     * @param listener 复制生命周期监听器，null 时回退为 NoOp 实现
+     */
+    public void setReplicationLifecycleListener(ReplicationLifecycleListener listener) {
+        this.replicationLifecycleListener =
+                listener != null ? listener : new NoOpReplicationLifecycleListener();
     }
 
     /**
