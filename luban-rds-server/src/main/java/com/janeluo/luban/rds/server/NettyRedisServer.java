@@ -497,6 +497,15 @@ public class NettyRedisServer implements RedisServer {
         
         logger.info("从配置文件恢复集群状态: 节点数={}, 槽位数={}, currentEpoch={}, configEpoch={}",
                 loaded.getNodeCount(), restoredSlots, loaded.getCurrentEpoch(), loaded.getConfigEpoch());
+
+        // 诊断：若 MYSELF 以 master 恢复但本地 configEpoch 低于 currentEpoch，
+        // 说明本地视图可能滞后于集群（如故障转移后重启），等待 gossip 对齐纠正角色
+        ClusterNode restoredMy = clusterConfig.getMyNode();
+        if (restoredMy != null && restoredMy.isMaster()
+                && clusterConfig.getConfigEpoch() < clusterConfig.getCurrentEpoch()) {
+            logger.info("MYSELF 以本地配置恢复为 master, configEpoch={}, currentEpoch={}, 等待 gossip 对齐",
+                    clusterConfig.getConfigEpoch(), clusterConfig.getCurrentEpoch());
+        }
     }
 
     /**
