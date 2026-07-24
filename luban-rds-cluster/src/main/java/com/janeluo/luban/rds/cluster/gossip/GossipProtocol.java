@@ -596,6 +596,28 @@ public class GossipProtocol {
                         meet.getSenderNodeId(), meet.getSenderIp(), meet.getSenderPort());
                 busClient.connect(meet.getSenderNodeId(), meet.getSenderIp(), meet.getSenderPort());
             }
+        } else {
+            // 已存在节点：若 MEET 消息中的地址与本地记录不一致（例如 CLUSTER MEET 用
+            // 127.0.0.1 建连导致关联节点 IP 记录为 127.0.0.1，但真实节点通告 192.10.0.125），
+            // 以消息中的通告地址为准。MEET 消息始终由发送方主动生成，其地址是发送方自身解析
+            // 的权威地址，可作为 Gossip 地址收敛的唯一权威来源。
+            String meetIp = meet.getSenderIp();
+            int meetPort = meet.getSenderPort();
+            int meetBusPort = meet.getSenderBusPort();
+            if (!meetIp.equals(senderNode.getIp()) || meetPort != senderNode.getPort()
+                    || meetBusPort != senderNode.getBusPort()) {
+                logger.info("从 MEET 消息更新节点地址: nodeId={}, old={}, new={}:{}@{}",
+                        meet.getSenderNodeId(), senderNode.getFullAddress(),
+                        meetIp, meetPort, meetBusPort);
+                senderNode.setIp(meetIp);
+                senderNode.setPort(meetPort);
+                senderNode.setBusPort(meetBusPort);
+
+                // 同时更新出站连接（地址变更后旧通道可能不可用）
+                if (busClient != null) {
+                    busClient.connect(meet.getSenderNodeId(), meetIp, meetPort);
+                }
+            }
         }
 
         // 更新节点信息（包含握手完成处理）
