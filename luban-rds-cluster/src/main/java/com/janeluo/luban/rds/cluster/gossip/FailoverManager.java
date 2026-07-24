@@ -550,6 +550,56 @@ public class FailoverManager {
     }
 
     /**
+     * 经 gossip 心跳触发的 MYSELF 自降级
+     * <p>
+     * 当重启的原主节点收到携带更高 configEpoch 的 PONG/PING，且其 gossip section
+     * 指出 MYSELF 现为某新主的 SLAVE 时调用。与 {@link #onFailoverResult} 共用
+     * synchronized 监视器，保证与并发 FailoverResult 处理串行化。
+     * </p>
+     * <p>
+     * 幂等：MYSELF 已是 SLAVE 时直接返回。新主记录不在本地配置时跳过（等下一轮
+     * 心跳发现新主后再降级）。
+     * </p>
+     *
+     * @param newMasterNodeId 新主节点 ID
+     * @param newConfigEpoch  触发降级的 gossip configEpoch（已校验大于本地基线）
+     */
+    public synchronized void applySelfDemotion(String newMasterNodeId, long newConfigEpoch) {
+        ClusterNode myNode = clusterConfig.getMyNode();
+        if (myNode == null || !myNode.isMaster()) {
+            // 幂等：已是 slave 或无 MYSELF 记录则跳过
+            return;
+        }
+        ClusterNode newMaster = clusterConfig.getNode(newMasterNodeId);
+        if (newMaster == null) {
+            logger.warn("自降级跳过: 新主节点未在本地配置中, newMasterId={}, 等待后续心跳发现",
+                    newMasterNodeId);
+            return;
+        }
+
+        // 清空 MYSELF slots，归属转移到新主
+        BitSet oldSlots = myNode.getSlots();
+        if (oldSlots != null) {
+            for (int i = oldSlots.nextSetBit(0); i >= 0; i = oldSlots.nextSetBit(i + 1)) {
+                slotManager.setSlotOwner(i, newMasterNodeId);
+                clusterConfig.setSlotOwner(i, newMasterNodeId);
+            }
+        }
+        myNode.clearSlots();
+        myNode.removeState(ClusterNodeState.MASTER);
+        myNode.addState(ClusterNodeState.SLAVE);
+        myNode.setMasterNodeId(newMasterNodeId);
+        myNode.setConfigEpoch(newConfigEpoch);
+        clusterConfig.setCurrentEpoch(newConfigEpoch);
+
+        // 切换复制方向：向新主发起同步
+        replicationLifecycleListener.demoteToSlave(newMaster);
+        notifyTopologyChanged();
+        logger.warn("MYSELF 经 gossip 自降级为 slave: newMaster={}, configEpoch={}",
+                newMasterNodeId, newConfigEpoch);
+    }
+
+    /**
      * 检查 node 是否持有 slots 中的任意槽位
      */
     private boolean sharesAnySlot(ClusterNode node, BitSet slots) {
