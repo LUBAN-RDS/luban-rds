@@ -47,6 +47,9 @@ public class SlaveReplicationService implements ReplicationCallback {
     // RDB 数据加载器
     private RdbDataLoader rdbDataLoader;
     private MemoryStore memoryStore;
+
+    // 复制流应用器：解析并重放主节点传播的 RESP 命令流
+    private ReplicationStreamApplier streamApplier;
     
     // 只读模式管理器
     private final ReadOnlyModeManager readOnlyModeManager;
@@ -83,6 +86,8 @@ public class SlaveReplicationService implements ReplicationCallback {
      */
     public void setMemoryStore(MemoryStore memoryStore) {
         this.memoryStore = memoryStore;
+        this.streamApplier = new ReplicationStreamApplier(memoryStore);
+        logger.info("Replication stream applier initialized with memory store");
     }
     
     /**
@@ -118,16 +123,21 @@ public class SlaveReplicationService implements ReplicationCallback {
      */
     public synchronized void stop() {
         logger.info("停止从节点复制服务");
-        
+
         state.set(ReplicationState.DISCONNECTED);
-        
+
+        if (streamApplier != null) {
+            streamApplier.close();
+            streamApplier = null;
+        }
+
         if (heartbeatScheduler != null) {
             heartbeatScheduler.shutdown();
             heartbeatScheduler = null;
         }
-        
+
         client.stop();
-        
+
         // 取消 RDB 加载
         if (rdbDataLoader != null && rdbDataLoader.isLoading()) {
             rdbDataLoader.cancelLoading();
@@ -231,20 +241,27 @@ public class SlaveReplicationService implements ReplicationCallback {
     
     @Override
     public void onCommandPropagation(ByteBuf data) {
+        if (streamApplier == null) {
+            logger.warn("收到命令传播但复制流应用器未初始化，丢弃数据: {} bytes", data.readableBytes());
+            data.release();
+            return;
+        }
+
         try {
             logger.debug("收到命令传播: {} bytes", data.readableBytes());
-            
-            // 这里需要解析并执行命令
-            // 更新偏移量
-            slaveReplOffset.addAndGet(data.readableBytes());
-            
+
+            streamApplier.applyData(data);
+            slaveReplOffset.set(streamApplier.getAppliedOffset());
+
             // 标记为在线
             if (state.get() != ReplicationState.ONLINE) {
                 state.set(ReplicationState.ONLINE);
                 logger.info("复制同步完成，进入在线状态");
             }
-        } finally {
-            data.release();
+        } catch (ReplicationApplyException e) {
+            logger.error("应用复制命令流失败，触发断开重连", e);
+            // applyData 内部已释放 data；触发断开重连以恢复一致性
+            client.reconnect();
         }
     }
     
