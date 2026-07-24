@@ -142,4 +142,20 @@ class GossipSelfDemoteTest {
         assertDoesNotThrow(() -> gossipProtocol.handlePong(pong));
         assertTrue(clusterConfig.getMyNode().isSlave());
     }
+
+    @Test
+    @DisplayName("PONG 携带 senderCurrentEpoch 时本地 currentEpoch 应被同步提升")
+    void currentEpochSyncedFromPongSenderCurrentEpoch() {
+        // 本地 currentEpoch 已是 9（setUp）；构造 senderCurrentEpoch=12 的 PONG。
+        // sender 已在 setUp 中加入本地配置，直接发送 PONG 即可。
+        PongMessage pong = new PongMessage(NEW_MASTER_ID, System.currentTimeMillis());
+        pong.setSenderCurrentEpoch(12L);
+        pong.setSenderConfigEpoch(9L);
+        pong.setSenderFlags(EnumSet.of(ClusterNodeState.MASTER));
+
+        gossipProtocol.handlePong(pong);
+
+        assertEquals(12L, clusterConfig.getCurrentEpoch(),
+                "本地 currentEpoch 应被提升到发送方的 senderCurrentEpoch");
+    }
 }
