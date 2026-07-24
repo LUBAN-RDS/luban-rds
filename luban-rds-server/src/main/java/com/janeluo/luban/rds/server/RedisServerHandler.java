@@ -273,13 +273,24 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                             continue;
                         }
                     }
+                    // 捕获 raw RESP 帧字节：在 parse 前后记录 readerIndex，
+                    // parse 成功会推进 readerIndex，差值即为完整一帧的字节范围。
+                    // 该原始帧用于复制传播（backlog + 推送从节点），避免重新序列化。
+                    int readerIndexBefore = clientInfo.getInboundBuf().readerIndex();
                     Command command = protocolParser.parse(clientInfo.getInboundBuf());
                     if (command == null) {
                         break;
                     }
+                    int readerIndexAfter = clientInfo.getInboundBuf().readerIndex();
+                    byte[] rawRespFrame = null;
+                    if (readerIndexAfter > readerIndexBefore) {
+                        int frameLength = readerIndexAfter - readerIndexBefore;
+                        rawRespFrame = new byte[frameLength];
+                        clientInfo.getInboundBuf().getBytes(readerIndexBefore, rawRespFrame);
+                    }
                     try {
                         TraceContext.startTrace();
-                        processCommand(ctx, clientInfo, command);
+                        processCommand(ctx, clientInfo, command, rawRespFrame);
                     } finally {
                         TraceContext.endTrace();
                     }
@@ -400,7 +411,8 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         return negative ? -result : result;
     }
     
-private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Command command) {
+private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Command command,
+                            byte[] rawRespFrame) {
         try {
             String rawCommandName = command.getName();
             String commandName = rawCommandName != null ? rawCommandName.trim().toUpperCase() : "";
@@ -722,6 +734,12 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             Object response = commandHandler.handle(commandName, currentDatabase, args, memoryStore);
             long duration = (System.nanoTime() - startTime) / 1000; // microseconds
             SlowLogManager.getInstance().push(duration, java.util.Arrays.asList(args), ctx.channel().remoteAddress().toString(), clientInfo.getName());
+
+            // 复制传播：非只读、非失败、非重定向的写命令传播到 backlog 与在线从节点。
+            // 仅当存在原始 RESP 帧时尝试传播（内部调用 processCommand 时 rawRespFrame 为 null，跳过）。
+            if (rawRespFrame != null && shouldPropagate(commandName, response)) {
+                propagateCommand(rawRespFrame);
+            }
             
             if ("AUTH".equals(commandName) && clientInfo != null) {
                 if (response instanceof String && ((String) response).startsWith("+OK")) {
@@ -1317,7 +1335,161 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         if ("XAUTOCLAIM".equals(n)) return argc >= 6; // XAUTOCLAIM key group consumer min-idle-time start
         return true;
     }
-    
+
+    // ==================== 复制传播辅助方法 ====================
+
+    /**
+     * 判断命令是否应被传播到复制 backlog 与从节点。
+     * <p>
+     * 不传播的情况：
+     * <ul>
+     *   <li>响应为 null（异常或空响应）</li>
+     *   <li>响应为错误字符串（以 "-" 开头，如 -ERR / -MOVED / -ASK / -CLUSTERDOWN / -NOAUTH 等）</li>
+     *   <li>命令为只读命令（GET / HGET / LRANGE 等）</li>
+     * </ul>
+     * 其余写命令均传播。
+     * </p>
+     *
+     * @param commandName 命令名（原始大小写）
+     * @param response    命令处理响应
+     * @return true 表示应传播
+     */
+    private boolean shouldPropagate(String commandName, Object response) {
+        if (response == null) {
+            return false;
+        }
+        if (response instanceof String) {
+            String resp = (String) response;
+            if (resp.startsWith("-")) {
+                // 错误响应不传播：-ERR / -MOVED / -ASK / -CLUSTERDOWN / -EXECABORT
+                // / -NOPROTO / -LOADING / -READONLY / -NOAUTH 等
+                return false;
+            }
+        }
+        String upper = commandName != null ? commandName.toUpperCase() : "";
+        if (isReadOnlyCommand(upper)) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 判断命令是否为只读命令（不应传播到复制 backlog）。
+     * <p>
+     * 默认返回 false（即视为写命令），保证未列出的命令默认被传播，
+     * 避免遗漏新写命令导致从节点数据缺失。
+     * </p>
+     *
+     * @param upper 命令名（大写）
+     * @return true 表示只读命令
+     */
+    private boolean isReadOnlyCommand(String upper) {
+        switch (upper) {
+            case "GET":
+            case "MGET":
+            case "HGET":
+            case "HGETALL":
+            case "HMGET":
+            case "HKEYS":
+            case "HVALS":
+            case "HLEN":
+            case "HEXISTS":
+            case "HSCAN":
+            case "LINDEX":
+            case "LRANGE":
+            case "LLEN":
+            case "SMEMBERS":
+            case "SISMEMBER":
+            case "SCARD":
+            case "SSCAN":
+            case "SRANDMEMBER":
+            case "ZSCORE":
+            case "ZRANGE":
+            case "ZRANGEBYSCORE":
+            case "ZRANGEBYLEX":
+            case "ZREVRANGE":
+            case "ZREVRANGEBYSCORE":
+            case "ZCARD":
+            case "ZCOUNT":
+            case "ZRANK":
+            case "ZREVRANK":
+            case "ZSCAN":
+            case "EXISTS":
+            case "TYPE":
+            case "TTL":
+            case "PTTL":
+            case "EXPIRETIME":
+            case "PEXPIRETIME":
+            case "OBJECT":
+            case "MEMORY":
+            case "INFO":
+            case "DBSIZE":
+            case "KEYS":
+            case "SCAN":
+            case "RANDOMKEY":
+            case "STRLEN":
+            case "GETRANGE":
+            case "SUBSTR":
+            case "BITCOUNT":
+            case "GETBIT":
+            case "BITPOS":
+            case "PING":
+            case "ECHO":
+            case "AUTH":
+            case "HELLO":
+            case "SELECT":
+            case "CLIENT":
+            case "COMMAND":
+            case "CONFIG":
+            case "DEBUG":
+            case "SLOWLOG":
+            case "MONITOR":
+            case "CLUSTER":
+            case "WAIT":
+            case "PSYNC":
+            case "SYNC":
+            case "REPLCONF":
+            case "SLAVEOF":
+            case "REPLICAOF":
+            case "MULTI":
+            case "EXEC":
+            case "DISCARD":
+            case "WATCH":
+            case "UNWATCH":
+            case "LATENCY":
+            case "RESET":
+            case "QUIT":
+            case "XLEN":
+            case "XRANGE":
+            case "XREVRANGE":
+            case "XREAD":
+            case "XINFO":
+            case "XPENDING":
+            case "XCLAIM":
+            case "XAUTOCLAIM":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * 将原始 RESP 帧传播到主节点复制 backlog 与在线从节点。
+     * <p>
+     * 委托给 {@link com.janeluo.luban.rds.replication.MasterReplicationManager#propagateCommand(byte[])}，
+     * 异常被捕获并记录告警，不影响主命令处理流程。
+     * </p>
+     *
+     * @param rawRespFrame 原始 RESP 帧字节
+     */
+    private void propagateCommand(byte[] rawRespFrame) {
+        try {
+            com.janeluo.luban.rds.replication.MasterReplicationManager.getInstance().propagateCommand(rawRespFrame);
+        } catch (Exception e) {
+            logger.warn("复制传播命令失败", e);
+        }
+    }
+
     // 处理 WATCH 命令
     private void handleWatchCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, int currentDatabase, String[] args) {
         try {

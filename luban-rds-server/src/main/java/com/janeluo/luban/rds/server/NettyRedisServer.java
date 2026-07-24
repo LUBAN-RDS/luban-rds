@@ -131,6 +131,15 @@ public class NettyRedisServer implements RedisServer {
      * 集群总线客户端
      */
     private ClusterBusClient clusterBusClient;
+
+    /**
+     * 复制协调器：装配集群角色生命周期与复制组件（master/slave 复制连接）。
+     * <p>
+     * 由构造函数在加载持久化数据后、initClusterMode 前创建，供集群模块注入回调，
+     * 并在 start()/stop() 时管理从节点复制服务的启停。
+     * </p>
+     */
+    private ReplicationCoordinator replicationCoordinator;
     
     // ==================== 哨兵相关组件 ====================
     
@@ -242,6 +251,12 @@ public class NettyRedisServer implements RedisServer {
         RuntimeConfig.setLuaYieldMs(config.getLuaYieldMs());
         RuntimeConfig.setLuaAllowedModules(config.getLuaAllowedModules());
         RuntimeConfig.setLuaBlockedFunctions(config.getLuaBlockedFunctions());
+        
+        // 初始化复制协调器：必须在 initClusterMode 之前，使 ServerContext.getConfig() 可用，
+        // 并让集群模块在装配时能注入 ReplicationLifecycleListener。
+        this.replicationCoordinator = new ReplicationCoordinator(config, memoryStore, persistService);
+        this.replicationCoordinator.setup();
+        ServerContext.setConfig(config);
         
         // 初始化集群模式
         if (config.isClusterEnabled()) {
@@ -392,6 +407,15 @@ public class NettyRedisServer implements RedisServer {
                 config.getClusterFailoverGracePeriod());
         this.gossipProtocol.setFailoverManager(failoverManager);
         logger.info("FailoverManager 已注入: gracePeriod={}ms", config.getClusterFailoverGracePeriod());
+
+        // 10.55 注入复制生命周期监听器到集群组件，使角色变更触发复制连接启停。
+        // ReplicationCoordinator 已在构造函数中创建并 setup()，此处仅做装配注入。
+        if (replicationCoordinator != null) {
+            this.clusterCommandHandler.setReplicationLifecycleListener(replicationCoordinator);
+            failoverManager.setReplicationLifecycleListener(replicationCoordinator);
+            this.gossipProtocol.setReplicationLifecycleListener(replicationCoordinator);
+            logger.info("ReplicationLifecycleListener 已注入集群组件");
+        }
 
         // 10.6 初始化 SlotMigrationManager 和 MigrateCommandHandler
         // SlotMigrationManager 用于处理 MIGRATE_KEY 消息（目标节点 importKey），
@@ -696,6 +720,13 @@ public class NettyRedisServer implements RedisServer {
                      if (clusterEnabled && migrateCommandHandler != null) {
                          handler.setMigrateCommandHandler(migrateCommandHandler);
                      }
+                     // 注入复制命令处理器：非集群模式下由 replicaof 配置驱动复制，
+                     // 集群模式下由 ReplicationCoordinator 统一管理复制组件生命周期。
+                     if (replicationCoordinator != null
+                             && replicationCoordinator.getReplicationCommandHandler() != null) {
+                         handler.setReplicationCommandHandler(
+                                 replicationCoordinator.getReplicationCommandHandler());
+                     }
                      pipeline.addLast(businessGroup, "handler", handler);
                  }
              });
@@ -789,6 +820,12 @@ public class NettyRedisServer implements RedisServer {
             
             // 保存集群配置
             saveClusterConfig();
+            
+            // 关闭复制协调器：停止从节点复制服务 + 关闭主节点复制管理器。
+            // 放在 persistService.persist 之前，避免复制线程与持久化并发写内存存储。
+            if (replicationCoordinator != null) {
+                replicationCoordinator.shutdown();
+            }
             
             // 停止定期持久化任务
             persistExecutor.shutdown();
