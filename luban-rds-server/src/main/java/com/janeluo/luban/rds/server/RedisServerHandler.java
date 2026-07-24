@@ -2259,8 +2259,19 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         
         int slot = SlotUtils.keyHashSlot(key);
         
-        // 检查槽位是否已分配
-        if (!slotManager.isSlotAssigned(slot)) {
+        // 检查槽位是否已分配。
+        // ⚠ 优先从 clusterConfig（Gossip 维护的权威槽位表）读取，因为 slotManager
+        // (DefaultSlotManager) 的 slotOwners[] 数组仅在启动时从 clusterConfig 同步一次，
+        // 后续 Gossip 更新不会同步到 slotManager，导致从节点始终返回 CLUSTERDOWN。
+        // 当 clusterConfig 不可用或 slot 在其中未分配时，回退到 slotManager。
+        String ownerNodeId = null;
+        if (clusterConfig != null) {
+            ownerNodeId = clusterConfig.getSlotOwner(slot);
+        }
+        if (ownerNodeId == null) {
+            ownerNodeId = slotManager.getSlotOwner(slot);
+        }
+        if (ownerNodeId == null) {
             return "-CLUSTERDOWN Hash slot not served\r\n";
         }
         
@@ -2270,7 +2281,6 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 return "-CLUSTERDOWN No cluster config\r\n";
             }
             
-            String ownerNodeId = slotManager.getSlotOwner(slot);
             ClusterNode owner = clusterConfig.getNode(ownerNodeId);
             
             if (owner == null) {
