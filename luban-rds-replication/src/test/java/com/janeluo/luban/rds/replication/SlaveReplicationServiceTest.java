@@ -1,6 +1,8 @@
 package com.janeluo.luban.rds.replication;
 
 import com.janeluo.luban.rds.common.config.RdsConfig;
+import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
+import com.janeluo.luban.rds.core.store.MemoryStore;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import org.junit.jupiter.api.AfterEach;
@@ -16,6 +18,7 @@ class SlaveReplicationServiceTest {
 
     private SlaveReplicationService service;
     private ReplicationBacklog testBacklog;
+    private MemoryStore memoryStore;
 
     @BeforeEach
     void setUp() {
@@ -23,9 +26,11 @@ class SlaveReplicationServiceTest {
         config.setPort(9737);
         config.setReplicaof("127.0.0.1:9736");
         config.setSlaveReadOnly(true);
-        
+
         service = new SlaveReplicationService(config);
         testBacklog = new ReplicationBacklog(1024);
+        memoryStore = new DefaultMemoryStore(16, 0L, "noeviction");
+        service.setMemoryStore(memoryStore);
     }
 
     @AfterEach
@@ -128,12 +133,13 @@ class SlaveReplicationServiceTest {
     void testOnCommandPropagation() {
         setServiceState(service, ReplicationState.PARTIAL_SYNC);
         long initialOffset = service.getReplOffset();
-        
-        ByteBuf data = Unpooled.copiedBuffer("SET key value", StandardCharsets.UTF_8);
+
+        ByteBuf data = Unpooled.copiedBuffer("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n", StandardCharsets.UTF_8);
+        int frameLength = data.readableBytes();
         service.onCommandPropagation(data);
-        
+
         assertEquals(ReplicationState.ONLINE, service.getState());
-        assertEquals(initialOffset + 13, service.getReplOffset());
+        assertEquals(initialOffset + frameLength, service.getReplOffset());
     }
 
     @Test
@@ -141,12 +147,13 @@ class SlaveReplicationServiceTest {
     void testOnCommandPropagationAlreadyOnline() {
         setServiceState(service, ReplicationState.ONLINE);
         long initialOffset = service.getReplOffset();
-        
-        ByteBuf data = Unpooled.copiedBuffer("SET key value", StandardCharsets.UTF_8);
+
+        ByteBuf data = Unpooled.copiedBuffer("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n", StandardCharsets.UTF_8);
+        int frameLength = data.readableBytes();
         service.onCommandPropagation(data);
-        
+
         assertEquals(ReplicationState.ONLINE, service.getState());
-        assertEquals(initialOffset + 13, service.getReplOffset());
+        assertEquals(initialOffset + frameLength, service.getReplOffset());
     }
 
     @Test
