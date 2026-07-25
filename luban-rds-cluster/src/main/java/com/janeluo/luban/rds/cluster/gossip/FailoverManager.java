@@ -514,6 +514,9 @@ public class FailoverManager {
                 node.removeState(ClusterNodeState.MASTER);
                 node.addState(ClusterNodeState.SLAVE);
                 node.setMasterNodeId(winner.getNodeId());
+                // 提升旧 master 的 configEpoch 到 winner epoch，使 gossip 传播的 epoch
+                // 严格大于旧主本地恢复值，触发 handleMyselfGossipEntry 自降级门控。
+                node.setConfigEpoch(msg.getNewConfigEpoch());
                 // 降级时清除 FAIL/PFAIL（原 master 已恢复为 winner 的 slave 角色）
                 node.removeState(ClusterNodeState.FAIL);
                 node.removeState(ClusterNodeState.PFAIL);

@@ -478,6 +478,7 @@ public class ClusterConfigPersisterTest {
         node.setBusPort(17000);
         node.addState(ClusterNodeState.MASTER);
         node.addState(ClusterNodeState.MYSELF);
+        node.setConfigEpoch(5);
         config.addNode(node);
 
         return config;

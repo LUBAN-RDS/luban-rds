@@ -91,7 +91,11 @@ public class ClusterConfigPersister {
             // 写入当前配置纪元
             writer.write("# Current Epoch: " + config.getCurrentEpoch());
             writer.newLine();
-            writer.write("# My Config Epoch: " + config.getConfigEpoch());
+            // 使用 MYSELF 节点的实际 configEpoch，而非 ClusterConfig 级别的独立字段
+            //（后者仅在 restoreClusterFromConfig 时从 header 恢复，永远为 0，造成误导）。
+            ClusterNode myNode = config.getMyNode();
+            long myConfigEpoch = myNode != null ? myNode.getConfigEpoch() : config.getConfigEpoch();
+            writer.write("# My Config Epoch: " + myConfigEpoch);
             writer.newLine();
             writer.newLine();
 
