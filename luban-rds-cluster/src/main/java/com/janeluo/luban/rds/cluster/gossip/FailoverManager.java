@@ -376,6 +376,10 @@ public class FailoverManager {
 
         clusterConfig.incrementEpoch();
         me.setConfigEpoch(clusterConfig.getCurrentEpoch());
+        // 旧 master 降级后同步提升其 configEpoch，使 gossip 传播的 epoch 严格大于
+        // 旧主本地恢复值，触发 handleMyselfGossipEntry 自降级门控。
+        // performFailover 仅处理角色/槽位，不涉及 epoch 同步，故在此补全。
+        oldMaster.setConfigEpoch(clusterConfig.getCurrentEpoch());
         state = FailoverState.ELECTED;
 
         FailoverResultMessage result = new FailoverResultMessage(
@@ -506,10 +510,20 @@ public class FailoverManager {
             }
         }
 
-        // 原 master（持有这些槽位且非 winner 的旧 master）降级为 winner 的 slave
+        // 原 master（持有这些槽位且非 winner 的旧 master）降级为 winner 的 slave。
+        // 双路径覆盖：
+        // ① sharesAnySlot：旧 master 仍持有槽位时直接匹配（正常时序）。
+        // ② 备选路径 (staleMaster)：先到的 gossip 同步已将槽位移交给 winner，
+        //    sharesAnySlot 返回 false 导致降级被跳过。此时检测 MASTER 且无槽位
+        //    且 configEpoch 低于 winner epoch，判定为旧 master 并补偿降级。
         for (ClusterNode node : clusterConfig.getAllNodes()) {
-            if (node.isMaster() && !node.getNodeId().equals(winner.getNodeId())
-                    && sharesAnySlot(node, inherited)) {
+            boolean isOldMaster = node.isMaster() && !node.getNodeId().equals(winner.getNodeId())
+                    && sharesAnySlot(node, inherited);
+            boolean isStaleMaster = node.isMaster() && !node.getNodeId().equals(winner.getNodeId())
+                    && node.getSlotCount() == 0
+                    && node.getConfigEpoch() < msg.getNewConfigEpoch();
+
+            if (isOldMaster || isStaleMaster) {
                 node.clearSlots();
                 node.removeState(ClusterNodeState.MASTER);
                 node.addState(ClusterNodeState.SLAVE);
