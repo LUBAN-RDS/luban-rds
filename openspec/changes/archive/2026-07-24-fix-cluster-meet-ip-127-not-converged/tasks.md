@@ -1,2 +1,0 @@
-- [x] **Task 1**: 修复 `handleMeet()` — 已存在节点时从 MEET 消息更新 IP/Port/BusPort
-- [x] **Task 2**: 运行测试验证 — 44 tests, 0 failures
