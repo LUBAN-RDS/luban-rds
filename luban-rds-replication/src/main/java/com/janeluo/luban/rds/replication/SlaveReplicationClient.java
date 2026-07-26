@@ -12,6 +12,9 @@ import io.netty.util.CharsetUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -68,6 +71,13 @@ public class SlaveReplicationClient {
     private final AtomicInteger successfulReconnects = new AtomicInteger(0);
     private final AtomicLong lastReconnectTime = new AtomicLong(0);
     private final AtomicLong totalReconnectTime = new AtomicLong(0);
+
+    // REPLCONF 握手逐条等待 + 超时兜底（C2 方案 A：状态机 + 回调驱动）
+    // 每发送一条 REPLCONF 启动一次超时，收到对应 +OK 时取消；超时则回退 DISCONNECTED 并调度重连。
+    private static final long DEFAULT_REPLCONF_TIMEOUT_MS = 5000;
+    private volatile long replconfTimeoutMs = DEFAULT_REPLCONF_TIMEOUT_MS;
+    private ScheduledExecutorService handshakeScheduler;
+    private volatile ScheduledFuture<?> replconfTimeoutFuture;
     
     /**
      * 创建复制客户端
@@ -78,7 +88,7 @@ public class SlaveReplicationClient {
     public SlaveReplicationClient(RdsConfig config, ReplicationCallback callback) {
         this.config = config;
         this.callback = callback;
-        
+
         // 解析主节点地址
         String replicaof = config.getReplicaof();
         if (replicaof != null && !replicaof.isEmpty()) {
@@ -89,6 +99,14 @@ public class SlaveReplicationClient {
             this.masterHost = null;
             this.masterPort = 0;
         }
+
+        // REPLCONF 握手超时调度器：独立守护线程，避免依赖 workerGroup 生命周期
+        // （workerGroup 在 start() 时才创建，且测试中可能不存在）
+        this.handshakeScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "slave-replconf-handshake-timeout");
+            t.setDaemon(true);
+            return t;
+        });
     }
     
     /**
@@ -250,31 +268,118 @@ public class SlaveReplicationClient {
     }
     
     /**
-     * 发送 REPLCONF
+     * 发送 REPLCONF（C2 方案 A：状态机 + 回调驱动，逐条等待响应）
+     *
+     * 仅发送第一条 REPLCONF（listening-port），状态切到 HANDSHAKE_REPLCONF_PORT，
+     * 并启动 5s 超时兜底。后续 REPLCONF（ip-address、capa）由
+     * {@link #handleReplconfResponse(String)} 收到 +OK 后在回调内驱动发送，
+     * 最后一条 CAPA 的 +OK 回调内调用 {@link #startPsync()}。
+     *
+     * 这样每条 REPLCONF 的响应都能正确匹配到各自的状态，避免一次性发送三条
+     * 导致 state.set() 覆盖、响应无法匹配的问题。
      */
     private void sendReplConf() {
         // 发送监听端口
         state.set(ReplicationState.HANDSHAKE_REPLCONF_PORT);
         sendCommand("REPLCONF", "listening-port", String.valueOf(config.getPort()));
-        
-        // 发送 IP 地址
-        state.set(ReplicationState.HANDSHAKE_REPLCONF_IP);
-        sendCommand("REPLCONF", "ip-address", "127.0.0.1");
-        
-        // 发送能力
-        state.set(ReplicationState.HANDSHAKE_REPLCONF_CAPA);
-        sendCommand("REPLCONF", "capa", "eof", "capa", "psync2");
-        
-        // 开始 PSYNC
-        startPsync();
+        scheduleReplconfTimeout();
     }
-    
+
     /**
-     * 处理 REPLCONF 响应
+     * 处理 REPLCONF 响应（C2 方案 A：回调驱动状态机）
+     *
+     * 收到 +OK 时根据当前状态推进到下一条 REPLCONF，并在每次发送时重新启动超时；
+     * 收到 -ERR 等非 +OK 响应时回退到 DISCONNECTED 并触发重连。
      */
     private void handleReplconfResponse(String response) {
         if (!response.startsWith("+OK")) {
-            logger.warn("REPLCONF 响应异常: {}", response);
+            logger.warn("REPLCONF 响应异常，回退到 DISCONNECTED: {}", response);
+            failReplconfHandshake("REPLCONF 异常响应: " + response);
+            return;
+        }
+
+        // 收到 +OK，取消对应超时
+        cancelReplconfTimeout();
+
+        ReplicationState currentState = state.get();
+        switch (currentState) {
+            case HANDSHAKE_REPLCONF_PORT:
+                // PORT +OK -> 发送 IP
+                state.set(ReplicationState.HANDSHAKE_REPLCONF_IP);
+                sendCommand("REPLCONF", "ip-address", "127.0.0.1");
+                scheduleReplconfTimeout();
+                break;
+            case HANDSHAKE_REPLCONF_IP:
+                // IP +OK -> 发送 CAPA
+                state.set(ReplicationState.HANDSHAKE_REPLCONF_CAPA);
+                sendCommand("REPLCONF", "capa", "eof", "capa", "psync2");
+                scheduleReplconfTimeout();
+                break;
+            case HANDSHAKE_REPLCONF_CAPA:
+                // CAPA +OK -> 进入 PSYNC
+                logger.info("REPLCONF 握手完成，开始 PSYNC");
+                startPsync();
+                break;
+            case HANDSHAKE_REPLCONF_ACK:
+                // REPLCONF ACK 的响应（在线阶段 ACK 确认），不参与握手推进
+                logger.debug("REPLCONF ACK 响应: {}", response);
+                break;
+            default:
+                logger.warn("REPLCONF +OK 收到时处于非预期状态: {}", currentState);
+                break;
+        }
+    }
+
+    /**
+     * 启动 REPLCONF 单条响应超时
+     */
+    private void scheduleReplconfTimeout() {
+        cancelReplconfTimeout();
+        if (handshakeScheduler == null || handshakeScheduler.isShutdown()) {
+            return;
+        }
+        final ReplicationState timeoutState = state.get();
+        replconfTimeoutFuture = handshakeScheduler.schedule(() -> {
+            handleReplconfTimeout(timeoutState);
+        }, replconfTimeoutMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 取消当前 REPLCONF 超时
+     */
+    private void cancelReplconfTimeout() {
+        ScheduledFuture<?> future = replconfTimeoutFuture;
+        if (future != null) {
+            future.cancel(false);
+            replconfTimeoutFuture = null;
+        }
+    }
+
+    /**
+     * REPLCONF 超时处理：回退 DISCONNECTED 并触发重连
+     *
+     * @param expectedState 触发超时时等待的状态；若状态已变更（例如 +OK 已先到达）则忽略
+     */
+    private void handleReplconfTimeout(ReplicationState expectedState) {
+        // 仅当仍处于等待该响应的状态时才回退，避免误取消已推进的流程
+        if (state.get() != expectedState) {
+            return;
+        }
+        logger.error("REPLCONF 握手超时（等待 {}），回退到 DISCONNECTED", expectedState);
+        failReplconfHandshake("REPLCONF 握手超时");
+    }
+
+    /**
+     * REPLCONF 失败统一处理：回退 DISCONNECTED、通知回调、调度重连
+     */
+    private void failReplconfHandshake(String reason) {
+        cancelReplconfTimeout();
+        state.set(ReplicationState.DISCONNECTED);
+        if (callback != null) {
+            callback.onDisconnected();
+        }
+        if (running) {
+            scheduleReconnect();
         }
     }
     
@@ -382,14 +487,17 @@ public class SlaveReplicationClient {
      */
     private void handleDisconnect() {
         logger.warn("与主节点断开连接");
-        
+
+        // 取消可能在途的 REPLCONF 超时，避免断开后误触发
+        cancelReplconfTimeout();
+
         ReplicationState previousState = state.get();
         state.set(ReplicationState.DISCONNECTED);
-        
+
         if (callback != null) {
             callback.onDisconnected();
         }
-        
+
         // 尝试重连
         if (running && previousState != ReplicationState.ERROR) {
             scheduleReconnect();
@@ -457,17 +565,25 @@ public class SlaveReplicationClient {
      */
     public synchronized void stop() {
         running = false;
-        
+
+        // 取消可能在途的 REPLCONF 超时
+        cancelReplconfTimeout();
+
         if (channel != null) {
             channel.close();
             channel = null;
         }
-        
+
         if (workerGroup != null) {
             workerGroup.shutdownGracefully();
             workerGroup = null;
         }
-        
+
+        if (handshakeScheduler != null) {
+            handshakeScheduler.shutdownNow();
+            handshakeScheduler = null;
+        }
+
         state.set(ReplicationState.DISCONNECTED);
     }
     

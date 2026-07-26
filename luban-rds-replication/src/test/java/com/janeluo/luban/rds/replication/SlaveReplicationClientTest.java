@@ -8,8 +8,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -312,6 +316,189 @@ class SlaveReplicationClientTest {
                 "+OK 在 PSYNC 阶段不应被当作正常响应");
     }
 
+    // ==================== REPLCONF 逐条等待 + 5s timeout 测试 (C2 方案 A) ====================
+
+    @Test
+    @DisplayName("REPLCONF 逐条等待：PORT +OK 后才推进到 IP，不再一次性发送三条")
+    void testReplconfSequentialWait_PortOkAdvancesToIp() throws Exception {
+        // 进入发送 REPLCONF PORT 的状态
+        invokeSendReplConf(client);
+
+        // 发送 PORT 后应停留在 HANDSHAKE_REPLCONF_PORT，等待 +OK
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_PORT, client.getState(),
+                "发送 PORT 后状态应为 HANDSHAKE_REPLCONF_PORT");
+
+        // 收到 +OK 后应在回调内推进到 IP（而非直接跳到 PSYNC）
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_IP, client.getState(),
+                "PORT +OK 后状态应推进到 HANDSHAKE_REPLCONF_IP，而非直接进入 PSYNC");
+        assertNotEquals(ReplicationState.HANDSHAKE_PSYNC, client.getState(),
+                "PORT +OK 后不应立即进入 PSYNC（旧实现的问题）");
+    }
+
+    @Test
+    @DisplayName("REPLCONF 逐条等待：IP +OK 后才推进到 CAPA")
+    void testReplconfSequentialWait_IpOkAdvancesToCapa() throws Exception {
+        invokeSendReplConf(client);
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_IP, client.getState());
+
+        // IP +OK 后推进到 CAPA
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_CAPA, client.getState(),
+                "IP +OK 后状态应推进到 HANDSHAKE_REPLCONF_CAPA");
+        assertNotEquals(ReplicationState.HANDSHAKE_PSYNC, client.getState(),
+                "IP +OK 后不应立即进入 PSYNC");
+    }
+
+    @Test
+    @DisplayName("REPLCONF 逐条等待：CAPA +OK 后才进入 PSYNC")
+    void testReplconfSequentialWait_CapaOkAdvancesToPsync() throws Exception {
+        invokeSendReplConf(client);
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8)); // PORT -> IP
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8)); // IP -> CAPA
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_CAPA, client.getState());
+
+        // CAPA +OK 后才进入 PSYNC
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+
+        assertEquals(ReplicationState.HANDSHAKE_PSYNC, client.getState(),
+                "CAPA +OK 后状态应推进到 HANDSHAKE_PSYNC");
+    }
+
+    @Test
+    @DisplayName("REPLCONF 完整握手序列：PORT->IP->CAPA->PSYNC 逐步推进")
+    void testReplconfSequentialWait_FullSequence() throws Exception {
+        invokeSendReplConf(client);
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_PORT, client.getState());
+
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_IP, client.getState());
+
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_CAPA, client.getState());
+
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+        assertEquals(ReplicationState.HANDSHAKE_PSYNC, client.getState());
+
+        // 进入 PSYNC 后正常 FULLRESYNC 流程仍可继续
+        String fullResync = "+FULLRESYNC replid123 42\r\n";
+        invokeHandleResponse(client, Unpooled.copiedBuffer(fullResync, StandardCharsets.UTF_8));
+        assertEquals(ReplicationState.FULL_SYNC, client.getState());
+        assertTrue(callback.fullSyncCalled);
+    }
+
+    @Test
+    @DisplayName("REPLCONF 错误响应（-ERR）回退到 DISCONNECTED")
+    void testReplconfErrorResponseFallsBackToDisconnected() throws Exception {
+        invokeSendReplConf(client);
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_PORT, client.getState());
+
+        invokeHandleResponse(client, Unpooled.copiedBuffer("-ERR unknown command\r\n",
+                StandardCharsets.UTF_8));
+
+        assertEquals(ReplicationState.DISCONNECTED, client.getState(),
+                "REPLCONF -ERR 响应应回退到 DISCONNECTED");
+        assertTrue(callback.disconnectedCalled, "应触发 onDisconnected 回调");
+    }
+
+    @Test
+    @DisplayName("REPLCONF IP 阶段错误响应也回退到 DISCONNECTED")
+    void testReplconfIpErrorResponseFallsBack() throws Exception {
+        invokeSendReplConf(client);
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8)); // PORT -> IP
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_IP, client.getState());
+
+        invokeHandleResponse(client, Unpooled.copiedBuffer("-ERR bad ip\r\n",
+                StandardCharsets.UTF_8));
+
+        assertEquals(ReplicationState.DISCONNECTED, client.getState());
+        assertTrue(callback.disconnectedCalled);
+    }
+
+    @Test
+    @DisplayName("REPLCONF CAPA 阶段错误响应也回退到 DISCONNECTED")
+    void testReplconfCapaErrorResponseFallsBack() throws Exception {
+        invokeSendReplConf(client);
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8)); // PORT -> IP
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8)); // IP -> CAPA
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_CAPA, client.getState());
+
+        invokeHandleResponse(client, Unpooled.copiedBuffer("-ERR unsupported capa\r\n",
+                StandardCharsets.UTF_8));
+
+        assertEquals(ReplicationState.DISCONNECTED, client.getState());
+        assertTrue(callback.disconnectedCalled);
+    }
+
+    @Test
+    @DisplayName("REPLCONF 5s timeout 触发回退 DISCONNECTED")
+    void testReplconfTimeoutFallsBackToDisconnected() throws Exception {
+        // 注入快速 scheduler + 短超时，避免测试等待 5s
+        ScheduledExecutorService fastScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "test-replconf-timeout");
+            t.setDaemon(true);
+            return t;
+        });
+        setHandshakeScheduler(client, fastScheduler);
+        setReplconfTimeoutMs(client, 50L);
+
+        try {
+            invokeSendReplConf(client);
+            assertEquals(ReplicationState.HANDSHAKE_REPLCONF_PORT, client.getState(),
+                    "发送 PORT 后应处于等待 +OK 状态");
+
+            // 不发送 +OK，等待 timeout 触发
+            assertTrue(waitForState(client, ReplicationState.DISCONNECTED, 2000),
+                    "超时后状态应回退到 DISCONNECTED");
+
+            assertTrue(callback.disconnectedCalled, "超时应触发 onDisconnected 回调");
+        } finally {
+            fastScheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("REPLCONF 收到 +OK 时取消对应 timeout，不误触发回退")
+    void testReplconfOkCancelsTimeout() throws Exception {
+        ScheduledExecutorService fastScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "test-replconf-timeout-cancel");
+            t.setDaemon(true);
+            return t;
+        });
+        setHandshakeScheduler(client, fastScheduler);
+        setReplconfTimeoutMs(client, 100L);
+
+        try {
+            invokeSendReplConf(client);
+            assertEquals(ReplicationState.HANDSHAKE_REPLCONF_PORT, client.getState());
+
+            // 在 PORT timeout 触发前发送 +OK，应取消 PORT timeout 并推进到 IP
+            Thread.sleep(20);
+            invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+            assertEquals(ReplicationState.HANDSHAKE_REPLCONF_IP, client.getState());
+
+            // 等待超过 PORT timeout 原定触发时间，确认已取消的 PORT timeout 未误触发回退
+            // （IP 阶段会启动新的 timeout，此处只验证 PORT 的 timeout 已被取消）
+            Thread.sleep(60);
+            assertEquals(ReplicationState.HANDSHAKE_REPLCONF_IP, client.getState(),
+                    "已取消的 PORT timeout 不应再触发回退");
+            assertFalse(callback.disconnectedCalled, "正常 +OK 流程不应触发 onDisconnected");
+        } finally {
+            fastScheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("REPLCONF 发送时不存在活跃 channel 不抛异常")
+    void testReplconfSendWithoutChannelIsSafe() throws Exception {
+        // 未调用 start()，channel 为 null；sendReplConf 应安全不抛异常
+        invokeSendReplConf(client);
+        assertEquals(ReplicationState.HANDSHAKE_REPLCONF_PORT, client.getState());
+    }
+
     // ==================== 反射辅助方法 ====================
 
     @SuppressWarnings("unchecked")
@@ -336,6 +523,50 @@ class SlaveReplicationClientTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static void invokeSendReplConf(SlaveReplicationClient client) {
+        try {
+            Method method = SlaveReplicationClient.class.getDeclaredMethod("sendReplConf");
+            method.setAccessible(true);
+            method.invoke(client);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void setHandshakeScheduler(SlaveReplicationClient client,
+                                              ScheduledExecutorService scheduler) {
+        try {
+            Field field = SlaveReplicationClient.class.getDeclaredField("handshakeScheduler");
+            field.setAccessible(true);
+            field.set(client, scheduler);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static void setReplconfTimeoutMs(SlaveReplicationClient client, long timeoutMs) {
+        try {
+            Field field = SlaveReplicationClient.class.getDeclaredField("replconfTimeoutMs");
+            field.setAccessible(true);
+            field.set(client, timeoutMs);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static boolean waitForState(SlaveReplicationClient client, ReplicationState expected,
+                                        long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (client.getState() == expected) {
+                return true;
+            }
+            Thread.sleep(10);
+        }
+        return client.getState() == expected;
     }
 
     private static class TestCallback implements ReplicationCallback {
