@@ -119,6 +119,10 @@ DISCONNECTED → CONNECTING → HANDSHAKE_* → FULL_SYNC/PARTIAL_SYNC → ONLIN
 | MasterReplicationManager | 84.2% |
 | SlaveReplicationService | 78.5% |
 
+> P0 修复（fix-p0-data-safety-redis7，C2/C4/C5/C6）新增对 `SlaveReplicationClient`
+> 的 PSYNC 路由、REPLCONF 状态机、全量同步窗口重放、SLAVEOF 接入复制、slave offset
+> 校验等场景的测试覆盖（`ReplicationIntegrationTest` 等）。
+
 ## 10. Redis Cluster
 
 ### Components
@@ -145,11 +149,16 @@ DISCONNECTED → CONNECTING → HANDSHAKE_* → FULL_SYNC/PARTIAL_SYNC → ONLIN
 
 ### Automatic Failover
 When a master is marked FAIL by majority consensus, its slave automatically initiates election:
-1. slave detects master FAIL → enters REQUESTING, waits `cluster-failover-grace-period` + jitter (0-500ms)
-2. slave broadcasts `FailoverAuthRequestMessage` (currentEpoch/configEpoch)
-3. Each healthy master votes once per epoch (`votesCast` dedup) → `FailoverAuthAckMessage`
-4. Candidate collects majority (masterCount/2+1) → `performFailover` promote + broadcast `FailoverResultMessage`
-5. All nodes apply FailoverResult (epoch arbitration): winner → MASTER, old master → SLAVE
+1. slave detects master FAIL -> enters REQUESTING, waits `cluster-failover-grace-period` + jitter (0-500ms)
+2. slave broadcasts `FailoverAuthRequestMessage` (currentEpoch/configEpoch/replicationOffset)
+3. Each healthy master votes once per epoch (`votesCast` dedup) -> `FailoverAuthAckMessage`（首投即定：同纪元不再改投）
+4. Candidate collects majority (masterCount/2+1) -> `performFailover` promote + 共用方法 `broadcastFailoverResult` 广播 `FailoverResultMessage`
+5. All nodes apply FailoverResult (epoch arbitration): winner -> MASTER, old master -> SLAVE
+
+> P0 修复（fix-p0-data-safety-redis7，C8/C9）：
+> - `FailoverAuthRequestMessage` 携带真实 `replicationOffset`（经 `ReplicationLifecycleListener.getReplicationOffset()` 注入），让投票方可记录 freshest slave；
+> - 手动 failover（FORCE/TAKEOVER）也通过共用方法广播 `FailoverResultMessage`，并对齐原 master 的 `configEpoch`；
+> - 自动 failover 路径不再重复广播。
 
 | Message | Code | Purpose |
 |---------|------|---------|
