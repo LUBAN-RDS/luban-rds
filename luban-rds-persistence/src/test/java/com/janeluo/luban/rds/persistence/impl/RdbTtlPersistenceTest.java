@@ -6,7 +6,12 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -115,6 +120,106 @@ public class RdbTtlPersistenceTest {
                 pttlAfter > 0);
         assertTrue("pttl after load within range, got " + pttlAfter,
                 pttlAfter > 599000L && pttlAfter <= 599999L);
+    }
+
+    /**
+     * 直接验证 0xFD（秒级）写入+读取 round-trip。
+     *
+     * <p>背景：{@code setWithExpire} / {@code setWithExpireMs} 在调用 {@code writeExpireTime}
+     * 时，由于从 set 到 persist 之间总有毫秒级耗时，{@code pttl % 1000 != 0}，导致整秒分支
+     * 永远走不到，0xFD 写入路径与 {@code readExpireTimeSec} 读取路径均无测试覆盖。
+     *
+     * <p>本测试分两步：
+     * <ol>
+     *   <li>反射调用 private {@code writeExpireTime(dos, pttl)} 传入整秒 pttl，
+     *       断言写出的字节为 {@code 0xFD} + 4 字节小端秒级时间戳。</li>
+     *   <li>手工构造一份含字面量 {@code 0xFD} opcode + 4 字节小端秒级时间戳的完整 RDB
+     *       字节流（header + SELECTDB + expire opcode + type+key+value + EOF footer），
+     *       调用 {@code load()} 后断言键存在且 TTL 落在整秒窗口内，覆盖读取侧
+     *       {@code readExpireTimeSec} 路径。</li>
+     * </ol>
+     */
+    @Test
+    public void testSecondsLevelOpcode0xFD_RoundTrip() throws Exception {
+        // ---- Step 1: 反射调用 writeExpireTime 验证 0xFD 写入字节布局 ----
+        // 整秒 pttl（< 1h）应触发 0xFD 秒级路径
+        long wholeSecPttl = 60_000L; // 60s，整秒且 < 1h
+        long nowBeforeWrite = System.currentTimeMillis();
+        long expectedExpireAt = nowBeforeWrite + wholeSecPttl;
+        int expectedExpireSec = (int) (expectedExpireAt / 1000L);
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (DataOutputStream dos = new DataOutputStream(baos)) {
+            Method writeExpireTime = RdbPersistService.class.getDeclaredMethod(
+                    "writeExpireTime", DataOutputStream.class, long.class);
+            writeExpireTime.setAccessible(true);
+            writeExpireTime.invoke(persistService, dos, wholeSecPttl);
+        }
+
+        byte[] expireBytes = baos.toByteArray();
+        assertEquals("0xFD write path should emit 5 bytes (1 opcode + 4 LE seconds)",
+                5, expireBytes.length);
+        assertEquals("first byte should be 0xFD seconds opcode",
+                (byte) 0xFD, expireBytes[0]);
+        // 4 字节小端秒级时间戳
+        int leSec = (expireBytes[1] & 0xFF)
+                | ((expireBytes[2] & 0xFF) << 8)
+                | ((expireBytes[3] & 0xFF) << 16)
+                | ((expireBytes[4] & 0xFF) << 24);
+        assertTrue("LE seconds should match expectedExpireSec (got " + leSec
+                        + ", expected ~" + expectedExpireSec + ")",
+                leSec == expectedExpireSec || leSec == expectedExpireSec + 1);
+
+        // ---- Step 2: 构造完整 RDB 字节流验证 0xFD 读取路径 ----
+        // 目标 expireAt：now + 120s，确保 load 时 remaining > 0
+        long targetExpireAtMs = System.currentTimeMillis() + 120_000L;
+        int targetExpireSec = (int) (targetExpireAtMs / 1000L);
+
+        ByteArrayOutputStream rdbBytes = new ByteArrayOutputStream();
+        try (DataOutputStream dos = new DataOutputStream(rdbBytes)) {
+            // RDB header: REDIS0009
+            dos.write("REDIS0009".getBytes(StandardCharsets.ISO_8859_1));
+            // SELECTDB 0: 0xFE + length-encoded 0 (单字节 0x00)
+            dos.writeByte(0xFE);
+            dos.writeByte(0x00);
+            // expire opcode 0xFD + 4 字节小端秒级时间戳
+            dos.writeByte(0xFD);
+            dos.writeByte((byte) (targetExpireSec & 0xFF));
+            dos.writeByte((byte) ((targetExpireSec >> 8) & 0xFF));
+            dos.writeByte((byte) ((targetExpireSec >> 16) & 0xFF));
+            dos.writeByte((byte) ((targetExpireSec >> 24) & 0xFF));
+            // type=string 0x00 + key + value（length-prefixed strings，与实现一致）
+            byte[] keyBytes = "fdKey".getBytes(StandardCharsets.ISO_8859_1);
+            byte[] valBytes = "fdValue".getBytes(StandardCharsets.ISO_8859_1);
+            dos.writeByte(0x00); // RDB_TYPE_STRING
+            // length < 64 -> 单字节长度
+            dos.writeByte(keyBytes.length);
+            dos.write(keyBytes);
+            dos.writeByte(valBytes.length);
+            dos.write(valBytes);
+            // EOF footer: 0xFF + 8 字节校验和
+            dos.writeByte(0xFF);
+            dos.writeLong(System.currentTimeMillis());
+        }
+
+        // 写入 dump.rdb，让 persistService.load 读到
+        File rdbFile = new File(TEST_DATA_DIR, "dump.rdb");
+        try (FileOutputStream fos = new FileOutputStream(rdbFile)) {
+            fos.write(rdbBytes.toByteArray());
+        }
+
+        MemoryStore newStore = new DefaultMemoryStore();
+        persistService.load(newStore);
+
+        assertEquals("fdValue", newStore.get(0, "fdKey"));
+        long pttlAfter = newStore.pttl(0, "fdKey");
+        assertTrue("0xFD path: pttl after load should be positive, got " + pttlAfter,
+                pttlAfter > 0);
+        // 120s TTL，恢复后剩余应在 110s ~ 120s 之间（允许 load 耗时）
+        assertTrue("0xFD path: pttl after load within expected range, got " + pttlAfter,
+                pttlAfter > 110_000L && pttlAfter <= 120_000L);
+        // 注意：0xFD 存储秒级精度的绝对过期时间戳（truncate 到整秒），
+        // 但 remaining = expireAtMs - now，now 带毫秒分量，故恢复后 pttl 不必是整秒。
     }
 
     /**
