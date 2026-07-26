@@ -451,25 +451,11 @@ public class AofPersistService implements PersistService {
 
     private int currentDb = 0;
 
-    private void parseAndExecuteCommand(String line, MemoryStore memoryStore) {
-        // 兼容旧入口：仍基于行解析，仅在没有帧头时返回。
-        // 实际加载路径已切换为 readRespArray + executeCommand，详见 load()。
-        if (!line.startsWith("*")) {
-            return;
-        }
-        try {
-            List<String> args = parseRespArray(line);
-            executeCommand(args, memoryStore);
-        } catch (Exception e) {
-            logger.error("Error parsing AOF command: {}", line, e);
-        }
-    }
-
     /**
      * 按参数列表分发执行一条 AOF 命令。
      *
-     * <p>由 {@link #load(MemoryStore)} 通过二进制安全的 RESP 帧解析后调用，
-     * 也由旧的 {@link #parseAndExecuteCommand(String, MemoryStore)} 行解析路径调用。
+     * <p>由 {@link #load(MemoryStore)} 通过二进制安全的 RESP 帧解析（见
+     * {@link #readRespArray(DataInputStream)}）后调用。
      *
      * @param args        命令参数列表（首元素为命令名），不可为空
      * @param memoryStore 内存存储实例
@@ -755,31 +741,6 @@ public class AofPersistService implements PersistService {
         } catch (Exception e) {
             logger.error("Error parsing AOF command: {}", args, e);
         }
-    }
-
-    private List<String> parseRespArray(String line) {
-        List<String> args = new ArrayList<>();
-        String[] parts = line.split("\\r\\n");
-
-        if (parts.length < 1 || !parts[0].startsWith("*")) {
-            return args;
-        }
-
-        int argCount = Integer.parseInt(parts[0].substring(1));
-        int partIndex = 1;
-
-        for (int i = 0; i < argCount && partIndex < parts.length; i++) {
-            if (parts[partIndex].startsWith("$")) {
-                int length = Integer.parseInt(parts[partIndex].substring(1));
-                partIndex++;
-                if (partIndex < parts.length) {
-                    args.add(parts[partIndex]);
-                }
-            }
-            partIndex++;
-        }
-
-        return args;
     }
 
     /**
