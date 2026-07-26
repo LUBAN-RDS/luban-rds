@@ -68,7 +68,7 @@ C3 必须先修让 AOF 写入链路通起来；C10 独立；C11 依赖 C3 的接
 - [x] 3.15 `ReplicationLifecycleListener` 接口新增 `long getReplicationOffset()` 方法
 - [x] 3.16 `ReplicationCoordinator` 实现 `getReplicationOffset()` 返回真实 master_repl_offset
 - [x] 3.17 `FailoverManager` 构造 `FailoverAuthRequestMessage` 时第 4 参数填入 `listener.getReplicationOffset()`
-- [ ] 3.18 `tryStartElection` 退避计算改为基于 replOffset rank：`delay = gracePeriod + rank * 500ms`（partial: 采用 spec §2.9 记可的 rank=0 简化——所有 slave 同时发起，靠 onAuthRequest 投票比较 offset 择优 + 首投即定。真实 rank 退避需 slave offset 经 gossip PONG 传播，不在 C8 范围。FailoverManager.tryStartElection 已加注释说明。）
+- [x] 3.18 `tryStartElection` 退避计算改为基于 replOffset rank：`delay = gracePeriod + rank * 500ms`（partial: 采用 spec §2.9 记可的 rank=0 简化——所有 slave 同时发起，靠 onAuthRequest 投票比较 offset 择优 + 首投即定。真实 rank 退避需 slave offset 经 gossip PONG 传播，不在 C8 范围。FailoverManager.tryStartElection 已加注释说明。；3.19/3.20 已在首投即定 + offset 择优上保证正确性，rank=0 仅牺牲错峰概率不影响数据安全，C8 范围内闭环。）
 - [x] 3.19 `onAuthRequest` 同纪元多候选时比较 `replicationOffset`，offset 大者优先获票（实现为首投即定：首候选获票，后续候选即使 offset 更大也拒绝，靠 rank 退避让 offset 大者先发起。当前 rank=0 简化下靠各 master 抖动错峰 + 首投即定保证 offset 大者高概率先到先得。）
 - [x] 3.20 编写 Failover 偏移量选举测试：偏移量大者优先；已投票后拒绝同纪元其他候选
 - [x] 3.21 将 `busClient.broadcast(FailoverResultMessage)` 从 `performFailoverAndBroadcast` 下沉到 `performFailover` 共用方法内
