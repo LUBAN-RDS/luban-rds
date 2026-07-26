@@ -35,4 +35,22 @@ public interface ReplicationLifecycleListener {
      * @param master 新的主节点，不应为 null
      */
     void demoteToSlave(ClusterNode master);
+
+    /**
+     * 本节点当前的复制偏移量（master_repl_offset）。
+     * <p>
+     * 用于 failover 选举：候选 slave 在广播 AUTH_REQUEST 时携带自身复制偏移量，
+     * 投票 master 据此择优（偏移量大者代表数据更新鲜，优先获票）。
+     * </p>
+     * <p>
+     * 语义：slave 模式应返回已从上游同步到的偏移量；master 模式可返回本地
+     * backlog 的 master_repl_offset（master 不参与 failover 候选，此值仅供查询）。
+     * 默认返回 0，保证未装配复制组件的场景（NoOp、单测）向后兼容。
+     * </p>
+     *
+     * @return 当前复制偏移量，不可用时返回 0
+     */
+    default long getReplicationOffset() {
+        return 0L;
+    }
 }

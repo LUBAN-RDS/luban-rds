@@ -73,10 +73,17 @@ public class FailoverManager {
 
     // ==================== 投票侧状态（master 授权用，与本节点状态共存） ====================
     /**
-     * 已投票记录：被投 slaveId → 投票时的 currentEpoch
+     * 已投票记录：被投 slaveId -> 投票时的 currentEpoch
      */
     private final Map<String, Long> votesCast = new HashMap<>();
     private long lastVoteEpoch;
+    /**
+     * 本纪元首投候选的复制偏移量，用于拒绝同纪元后续候选时的日志比较。
+     * 设计 §2.9 "首投即定"：本纪元首个有效候选即获票，后续候选即使偏移量更大也不改票
+     * （ACK 是广播消息，其他节点可能已收到旧投票，撤票重投会造成双投不一致）。
+     * 数据新鲜度由 rank 退避（tryStartElection）保证 offset 大的 slave 先发起、先获票。
+     */
+    private long votedReplOffset;
 
     /**
      * 构造方法
@@ -170,14 +177,25 @@ public class FailoverManager {
         // 满足触发条件
         state = FailoverState.REQUESTING;
         electionStartTime = System.currentTimeMillis();
+        // 退避抖动：不同 slave 的 nodeId hashCode 不同以错峰广播，降低同纪元多候选同时
+        // 发起导致票数分散的概率。
+        //
+        // Rank 退避（对齐 Redis 7：delay = gracePeriod + rank * 500ms，rank=0 为 offset
+        // 最大的 slave）当前采用 spec §2.9 记可的简化：固定 rank=0（所有 slave 同时发起，
+        // 靠 onAuthRequest 投票比较 replicationOffset 择优）。真正的 rank 计算需要 slave
+        // 复制偏移量经 gossip（PONG）传播，使本地可见同 master 各 slave 的 offset 以排序，
+        // 该机制不在 C8 范围内。故此处保留 gracePeriod + jitter 退避，由投票侧的偏移量
+        // 比较 + 首投即定语义保证数据更新鲜的 slave 优先获票。
         // 修复 Math.abs(Integer.MIN_VALUE) 仍为负的 bug：先取模再取绝对值
         long jitter = Math.abs(me.getNodeId().hashCode() % JITTER_BOUND_MS);
         requestDeadline = electionStartTime + gracePeriod + jitter;
         failedMasterId = masterId;
         authVotes.clear();
         requestBroadcasted = false;
-        logger.warn("slave 进入选举: nodeId={}, failedMasterId={}, {}ms 后广播请求",
-                me.getNodeId(), failedMasterId, (requestDeadline - electionStartTime));
+        logger.warn("slave 进入选举: nodeId={}, failedMasterId={}, replOffset={}, {}ms 后广播请求",
+                me.getNodeId(), failedMasterId,
+                replicationLifecycleListener.getReplicationOffset(),
+                (requestDeadline - electionStartTime));
     }
 
     /**
@@ -208,6 +226,11 @@ public class FailoverManager {
 
     /**
      * 广播 AUTH_REQUEST，自增 currentEpoch
+     * <p>
+     * 携带本节点真实复制偏移量（master_repl_offset），供投票 master 在同纪元多候选时
+     * 比较数据新鲜度择优（对齐 Redis 7）。偏移量由 {@link ReplicationLifecycleListener}
+     * 提供，未装配复制组件时返回 0（保守值，等价旧行为）。
+     * </p>
      */
     private void broadcastAuthRequest() {
         ClusterNode me = clusterConfig.getMyNode();
@@ -218,13 +241,18 @@ public class FailoverManager {
         electionEpoch = clusterConfig.incrementEpoch();
         requestBroadcasted = true;
 
+        // 真实复制偏移量：slave 模式返回已同步偏移量，反映本节点数据新鲜度。
+        // 替换原硬编码 0L，使投票方可按偏移量择优，避免陈旧数据 slave 抢先胜选。
+        long myReplOffset = replicationLifecycleListener.getReplicationOffset();
+
         FailoverAuthRequestMessage req = new FailoverAuthRequestMessage(
                 me.getNodeId(),
                 me.getConfigEpoch(),
                 electionEpoch,
-                0L);
+                myReplOffset);
         busClient.broadcast(req);
-        logger.warn("广播选举请求: candidate={}, epoch={}", me.getNodeId(), electionEpoch);
+        logger.warn("广播选举请求: candidate={}, epoch={}, replOffset={}",
+                me.getNodeId(), electionEpoch, myReplOffset);
     }
 
     private void resetElectionState() {
@@ -241,6 +269,20 @@ public class FailoverManager {
     /**
      * master 节点处理 AUTH_REQUEST（候选 slave 请求投票）。
      * 由 GossipProtocol.handleFailoverAuthRequest 委托调用。
+     * <p>
+     * 偏移量选举语义（对齐 Redis 7，设计 §2.9）：
+     * <ul>
+     *   <li>候选 slave 在 AUTH_REQUEST 中携带真实 {@code replicationOffset}（见
+     *       {@link #broadcastAuthRequest}），反映其数据新鲜度。</li>
+     *   <li><b>首投即定</b>：本纪元首个通过校验的候选即获票；同纪元后续候选即使偏移量
+     *       更大也<b>不</b>改票。原因是 ACK 为广播消息，其他节点可能已据旧投票推进选举，
+     *       撤票重投会导致同一纪元双投、票数统计不一致。</li>
+     *   <li>数据新鲜度择优由 {@code tryStartElection} 的 rank 退避保证：offset 大的 slave
+     *       先发起 AUTH_REQUEST、先获票。当前 rank=0 简化（见 tryStartElection 注释），
+     *       所有 slave 同时发起，靠本方法的首投即定 + 各 master 抖动错峰让 offset 大者
+     *       有更高概率先到先得。后续若引入 slave offset gossip 传播，可实现真实 rank 退避。</li>
+     * </ul>
+     * </p>
      *
      * @param req 授权请求消息
      */
@@ -274,32 +316,37 @@ public class FailoverManager {
                     candidateId, candidateMasterId);
             return;
         }
+        long candidateReplOffset = req.getReplicationOffset();
         logger.debug("AUTH_REQUEST 候选校验通过: candidate={}, configEpoch={}, replOffset={}",
-                candidateId, req.getConfigEpoch(), req.getReplicationOffset());
+                candidateId, req.getConfigEpoch(), candidateReplOffset);
 
         // (2) 落后则追平，新纪元清旧票
         if (reqEpoch > myEpoch) {
             clusterConfig.setCurrentEpoch(reqEpoch);
             lastVoteEpoch = reqEpoch;
             votesCast.clear();
+            votedReplOffset = 0L;
         }
 
-        // (3) 本纪元已投该 slave → 幂等重发
+        // (3) 本纪元已投该 slave -> 幂等重发
         Long votedAt = votesCast.get(candidateId);
         if (votedAt != null && votedAt == reqEpoch) {
             sendAuthAck(candidateId, reqEpoch);
             return;
         }
 
-        // (4) 本纪元已投他 slave → 拒绝
+        // (4) 本纪元已投他 slave -> 拒绝（首投即定，不撤票）
+        //     即使新候选 replOffset 更大也不改票：ACK 已广播，撤票重投会造成同纪元双投。
+        //     数据新鲜度择优由 tryStartElection 的 rank 退避保证 offset 大者先发起。
         if (!votesCast.isEmpty()) {
-            logger.debug("本纪元已投他 slave，拒绝: votedFor={}, candidate={}",
-                    votesCast.keySet(), candidateId);
+            logger.debug("本纪元已投他 slave，拒绝（首投即定，不撤票）: votedFor={}, votedReplOffset={}, candidate={}, candidateReplOffset={}",
+                    votesCast.keySet(), votedReplOffset, candidateId, candidateReplOffset);
             return;
         }
 
-        // (5) 首投
+        // (5) 首投：记录候选及其偏移量，授权
         votesCast.put(candidateId, reqEpoch);
+        votedReplOffset = candidateReplOffset;
         sendAuthAck(candidateId, reqEpoch);
     }
 
