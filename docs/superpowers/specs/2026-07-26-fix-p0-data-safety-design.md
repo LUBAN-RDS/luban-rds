@@ -2,6 +2,8 @@
 comet_change: fix-p0-data-safety-redis7
 role: technical-design
 canonical_spec: openspec
+archived-with: 2026-07-27-fix-p0-data-safety-redis7
+status: final
 ---
 
 # Design Doc: fix-p0-data-safety-redis7

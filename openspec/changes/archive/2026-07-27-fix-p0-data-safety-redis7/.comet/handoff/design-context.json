@@ -1,0 +1,18 @@
+{
+  "change": "fix-p0-data-safety-redis7",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "e9ec3af999b52e52ff9f07d62438571c7a00b6313220bee779f673061b60d012",
+  "files": [
+    { "path": "openspec/changes/fix-p0-data-safety-redis7/proposal.md", "sha256": "ffd7c9740905e33d23690e2fb193daf8d8bfdbe0f466726c6468c57d7c3ab5af" },
+    { "path": "openspec/changes/fix-p0-data-safety-redis7/design.md", "sha256": "5b553edbd8294085bf34ac3160804e7eaad01f5ec800e25ffe673b2197452841" },
+    { "path": "openspec/changes/fix-p0-data-safety-redis7/tasks.md", "sha256": "8db9399f99b49850717075412156722e85a76724fdfa30f431b9601330112648" },
+    { "path": "openspec/changes/fix-p0-data-safety-redis7/specs/cluster-automatic-failover/spec.md", "sha256": "ffe2f9ccc8b8c91e2434fc3ecfae7446e13871d383a52b991d994fb46fcf00de" },
+    { "path": "openspec/changes/fix-p0-data-safety-redis7/specs/cluster-slot-integrity/spec.md", "sha256": "2a551878437d8043375ab05091d9533656d4cae26eac6f9366976446c42cb947" },
+    { "path": "openspec/changes/fix-p0-data-safety-redis7/specs/memory-store/spec.md", "sha256": "2269cc5b968fd091620b8afef9f95a5a59866b5d917a71980156e687b8d0ab6e" },
+    { "path": "openspec/changes/fix-p0-data-safety-redis7/specs/persistence-data-integrity/spec.md", "sha256": "9c0e264b7914aa440fff35140766c0855b4ce5af01044630647f10eb23306881" },
+    { "path": "openspec/changes/fix-p0-data-safety-redis7/specs/replication-sync-state-machine/spec.md", "sha256": "0900fef0607e0d79dddb5db219bb4aaccd9c5f0889ad441a71ecee1ae6b8ba8a" }
+  ]
+}
