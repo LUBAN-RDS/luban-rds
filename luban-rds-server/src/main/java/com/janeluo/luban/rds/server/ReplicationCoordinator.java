@@ -7,6 +7,7 @@ import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.persistence.impl.RdbPersistService;
 import com.janeluo.luban.rds.replication.MasterReplicationManager;
+import com.janeluo.luban.rds.replication.ReplicationController;
 import com.janeluo.luban.rds.replication.SlaveReplicationService;
 import com.janeluo.luban.rds.replication.handler.ReplicationCommandHandler;
 import org.slf4j.Logger;
@@ -33,7 +34,7 @@ import org.slf4j.LoggerFactory;
  * {@code startSlave} / {@code stopSlave} 用 synchronized 保护，避免并发启停同一从节点服务。
  * </p>
  */
-public class ReplicationCoordinator implements ReplicationLifecycleListener {
+public class ReplicationCoordinator implements ReplicationLifecycleListener, ReplicationController {
 
     private static final Logger logger = LoggerFactory.getLogger(ReplicationCoordinator.class);
 
@@ -103,6 +104,8 @@ public class ReplicationCoordinator implements ReplicationLifecycleListener {
 
         // 2. 创建复制命令处理器
         this.replicationCommandHandler = new ReplicationCommandHandler(config);
+        // 注入自身，使 SLAVEOF 命令能真正触发复制启停（server 依赖 replication，无循环依赖）
+        this.replicationCommandHandler.setReplicationCoordinator(this);
         logger.info("ReplicationCommandHandler 已创建");
 
         // 3. 若配置了 replicaof，启动从节点复制服务
