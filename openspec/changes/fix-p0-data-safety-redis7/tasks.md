@@ -51,14 +51,14 @@ C3 必须先修让 AOF 写入链路通起来；C10 独立；C11 依赖 C3 的接
 
 四个缺陷互相独立，可并行推进。
 
-- [ ] 3.1 `RedisServerHandler.extractKeyFromCommand` 返回类型从 `String` 改为 `List<String>`，单键命令返回单元素列表
-- [ ] 3.2 扩展 `extractKeyFromCommand` 覆盖所有多键命令的键位置：MGET/MSET/MSETNX/DEL/EXISTS/UNLINK/TOUCH/SUNION/SINTER/SDIFF/SMOVE/SDIFFSTORE/SINTERSTORE/SUNIONSTORE/ZUNIONSTORE/ZINTERSTORE/BITOP/SORT STORE
-- [ ] 3.3 RENAME/RENAMENX/COPY 源+目标型命令：`extractKeyFromCommand` 返回 [srcKey, dstKey]
-- [ ] 3.4 新增 `checkCrossSlot(List<String> keys)`：所有键 hash 到同一 slot 否则返回 `-CROSSSLOT Keys in request don't hash to the same slot`
-- [ ] 3.5 `checkSlotAndRedirect` 改为接受 `List<String>`：先 CROSSSLOT 校验，再校验首键是否在本节点（MOVED）
-- [ ] 3.6 保持 `EVAL`/`EVALSHA` 的 `checkCrossSlotForScript` 逻辑不变（向后兼容）
-- [ ] 3.7 非集群模式（`cluster-enabled no`）跳过 CROSSSLOT 校验
-- [ ] 3.8 编写 CROSSSLOT 测试：MGET/MSET/DEL 跨槽被拒；同槽正常；RENAME 源目标不同槽被拒；EVAL 校验不变；非集群模式不校验
+- [x] 3.1 `RedisServerHandler.extractKeyFromCommand` 返回类型从 `String` 改为 `List<String>`，单键命令返回单元素列表
+- [x] 3.2 扩展 `extractKeyFromCommand` 覆盖所有多键命令的键位置：MGET/MSET/MSETNX/DEL/EXISTS/UNLINK/TOUCH/SUNION/SINTER/SDIFF/SMOVE/SDIFFSTORE/SINTERSTORE/SUNIONSTORE/ZUNIONSTORE/ZINTERSTORE/BITOP/SORT STORE
+- [x] 3.3 RENAME/RENAMENX/COPY 源+目标型命令：`extractKeyFromCommand` 返回 [srcKey, dstKey]
+- [x] 3.4 新增 `checkCrossSlot(List<String> keys)`：所有键 hash 到同一 slot 否则返回 `-CROSSSLOT Keys in request don't hash to the same slot`
+- [x] 3.5 `checkSlotAndRedirect` 改为接受 `List<String>`：先 CROSSSLOT 校验，再校验首键是否在本节点（MOVED）
+- [x] 3.6 保持 `EVAL`/`EVALSHA` 的 `checkCrossSlotForScript` 逻辑不变（向后兼容）
+- [x] 3.7 非集群模式（`cluster-enabled no`）跳过 CROSSSLOT 校验
+- [x] 3.8 编写 CROSSSLOT 测试：MGET/MSET/DEL 跨槽被拒；同槽正常；RENAME 源目标不同槽被拒；EVAL 校验不变；非集群模式不校验
 - [ ] 3.9 新增 `MigrateKeysMessage` 批量键消息类，包含所有键的 dump 数据
 - [ ] 3.10 `MigrateCommandHandler.migrateMultipleKeys` 改为一次性发送 `MigrateKeysMessage`，目标端批量原子 RESTORE
 - [ ] 3.11 目标端全部 ACK 后源端统一 DEL；任一失败源端不删，返回 `-ERR partial migration`
