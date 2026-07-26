@@ -59,12 +59,12 @@ C3 必须先修让 AOF 写入链路通起来；C10 独立；C11 依赖 C3 的接
 - [x] 3.6 保持 `EVAL`/`EVALSHA` 的 `checkCrossSlotForScript` 逻辑不变（向后兼容）
 - [x] 3.7 非集群模式（`cluster-enabled no`）跳过 CROSSSLOT 校验
 - [x] 3.8 编写 CROSSSLOT 测试：MGET/MSET/DEL 跨槽被拒；同槽正常；RENAME 源目标不同槽被拒；EVAL 校验不变；非集群模式不校验
-- [ ] 3.9 新增 `MigrateKeysMessage` 批量键消息类，包含所有键的 dump 数据
-- [ ] 3.10 `MigrateCommandHandler.migrateMultipleKeys` 改为一次性发送 `MigrateKeysMessage`，目标端批量原子 RESTORE
-- [ ] 3.11 目标端全部 ACK 后源端统一 DEL；任一失败源端不删，返回 `-ERR partial migration`
-- [ ] 3.12 单消息 64MB 上限校验，超限返回 `-ERR command keys batch too large`
-- [ ] 3.13 COPY 模式不删除源
-- [ ] 3.14 编写 MIGRATE 原子性测试：全成功删源；部分失败源不删；COPY 模式不删；超限拒绝
+- [x] 3.9 新增 `MigrateKeysMessage` 批量键消息类，包含所有键的 dump 数据
+- [x] 3.10 `MigrateCommandHandler.migrateMultipleKeys` 改为一次性发送 `MigrateKeysMessage`，目标端批量原子 RESTORE
+- [x] 3.11 目标端全部 ACK 后源端统一 DEL；任一失败源端不删，返回 `-ERR partial migration`
+- [x] 3.12 单消息 64MB 上限校验，超限返回 `-ERR command keys batch too large`
+- [x] 3.13 COPY 模式不删除源
+- [x] 3.14 编写 MIGRATE 原子性测试：全成功删源；部分失败源不删；COPY 模式不删；超限拒绝
 - [ ] 3.15 `ReplicationLifecycleListener` 接口新增 `long getReplicationOffset()` 方法
 - [ ] 3.16 `ReplicationCoordinator` 实现 `getReplicationOffset()` 返回真实 master_repl_offset
 - [ ] 3.17 `FailoverManager` 构造 `FailoverAuthRequestMessage` 时第 4 参数填入 `listener.getReplicationOffset()`
