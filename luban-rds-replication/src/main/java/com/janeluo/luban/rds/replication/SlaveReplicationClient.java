@@ -373,6 +373,7 @@ public class SlaveReplicationClient {
      * REPLCONF 失败统一处理：回退 DISCONNECTED、通知回调、调度重连
      */
     private void failReplconfHandshake(String reason) {
+        logger.warn("REPLCONF 握手失败：{}", reason);
         cancelReplconfTimeout();
         state.set(ReplicationState.DISCONNECTED);
         if (callback != null) {
