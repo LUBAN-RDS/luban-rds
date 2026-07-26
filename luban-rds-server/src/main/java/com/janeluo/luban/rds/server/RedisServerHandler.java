@@ -17,6 +17,7 @@ import com.janeluo.luban.rds.cluster.migration.MigrateCommandHandler;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.slot.SlotManager;
 import com.janeluo.luban.rds.cluster.slot.SlotUtils;
+import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.replication.MasterReplicationManager;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -190,6 +191,15 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
 
     // 复制协调器（集群模式下由 NettyRedisServer 注入，用于获取主节点复制管理器与判断角色）
     private ReplicationCoordinator replicationCoordinator;
+
+    /**
+     * 持久化服务（由 NettyRedisServer 注入，用于 AOF 写命令记录）。
+     * <p>
+     * 非 AOF 模式下 {@link PersistService#recordCommand(byte[])} 为 default 空实现，
+     * 因此无需在此判断持久化模式；注入 null 时跳过记录。
+     * </p>
+     */
+    private PersistService persistService;
     
     // 集群命令处理器
     private ClusterCommandHandler clusterCommandHandler;
@@ -256,6 +266,19 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
      */
     public void setReplicationCoordinator(ReplicationCoordinator coordinator) {
         this.replicationCoordinator = coordinator;
+    }
+
+    /**
+     * 设置持久化服务（由 NettyRedisServer 注入）。
+     * <p>
+     * 用于在命令执行后将写命令的原始 RESP 帧写入 AOF（{@link PersistService#recordCommand(byte[])}）。
+     * 非 AOF 模式下 recordCommand 为 default 空实现，注入 null 表示不启用 AOF 记录。
+     * </p>
+     *
+     * @param persistService 持久化服务实例，可为 null
+     */
+    public void setPersistService(PersistService persistService) {
+        this.persistService = persistService;
     }
     
     /**
@@ -769,6 +792,11 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             // 仅当存在原始 RESP 帧时尝试传播（内部调用 processCommand 时 rawRespFrame 为 null，跳过）。
             if (rawRespFrame != null && shouldPropagate(commandName, response)) {
                 propagateCommand(rawRespFrame);
+                // AOF 记录：与复制传播同位置、同写命令集合，保证 AOF 与 backlog 一致。
+                // 非 AOF 模式下 recordCommand 为 default 空实现（no-op），注入 null 时跳过。
+                if (persistService != null) {
+                    persistService.recordCommand(rawRespFrame);
+                }
             }
             
             if ("AUTH".equals(commandName) && clientInfo != null) {
@@ -1404,10 +1432,14 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     }
 
     /**
-     * 判断命令是否为只读命令（不应传播到复制 backlog）。
+     * 判断命令是否为只读命令（不应传播到复制 backlog 与 AOF）。
      * <p>
      * 默认返回 false（即视为写命令），保证未列出的命令默认被传播，
-     * 避免遗漏新写命令导致从节点数据缺失。
+     * 避免遗漏新写命令导致从节点数据缺失或 AOF 数据缺失。
+     * </p>
+     * <p>
+     * 注意：{@code SELECT} 不在此只读白名单中。SELECT 作为 db 上下文标记需传播到
+     * backlog 与 AOF，使从节点与 AOF 重放时能正确切换当前 db（与 Redis 行为一致）。
      * </p>
      *
      * @param upper 命令名（大写）
@@ -1467,7 +1499,6 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             case "ECHO":
             case "AUTH":
             case "HELLO":
-            case "SELECT":
             case "CLIENT":
             case "COMMAND":
             case "CONFIG":
@@ -1803,6 +1834,11 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 if (shouldPropagate(commandName, result)) {
                     byte[] respFrame = serializeCommandToResp(args);
                     propagateCommand(respFrame);
+                    // AOF 记录：与复制传播同位置、同写命令集合，保证 AOF 与 backlog 一致。
+                    // 非 AOF 模式下 recordCommand 为 default 空实现（no-op），注入 null 时跳过。
+                    if (persistService != null) {
+                        persistService.recordCommand(respFrame);
+                    }
                 }
 
                 if ("SELECT".equals(commandName) && args.length >= 2) {

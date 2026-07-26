@@ -8,6 +8,8 @@ import com.janeluo.luban.rds.common.context.InfoProvider;
 import com.janeluo.luban.rds.common.context.ServerContext;
 import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
 import com.janeluo.luban.rds.core.store.MemoryStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Set;
@@ -34,7 +36,23 @@ import java.util.TreeMap;
  * @since 1.0.0
  */
 public class CommonCommandHandler implements CommandHandler {
-    
+
+    private static final Logger logger = LoggerFactory.getLogger(CommonCommandHandler.class);
+
+    /**
+     * AOF 重写专用单线程执行器（守护线程，避免阻塞命令响应或阻止 JVM 退出）。
+     * <p>
+     * BGREWRITEAOF 命令返回 started 后，由该执行器异步调用
+     * {@link ServerContext.AofRewriteCallback#rewrite()} 触发 AOF 重写。
+     * </p>
+     */
+    private static final java.util.concurrent.ExecutorService AOF_REWRITE_EXECUTOR =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "aof-rewrite-executor");
+                t.setDaemon(true);
+                return t;
+            });
+
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.EXISTS,
         RdsCommandConstant.DEL,
@@ -427,7 +445,22 @@ public class CommonCommandHandler implements CommandHandler {
     }
     
     private Object handleBgrewriteaof(String[] args, MemoryStore store) {
-        // 模拟异步重写AOF文件
+        // 通过 ServerContext 注册的回调触发 AOF 重写（异步执行，避免阻塞命令响应）。
+        // 回调由 NettyRedisServer 在装配时注入（() -> aofPersistService.rewrite(memoryStore)）；
+        // core 模块不直接依赖 persistence 模块，故通过 ServerContext.AofRewriteCallback 解耦。
+        // 未注册回调（非 AOF 模式）时仍返回 started 以对齐 Redis 协议响应，但实际不执行重写。
+        com.janeluo.luban.rds.common.context.ServerContext.AofRewriteCallback callback =
+                com.janeluo.luban.rds.common.context.ServerContext.getAofRewriteCallback();
+        if (callback != null) {
+            AOF_REWRITE_EXECUTOR.submit(() -> {
+                try {
+                    callback.rewrite();
+                } catch (Exception e) {
+                    // 重写失败不影响命令响应（已返回 started），仅记录告警。
+                    logger.error("AOF rewrite failed", e);
+                }
+            });
+        }
         return "+Background append only file rewriting started\r\n";
     }
     

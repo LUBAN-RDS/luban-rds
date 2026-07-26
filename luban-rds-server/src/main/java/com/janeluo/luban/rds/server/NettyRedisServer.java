@@ -23,6 +23,7 @@ import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.persistence.PersistServiceFactory;
+import com.janeluo.luban.rds.persistence.impl.AofPersistService;
 import com.janeluo.luban.rds.protocol.RedisProtocolParser;
 import com.janeluo.luban.rds.sentinel.config.SentinelConfig;
 import com.janeluo.luban.rds.sentinel.core.Sentinel;
@@ -197,16 +198,21 @@ public class NettyRedisServer implements RedisServer {
         
         // 加载持久化数据
         this.persistService.load(memoryStore);
-        
+
+        // 注册 AOF 重写回调：BGREWRITEAOF 命令通过 ServerContext 回调触发 AOF 重写，
+        // 使 core 模块的 CommonCommandHandler 能触发重写而不直接依赖 persistence 模块。
+        // 仅当 persistService 为 AofPersistService 时注册（RDB/None 模式下 rewrite 不存在）。
+        registerAofRewriteCallback();
+
         // 初始化运行时配置
         RuntimeConfig.setSlowlogLogSlowerThan(config.getSlowlogLogSlowerThan());
         RuntimeConfig.setSlowlogMaxLen(config.getSlowlogMaxLen());
         RuntimeConfig.setMonitorMaxClients(config.getMonitorMaxClients());
     }
-    
+
     /**
      * 使用配置对象创建服务器
-     * 
+     *
      * @param config Redis配置对象，可通过 ConfigLoader 加载
      */
     public NettyRedisServer(RdsConfig config) {
@@ -233,9 +239,14 @@ public class NettyRedisServer implements RedisServer {
         this.persistExecutor = Executors.newSingleThreadExecutor();
         
         logger.info("使用配置初始化服务器: {}", config);
-        
+
         // 加载持久化数据
         this.persistService.load(memoryStore);
+
+        // 注册 AOF 重写回调：BGREWRITEAOF 命令通过 ServerContext 回调触发 AOF 重写，
+        // 使 core 模块的 CommonCommandHandler 能触发重写而不直接依赖 persistence 模块。
+        // 仅当 persistService 为 AofPersistService 时注册（RDB/None 模式下 rewrite 不存在）。
+        registerAofRewriteCallback();
 
         // 初始化运行时配置
         RuntimeConfig.setSlowlogLogSlowerThan(config.getSlowlogLogSlowerThan());
@@ -741,6 +752,9 @@ public class NettyRedisServer implements RedisServer {
                     if (replicationCoordinator != null) {
                         handler.setReplicationCoordinator(replicationCoordinator);
                     }
+                    // 注入持久化服务：用于在命令执行后将写命令的原始 RESP 帧写入 AOF。
+                    // 非 AOF 模式下 recordCommand 为 default 空实现（no-op）。
+                    handler.setPersistService(persistService);
                      pipeline.addLast(businessGroup, "handler", handler);
                  }
              });
@@ -908,6 +922,30 @@ public class NettyRedisServer implements RedisServer {
     
     public PersistService getPersistService() {
         return persistService;
+    }
+
+    /**
+     * 注册 AOF 重写回调到 {@link ServerContext}。
+     *
+     * <p>BGREWRITEAOF 命令由 {@code core} 模块的 {@code CommonCommandHandler} 处理，
+     * 而 {@code AofPersistService.rewrite} 位于 {@code persistence} 模块，{@code core}
+     * 无法直接依赖 {@code persistence}。通过此回调解耦：当 {@code persistService}
+     * 为 {@link AofPersistService} 时，注册 {@code () -> aof.rewrite(memoryStore)}
+     * 作为回调，{@code CommonCommandHandler.handleBgrewriteaof} 通过
+     * {@link ServerContext#getAofRewriteCallback()} 获取并异步触发。
+     *
+     * <p>非 AOF 模式（RDB/None/Composite-non-AOF）下不注册回调，
+     * BGREWRITEAOF 仍返回 started 但不实际执行重写。
+     */
+    private void registerAofRewriteCallback() {
+        if (persistService instanceof AofPersistService) {
+            final AofPersistService aof = (AofPersistService) persistService;
+            ServerContext.setAofRewriteCallback(() -> aof.rewrite(memoryStore));
+            logger.info("AOF rewrite callback 已注册");
+        } else {
+            // 非 AOF 模式：清除可能残留的回调（避免前次实例化遗留）
+            ServerContext.setAofRewriteCallback(null);
+        }
     }
     
     /**
