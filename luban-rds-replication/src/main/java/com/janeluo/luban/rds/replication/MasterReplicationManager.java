@@ -405,19 +405,23 @@ public class MasterReplicationManager {
      */
     public void shutdown() {
         logger.info("Shutting down master replication manager...");
-        
+
         asyncExecutor.shutdown();
-        
+
         for (SlaveInfo slave : slaves) {
             if (slave.getChannel().isActive()) {
                 slave.getChannel().close();
             }
         }
-        
+
         slaves.clear();
         slaveChannelMap.clear();
         transferTrackers.clear();
-        
+
+        // 重置已连接从节点计数器，避免清空列表后计数器与实际 slave 数量不一致
+        // （addSlave 自增、removeSlave 自减，clear 路径必须同步归零）
+        connectedSlaves.set(0);
+
         logger.info("Master replication manager shutdown completed");
     }
     

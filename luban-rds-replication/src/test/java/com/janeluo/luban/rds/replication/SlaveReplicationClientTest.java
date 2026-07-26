@@ -499,6 +499,163 @@ class SlaveReplicationClientTest {
         assertEquals(ReplicationState.HANDSHAKE_REPLCONF_PORT, client.getState());
     }
 
+    // ==================== onOnline / sendAck 回调链测试 (C2) ====================
+
+    @Test
+    @DisplayName("FULL_SYNC 首个 RDB 数据块后推进到 LOADING_RDB，未触发 onOnline")
+    void testFullSyncFirstRdbChunkAdvancesToLoadingRdb() throws Exception {
+        setClientState(client, ReplicationState.FULL_SYNC);
+
+        // 非 RESP 命令帧（不以 '*' 开头）视为 RDB 字节
+        ByteBuf rdbChunk = Unpooled.copiedBuffer(new byte[]{0x52, 0x45, 0x44, 0x49, 0x53});
+        invokeHandleResponse(client, rdbChunk);
+
+        assertEquals(ReplicationState.LOADING_RDB, client.getState(),
+                "首个 RDB 数据块后 CLIENT 状态应推进到 LOADING_RDB");
+        assertTrue(callback.rdbDataCalled, "RDB 数据应通过 onRdbData 回调分发");
+        assertFalse(callback.onlineCalled, "RDB 传输中不应触发 onOnline");
+        assertFalse(callback.commandPropagationCalled, "RDB 传输中不应触发 onCommandPropagation");
+    }
+
+    @Test
+    @DisplayName("LOADING_RDB 收到 RESP 命令帧触发 onOnline 并进入 ONLINE（C2 回调链核心）")
+    void testLoadingRdbRespCommandFrameTriggersOnOnline() throws Exception {
+        setClientState(client, ReplicationState.LOADING_RDB);
+
+        // RESP 命令帧（以 '*' 开头）视为 RDB 传输结束、命令传播开始
+        ByteBuf cmdFrame = Unpooled.copiedBuffer("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+                StandardCharsets.UTF_8);
+        invokeHandleResponse(client, cmdFrame);
+
+        assertEquals(ReplicationState.ONLINE, client.getState(),
+                "收到命令帧后 CLIENT 状态应切换到 ONLINE");
+        assertTrue(callback.onlineCalled, "应触发 onOnline 回调（C2 回调链核心）");
+        assertTrue(callback.commandPropagationCalled, "命令帧应通过 onCommandPropagation 分发");
+        assertFalse(callback.rdbDataCalled, "命令帧不应走 onRdbData 路径");
+    }
+
+    @Test
+    @DisplayName("PARTIAL_SYNC 首条命令触发 onOnline 并进入 ONLINE")
+    void testPartialSyncFirstCommandTriggersOnOnline() throws Exception {
+        setClientState(client, ReplicationState.PARTIAL_SYNC);
+
+        ByteBuf cmdFrame = Unpooled.copiedBuffer("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+                StandardCharsets.UTF_8);
+        invokeHandleResponse(client, cmdFrame);
+
+        assertEquals(ReplicationState.ONLINE, client.getState(),
+                "部分重同步首条命令后应切换到 ONLINE");
+        assertTrue(callback.onlineCalled, "应触发 onOnline 回调");
+        assertTrue(callback.commandPropagationCalled);
+    }
+
+    @Test
+    @DisplayName("ONLINE 状态下后续命令不再重复触发 onOnline")
+    void testOnlineStateDoesNotRepeatOnOnline() throws Exception {
+        setClientState(client, ReplicationState.ONLINE);
+
+        ByteBuf cmdFrame = Unpooled.copiedBuffer("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+                StandardCharsets.UTF_8);
+        invokeHandleResponse(client, cmdFrame);
+
+        assertEquals(ReplicationState.ONLINE, client.getState());
+        assertFalse(callback.onlineCalled, "ONLINE 状态下不应重复触发 onOnline");
+        assertTrue(callback.commandPropagationCalled, "命令应正常分发");
+    }
+
+    @Test
+    @DisplayName("FULL_SYNC 收到 RESP 命令帧不立即触发 onOnline（必须先经过 LOADING_RDB）")
+    void testFullSyncRespFrameDoesNotSkipLoadingRdb() throws Exception {
+        setClientState(client, ReplicationState.FULL_SYNC);
+
+        // FULL_SYNC 状态下即使收到 '*' 开头帧也走 RDB 路径（仅 LOADING_RDB 才切换）
+        ByteBuf frame = Unpooled.copiedBuffer("*1\r\n$4\r\nPING\r\n", StandardCharsets.UTF_8);
+        invokeHandleResponse(client, frame);
+
+        assertEquals(ReplicationState.LOADING_RDB, client.getState(),
+                "FULL_SYNC 下应先推进到 LOADING_RDB，不跳过");
+        assertTrue(callback.rdbDataCalled);
+        assertFalse(callback.onlineCalled);
+    }
+
+    @Test
+    @DisplayName("端到端回调链：FULLRESYNC -> RDB chunk -> 命令帧 -> onOnline -> sendAck 可发")
+    void testEndToEndCallbackChain_FullSyncPath() throws Exception {
+        // 1. PSYNC 握手 -> FULLRESYNC -> FULL_SYNC
+        setClientState(client, ReplicationState.HANDSHAKE_PSYNC);
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+FULLRESYNC replid789 100\r\n",
+                StandardCharsets.UTF_8));
+        assertEquals(ReplicationState.FULL_SYNC, client.getState());
+        assertTrue(callback.fullSyncCalled);
+        assertEquals(100L, client.getReplicationOffset());
+
+        // 2. RDB 数据块 -> LOADING_RDB
+        ByteBuf rdbChunk = Unpooled.copiedBuffer(new byte[]{0x01, 0x02, 0x03, 0x04});
+        invokeHandleResponse(client, rdbChunk);
+        assertEquals(ReplicationState.LOADING_RDB, client.getState());
+        assertTrue(callback.rdbDataCalled);
+
+        // 3. 命令帧 -> ONLINE + onOnline
+        ByteBuf cmdFrame = Unpooled.copiedBuffer("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+                StandardCharsets.UTF_8);
+        invokeHandleResponse(client, cmdFrame);
+        assertEquals(ReplicationState.ONLINE, client.getState(), "回调链终点应为 ONLINE");
+        assertTrue(callback.onlineCalled, "onOnline 必须被触发以激活心跳 sendAck");
+
+        // 4. ONLINE 后 sendAck 应能发出（isOnline 为真，但因无 channel 不会真正写出）
+        assertTrue(client.isOnline(), "ONLINE 后 client.isOnline() 必须为真");
+        client.sendAck(); // 不抛异常即视为通过
+    }
+
+    @Test
+    @DisplayName("端到端回调链：CONTINUE -> 命令帧 -> onOnline -> sendAck 可发")
+    void testEndToEndCallbackChain_PartialSyncPath() throws Exception {
+        // 1. PSYNC 握手 -> CONTINUE -> PARTIAL_SYNC
+        client.setMasterReplId("old-replid");
+        client.setReplicationOffset(500L);
+        setClientState(client, ReplicationState.HANDSHAKE_PSYNC);
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+CONTINUE newreplid\r\n",
+                StandardCharsets.UTF_8));
+        assertEquals(ReplicationState.PARTIAL_SYNC, client.getState());
+        assertTrue(callback.partialSyncCalled);
+
+        // 2. 命令帧 -> ONLINE + onOnline
+        ByteBuf cmdFrame = Unpooled.copiedBuffer("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+                StandardCharsets.UTF_8);
+        invokeHandleResponse(client, cmdFrame);
+        assertEquals(ReplicationState.ONLINE, client.getState());
+        assertTrue(callback.onlineCalled, "部分重同步路径也必须触发 onOnline");
+
+        // 3. sendAck 可发
+        assertTrue(client.isOnline());
+        client.sendAck();
+    }
+
+    @Test
+    @DisplayName("心跳调度器：ONLINE 后 sendAck 发送 REPLCONF ACK <offset>")
+    void testSendAckSendsReplconfAckWithOffset() throws Exception {
+        // 进入 ONLINE 并设置偏移量
+        setClientState(client, ReplicationState.ONLINE);
+        client.setReplicationOffset(12345L);
+
+        // sendAck 在无 channel 时静默返回（不抛异常），但 isOnline 为真
+        assertTrue(client.isOnline());
+        client.sendAck(); // 无 channel，不会实际写出，验证不抛异常
+
+        // 偏移量可读
+        assertEquals(12345L, client.getReplicationOffset());
+    }
+
+    @Test
+    @DisplayName("非 ONLINE 状态下 sendAck 不发送（isOnline 门控）")
+    void testSendAckGatedByIsOnline() throws Exception {
+        setClientState(client, ReplicationState.LOADING_RDB);
+        assertFalse(client.isOnline(), "LOADING_RDB 阶段 isOnline 必须为假");
+
+        client.sendAck(); // 静默返回，不抛异常
+        assertFalse(client.isOnline());
+    }
+
     // ==================== 反射辅助方法 ====================
 
     @SuppressWarnings("unchecked")

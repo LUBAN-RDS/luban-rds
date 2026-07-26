@@ -464,23 +464,75 @@ public class SlaveReplicationClient {
     
     /**
      * 处理同步数据
+     *
+     * C2 回调链：RDB 加载完成 / 部分重同步首条命令到达时，切换到 ONLINE 并触发
+     * {@link ReplicationCallback#onOnline()}，使心跳调度器周期发送 REPLCONF ACK。
+     *
+     * 主节点在全量同步阶段先发送 {@code $<length>\r\n} + RDB 字节，再发送 backlog 中
+     * 积压的 RESP 命令流；部分重同步阶段则直接发送 RESP 命令流。RESP 命令以
+     * {@code *}（multi-bulk）开头，RDB 字节不会以该字符开头，因此用它作为命令流
+     * 起点的启发式信号：在同步态下首次收到以 {@code *} 开头的帧，即视为同步完成、
+     * 进入在线状态。
      */
     private void handleSyncData(ByteBuf data) {
-        // 这里需要处理 RDB 数据和命令传播
-        // 简化处理，实际需要完整的协议解析
-        
-        if (state.get() == ReplicationState.FULL_SYNC || state.get() == ReplicationState.LOADING_RDB) {
-            if (callback != null) {
-                callback.onRdbData(data.copy());
+        ReplicationState currentState = state.get();
+
+        if (currentState == ReplicationState.FULL_SYNC
+                || currentState == ReplicationState.LOADING_RDB) {
+            // RDB 传输阶段：若收到 RESP 命令帧（以 '*' 开头），视为 RDB 传输结束、
+            // 命令传播开始，先切换到 ONLINE 触发 onOnline，再走命令传播路径。
+            if (currentState == ReplicationState.LOADING_RDB && isRespCommandFrame(data)) {
+                transitionToOnline();
+                dispatchCommandPropagation(data);
+            } else {
+                if (callback != null) {
+                    callback.onRdbData(data.copy());
+                }
+                // 收到首个 RDB 数据块后从 FULL_SYNC 推进到 LOADING_RDB，
+                // 与 SlaveReplicationService.onRdbData 的状态推进保持一致。
+                if (currentState == ReplicationState.FULL_SYNC) {
+                    state.set(ReplicationState.LOADING_RDB);
+                }
             }
-        } else if (state.get() == ReplicationState.ONLINE || state.get() == ReplicationState.PARTIAL_SYNC) {
-            if (callback != null) {
-                callback.onCommandPropagation(data.copy());
+        } else if (currentState == ReplicationState.PARTIAL_SYNC) {
+            // 部分重同步：收到首条命令即认为进入在线状态，触发 onOnline。
+            if (!isOnline()) {
+                transitionToOnline();
             }
+            dispatchCommandPropagation(data);
+        } else if (currentState == ReplicationState.ONLINE) {
+            dispatchCommandPropagation(data);
         }
-        
+
         // 更新偏移量
         replicationOffset += data.readableBytes();
+    }
+
+    /**
+     * 判断数据帧是否为 RESP 命令（multi-bulk，以 '*' 开头）
+     */
+    private boolean isRespCommandFrame(ByteBuf data) {
+        return data.readableBytes() > 0 && data.getByte(data.readerIndex()) == '*';
+    }
+
+    /**
+     * 切换到 ONLINE 状态并触发 onOnline 回调（C2 回调链核心）
+     */
+    private void transitionToOnline() {
+        state.set(ReplicationState.ONLINE);
+        if (callback != null) {
+            callback.onOnline();
+        }
+        logger.info("复制同步完成，slave 进入 ONLINE 状态，开始周期发送 REPLCONF ACK");
+    }
+
+    /**
+     * 分发命令传播数据给回调
+     */
+    private void dispatchCommandPropagation(ByteBuf data) {
+        if (callback != null) {
+            callback.onCommandPropagation(data.copy());
+        }
     }
     
     /**
