@@ -743,41 +743,35 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             // ==================== 集群重定向检查 ====================
             // 在命令执行前检查是否需要重定向
             if (clusterEnabled && commandRequiresKey(commandName)) {
-                String key = extractKeyFromCommand(commandName, args);
-                if (key != null) {
-                    // EVAL/EVALSHA 多 key 脚本需校验所有 KEYS 同 slot（Redis 集群硬约束）
-                    String crossSlot = checkCrossSlotForScript(commandName, args);
-                    if (crossSlot != null) {
-                        ByteBuf redirectBuffer = protocolParser.serialize(crossSlot);
-                        if (redirectBuffer != null && redirectBuffer.isReadable()) {
-                            ctx.writeAndFlush(redirectBuffer);
-                        } else if (redirectBuffer != null) {
-                            redirectBuffer.release();
+                List<String> keys = extractKeysFromCommand(commandName, args);
+                if (keys != null && !keys.isEmpty()) {
+                    // EVAL/EVALSHA 的 CROSSSLOT 校验仍由 checkCrossSlotForScript 处理
+                    // （向后兼容，task 3.6）；其余命令在此处统一做 CROSSSLOT 校验。
+                    if ("EVAL".equalsIgnoreCase(commandName) || "EVALSHA".equalsIgnoreCase(commandName)) {
+                        String scriptCross = checkCrossSlotForScript(commandName, args);
+                        if (scriptCross != null) {
+                            writeRedirect(ctx, scriptCross);
+                            return;
                         }
+                    } else {
+                        String crossSlot = checkCrossSlot(keys);
+                        if (crossSlot != null) {
+                            writeRedirect(ctx, crossSlot);
+                            return;
+                        }
+                    }
+
+                    // 以首键判定 MOVED / ASK 重定向
+                    String key = keys.get(0);
+                    String redirect = checkSlotAndRedirect(key);
+                    if (redirect != null) {
+                        writeRedirect(ctx, redirect);
                         return;
                     }
 
-                    // 先检查 MOVED 重定向
-                    String redirect = checkSlotAndRedirect(key);
-                    if (redirect != null) {
-                        ByteBuf redirectBuffer = protocolParser.serialize(redirect);
-                        if (redirectBuffer != null && redirectBuffer.isReadable()) {
-                            ctx.writeAndFlush(redirectBuffer);
-                        } else if (redirectBuffer != null) {
-                            redirectBuffer.release();
-                        }
-                        return;
-                    }
-                    
-                    // 再检查 ASK 重定向
                     redirect = checkAskRedirect(key, clientInfo);
                     if (redirect != null) {
-                        ByteBuf redirectBuffer = protocolParser.serialize(redirect);
-                        if (redirectBuffer != null && redirectBuffer.isReadable()) {
-                            ctx.writeAndFlush(redirectBuffer);
-                        } else if (redirectBuffer != null) {
-                            redirectBuffer.release();
-                        }
+                        writeRedirect(ctx, redirect);
                         return;
                     }
                 }
@@ -2470,60 +2464,214 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     }
     
     /**
-     * 从命令参数中提取键
-     * 
-     * <p>根据命令类型返回第一个键参数。对于多键命令，返回第一个键。
+     * 从命令参数中提取首个键（MOVED/ASK 重定向使用）。
+     *
+     * <p>委托 {@link #extractKeysFromCommand(String, String[])}，返回键列表的首个元素，
+     * 行为与历史 {@code extractKeyFromCommand} 保持一致，便于向后兼容。
      *
      * @param commandName 命令名称
      * @param args        命令参数（包含命令名）
-     * @return 键名，如果没有键则返回null
+     * @return 首个键名，若命令无键返回 null
      */
     private String extractKeyFromCommand(String commandName, String[] args) {
+        List<String> keys = extractKeysFromCommand(commandName, args);
+        return (keys == null || keys.isEmpty()) ? null : keys.get(0);
+    }
+
+    /**
+     * 从命令参数中提取所有涉及槽位归属的键列表。
+     *
+     * <p>对齐 Redis 7 集群语义：多键命令需先校验所有键 hash 到同一 slot（CROSSSLOT），
+     * 再以首键判定 MOVED/ASK。本方法按命令类型枚举参与槽位校验的键位置：
+     * <ul>
+     *   <li>trailing-keys：MGET/DEL/EXISTS/UNLINK/TOUCH/SUNION/SINTER/SDIFF —— args[1..end]</li>
+     *   <li>K-V pairs：MSET/MSETNX —— args[1]/args[3]/args[5]...（奇数下标，从 1 起）</li>
+     *   <li>DEST + source：SDIFFSTORE/SINTERSTORE/SUNIONSTORE/ZUNIONSTORE/ZINTERSTORE
+     *       —— args[1] + args[3..end]（args[2] 为 numkeys）</li>
+     *   <li>BITOP op destkey srckey... —— args[2] + args[3..end]（args[1] 为 op）</li>
+     *   <li>SORT key [BY pattern] [STORE dstkey] —— 简化：仅返回源键 args[1]</li>
+     *   <li>SRC+DST：RENAME/RENAMENX/COPY —— args[1] + args[2]</li>
+     *   <li>SMOVE src dst member —— args[1] + args[2]</li>
+     *   <li>EVAL/EVALSHA —— KEYS[1..numkeys]（与历史 checkCrossSlotForScript 互补）</li>
+     *   <li>其余命令 —— args[1]（单键）</li>
+     * </ul>
+     *
+     * @param commandName 命令名称
+     * @param args        命令参数（包含命令名）
+     * @return 键列表，可能为空或 null（无键命令）；不重复保留原始顺序中的键
+     */
+    private List<String> extractKeysFromCommand(String commandName, String[] args) {
         if (args == null || args.length < 2) {
             return null;
         }
-        
         String cmd = commandName.toUpperCase();
-        
-        // 大多数命令的键在第一个参数位置
-        // SET key value, GET key, HSET key field value, LPUSH key value, etc.
-        // args[0] 是命令名，args[1] 是键
-        
-        // 特殊处理多键命令
-        if ("MGET".equals(cmd) || "MSET".equals(cmd) || "MSETNX".equals(cmd) || "DEL".equals(cmd) || "EXISTS".equals(cmd)) {
-            // MGET key [key ...], MSET key value [key value ...], DEL key [key ...]
-            return args.length >= 2 ? args[1] : null;
+
+        // trailing-keys 命令：keys = args[1..end]
+        if ("MGET".equals(cmd) || "DEL".equals(cmd) || "EXISTS".equals(cmd)
+                || "UNLINK".equals(cmd) || "TOUCH".equals(cmd)
+                || "SUNION".equals(cmd) || "SINTER".equals(cmd) || "SDIFF".equals(cmd)) {
+            return trailingKeys(args, 1);
         }
-        
-        if ("SUNION".equals(cmd) || "SINTER".equals(cmd) || "SDIFF".equals(cmd) || "SMOVE".equals(cmd)) {
-            // SUNION key [key ...], SMOVE source destination member
-            return args.length >= 2 ? args[1] : null;
-        }
-        
-        if ("ZUNIONSTORE".equals(cmd) || "ZINTERSTORE".equals(cmd)) {
-            // ZUNIONSTORE destination numkeys key [key ...]
-            return args.length >= 4 ? args[3] : null;
-        }
-        
-        if ("EVAL".equals(cmd) || "EVALSHA".equals(cmd)) {
-            // EVAL script numkeys key [key ...] arg [arg ...]
-            if (args.length >= 4) {
-                try {
-                    int numkeys = Integer.parseInt(args[2]);
-                    if (numkeys > 0 && args.length >= 4) {
-                        return args[3];
-                    }
-                } catch (NumberFormatException e) {
-                    return null;
-                }
+
+        // K-V pairs 命令：MSET/MSETNX keys = args[1]/args[3]/args[5]...
+        if ("MSET".equals(cmd) || "MSETNX".equals(cmd)) {
+            List<String> keys = new ArrayList<>();
+            for (int i = 1; i < args.length; i += 2) {
+                keys.add(args[i]);
             }
+            return keys;
+        }
+
+        // DEST + source keys: *STORE destination numkeys key [key ...]
+        if ("ZUNIONSTORE".equals(cmd) || "ZINTERSTORE".equals(cmd)) {
+            // args[1]=dest, args[2]=numkeys, args[3..3+numkeys-1]=source keys
+            return destPlusSourceAfterNumkeys(args);
+        }
+        if ("SDIFFSTORE".equals(cmd) || "SINTERSTORE".equals(cmd) || "SUNIONSTORE".equals(cmd)) {
+            // args[1]=dest, args[2..end]=source keys
+            return destPlusTrailing(args, 2);
+        }
+
+        // BITOP op destkey srckey...: args[1]=op, args[2]=dest, args[3..end]=srckey
+        if ("BITOP".equals(cmd)) {
+            return destPlusTrailing(args, 2);
+        }
+
+        // SORT key [BY pattern] [STORE dstkey]：简化处理，仅以 args[1] 作为参与 slot 校验的键。
+        // Redis 集群允许 SORT 同 slot 键；STORE 目标通常与源同 slot（hash tag）才被允许，
+        // 此处不解析 STORE 目标以保持与历史行为一致，避免引入额外复杂度。
+        if ("SORT".equals(cmd)) {
+            return trailingKeys(args, 1);
+        }
+
+        // SRC + DST 二键命令
+        if ("RENAME".equals(cmd) || "RENAMENX".equals(cmd) || "COPY".equals(cmd)
+                || "SMOVE".equals(cmd)) {
+            List<String> keys = new ArrayList<>();
+            if (args.length >= 2) {
+                keys.add(args[1]);
+            }
+            if (args.length >= 3) {
+                keys.add(args[2]);
+            }
+            return keys;
+        }
+
+        // EVAL/EVALSHA: <cmd> <script|sha1> <numkeys> <key...> <arg...>
+        if ("EVAL".equals(cmd) || "EVALSHA".equals(cmd)) {
+            return scriptKeys(args);
+        }
+
+        // 默认单键命令：args[1]
+        List<String> keys = new ArrayList<>();
+        keys.add(args[1]);
+        return keys;
+    }
+
+    /** 收集 args[start..end] 作为键列表。 */
+    private List<String> trailingKeys(String[] args, int start) {
+        List<String> keys = new ArrayList<>();
+        for (int i = start; i < args.length; i++) {
+            keys.add(args[i]);
+        }
+        return keys;
+    }
+
+    /** STORE 型：dest = args[destIdx] + source = args[destIdx+1..end]。 */
+    private List<String> destPlusTrailing(String[] args, int destIdx) {
+        List<String> keys = new ArrayList<>();
+        if (args.length > destIdx) {
+            keys.add(args[destIdx]);
+            keys.addAll(trailingKeys(args, destIdx + 1));
+        }
+        return keys;
+    }
+
+    /** ZUNIONSTORE/ZINTERSTORE：dest = args[1] + source = args[3..3+numkeys-1]。 */
+    private List<String> destPlusSourceAfterNumkeys(String[] args) {
+        List<String> keys = new ArrayList<>();
+        if (args.length < 3) {
+            return keys;
+        }
+        if (args.length >= 2) {
+            keys.add(args[1]); // dest
+        }
+        int numkeys;
+        try {
+            numkeys = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            return keys;
+        }
+        if (numkeys <= 0) {
+            return keys;
+        }
+        for (int i = 3; i < args.length && i < 3 + numkeys; i++) {
+            keys.add(args[i]);
+        }
+        return keys;
+    }
+
+    /** EVAL/EVALSHA：依据 numkeys 收集 KEYS[1..numkeys]。 */
+    private List<String> scriptKeys(String[] args) {
+        List<String> keys = new ArrayList<>();
+        if (args.length < 3) {
+            return keys;
+        }
+        int numkeys;
+        try {
+            numkeys = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            return keys;
+        }
+        if (numkeys <= 0) {
+            return keys;
+        }
+        for (int i = 3; i < args.length && i < 3 + numkeys; i++) {
+            keys.add(args[i]);
+        }
+        return keys;
+    }
+
+    /**
+     * 校验多键命令的所有键是否落在同一 hash slot。
+     *
+     * <p>对齐 Redis 7：当键数 ≥ 2 且不全在同一 slot 时，返回 {@code -CROSSSLOT}
+     * 错误响应；键数 ≤ 1 时返回 null。
+     *
+     * @param keys 命令涉及的键列表
+     * @return null 表示同 slot（或单键以下无需校验），否则为 CROSSSLOT 错误响应
+     */
+    private String checkCrossSlot(List<String> keys) {
+        if (keys == null || keys.size() <= 1) {
             return null;
         }
-        
-        // 默认返回第一个参数作为键
-        return args[1];
+        int firstSlot = SlotUtils.keyHashSlot(keys.get(0));
+        for (int i = 1; i < keys.size(); i++) {
+            if (SlotUtils.keyHashSlot(keys.get(i)) != firstSlot) {
+                return "-CROSSSLOT Keys in request don't hash to the same slot\r\n";
+            }
+        }
+        return null;
     }
-    
+
+    /**
+     * 将重定向/错误响应序列化并写回客户端，统一处理 buffer 释放。
+     *
+     * <p>原 dispatch 处四处重复的 {@code protocolParser.serialize(resp)} + 可读则写回 / 否则释放
+     * 模式抽取为该辅助方法，消除重复。
+     *
+     * @param ctx        通道上下文
+     * @param rawResp    已构造好的 RESP 字符串（含尾部 {@code \r\n}）
+     */
+    private void writeRedirect(ChannelHandlerContext ctx, String rawResp) {
+        ByteBuf buffer = protocolParser.serialize(rawResp);
+        if (buffer != null && buffer.isReadable()) {
+            ctx.writeAndFlush(buffer);
+        } else if (buffer != null) {
+            buffer.release();
+        }
+    }
+
     /**
      * 检查 EVAL/EVALSHA 脚本的多个 KEYS 是否属于同一 slot。
      * <p>
