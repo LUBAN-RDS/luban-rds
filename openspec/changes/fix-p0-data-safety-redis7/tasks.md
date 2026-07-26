@@ -91,10 +91,10 @@ C3 必须先修让 AOF 写入链路通起来；C10 独立；C11 依赖 C3 的接
 
 ## 5. 批次 E：集成验证与收尾
 
-- [ ] 5.1 全量回归测试：`mvn clean install` 通过，无新增失败用例
-- [ ] 5.2 端到端复制验证：master-slave 全量同步 + 窗口期写入不丢 + slave offset 正确 + WAIT 命令正确
-- [ ] 5.3 持久化端到端验证：AOF 模式重启不丢数据 + RDB 模式 TTL 保留 + AOF rewrite 各类型保留
-- [ ] 5.4 集群端到端验证：CROSSSLOT 拒绝跨槽 + MIGRATE 原子性 + 手动 failover 全网收敛 + 偏移量选举
-- [ ] 5.5 ZSet 排序验证：同分字典序在所有相关命令一致
-- [ ] 5.6 更新 `AGENTS.md` 第 9/10 节的测试覆盖率表（如有变化）
-- [ ] 5.7 在 `AUDIT-REPORT-vs-Redis7.md` 末尾追加修复说明（标注 C1-C12 已修复，引用 change 名）
+- [x] 5.1 全量回归测试：`mvn clean install` 通过，无新增失败用例
+- [x] 5.2 端到端复制验证：master-slave 全量同步 + 窗口期写入不丢 + slave offset 正确 + WAIT 命令正确
+- [x] 5.3 持久化端到端验证：AOF 模式重启不丢数据 + RDB 模式 TTL 保留 + AOF rewrite 各类型保留
+- [x] 5.4 集群端到端验证：CROSSSLOT 拒绝跨槽 + MIGRATE 原子性 + 手动 failover 全网收敛 + 偏移量选举
+- [x] 5.5 ZSet 排序验证：同分字典序在所有相关命令一致
+- [x] 5.6 更新 `AGENTS.md` 第 9/10 节的测试覆盖率表（如有变化）
+- [x] 5.7 在 `AUDIT-REPORT-vs-Redis7.md` 末尾追加修复说明（标注 C1-C12 已修复，引用 change 名）
