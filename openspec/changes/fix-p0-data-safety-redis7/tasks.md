@@ -79,15 +79,15 @@ C3 必须先修让 AOF 写入链路通起来；C10 独立；C11 依赖 C3 的接
 
 ## 4. 批次 D：核心数据结构（C12，独立）
 
-- [ ] 4.1 `DefaultMemoryStore.ZSetStore.scoreMembers` 值类型从 `ConcurrentHashMap.KeySetView<String, Boolean>` 改为 `ConcurrentSkipListSet<String>`
-- [ ] 4.2 `ZSetStore.add` 中 `scoreMembers.computeIfAbsent(score, k -> ConcurrentHashMap.newKeySet())` 改为 `k -> new ConcurrentSkipListSet<>()`
-- [ ] 4.3 验证 `add`/`remove` 的旧分集合移除/新分集合加入/空集合清理逻辑在新结构下正确
-- [ ] 4.4 `zpopmax`/`zrevrange` 用 `descendingSet()` 实现反向字典序
-- [ ] 4.5 `zpopmin` 验证同分弹字典序最小；`zpopmax` 验证同分弹字典序最大
-- [ ] 4.6 `zrank` 同分定位改为 `ConcurrentSkipListSet` 线性扫描（字典序正确，仍 O(n)）
-- [ ] 4.7 `range`/`rangeByScore`/`zscan`/`zremrangeByScore`/`zremrangeByRank` 验证字典序迭代
-- [ ] 4.8 同步调整 `estimateMemorySize`（237-247 行）的 ZSetStore 估算常量（跳表节点比 CHM 桶节点重）
-- [ ] 4.9 编写 ZSet 同分字典序测试：ZRANGE/ZREVRANGE/ZPOPMIN/ZPOPMAX/ZRANK/ZINCRBY 改分重排/多线程并发 ZADD
+- [x] 4.1 `DefaultMemoryStore.ZSetStore.scoreMembers` 值类型从 `ConcurrentHashMap.KeySetView<String, Boolean>` 改为 `ConcurrentSkipListSet<String>`
+- [x] 4.2 `ZSetStore.add` 中 `scoreMembers.computeIfAbsent(score, k -> ConcurrentHashMap.newKeySet())` 改为 `k -> new ConcurrentSkipListSet<>()`
+- [x] 4.3 验证 `add`/`remove` 的旧分集合移除/新分集合加入/空集合清理逻辑在新结构下正确
+- [x] 4.4 `zpopmax`/`zrevrange` 用 `descendingSet()` 实现反向字典序
+- [x] 4.5 `zpopmin` 验证同分弹字典序最小；`zpopmax` 验证同分弹字典序最大
+- [x] 4.6 `zrank` 同分定位改为 `ConcurrentSkipListSet` 线性扫描（字典序正确，仍 O(n)）
+- [x] 4.7 `range`/`rangeByScore`/`zscan`/`zremrangeByScore`/`zremrangeByRank` 验证字典序迭代
+- [x] 4.8 同步调整 `estimateMemorySize`（237-247 行）的 ZSetStore 估算常量（跳表节点比 CHM 桶节点重）
+- [x] 4.9 编写 ZSet 同分字典序测试：ZRANGE/ZREVRANGE/ZPOPMIN/ZPOPMAX/ZRANK/ZINCRBY 改分重排/多线程并发 ZADD
 
 ## 5. 批次 E：集成验证与收尾
 
