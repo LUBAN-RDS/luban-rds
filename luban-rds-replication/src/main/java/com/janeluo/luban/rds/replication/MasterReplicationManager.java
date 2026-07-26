@@ -89,6 +89,13 @@ public class MasterReplicationManager {
     }
     
     /**
+     * 设置 RDB 快照生成器（用于测试注入）
+     */
+    void setSnapshotGenerator(RdbSnapshotGenerator snapshotGenerator) {
+        this.snapshotGenerator = snapshotGenerator;
+    }
+    
+    /**
      * 设置内存存储
      */
     public void setMemoryStore(MemoryStore memoryStore) {
@@ -234,6 +241,11 @@ public class MasterReplicationManager {
     /**
      * 执行全量同步
      * 
+     * <p>RDB 传输完成后，在将从节点标记为 ONLINE 之前，会从 backlog 重放
+     * 快照偏移量之后到当前偏移量之间的窗口期命令，避免该期间写入对从节点永久丢失。
+     * 重放期间从节点保持 SYNCING 状态，{@link #propagateCommand} 的
+     * {@code slave.isOnline()} 检查会跳过该从节点，不会并发直发导致乱序。
+     * 
      * @param channel 从节点通道
      * @return 是否成功开始同步
      */
@@ -257,21 +269,33 @@ public class MasterReplicationManager {
         // 异步执行 RDB 生成和传输
         asyncExecutor.submit(() -> {
             try {
-                long transferredBytes = snapshotGenerator.generateAndTransfer(
-                    memoryStore, channel, tracker);
+                RdbSnapshotGenerator.SnapshotResult result = snapshotGenerator.generateAndTransfer(
+                    memoryStore, channel, tracker, backlog);
                 
-                if (transferredBytes > 0) {
-                    logger.info("Full sync completed for slave {}, transferred {} bytes",
-                               slave.getSlaveId(), transferredBytes);
-                    
-                    // 标记从节点为在线
-                    slave.setState(ReplicationState.ONLINE);
-                    slave.addFlag(SlaveInfo.SLAVE_FLAG_ONLINE);
-                    slave.removeFlag(SlaveInfo.SLAVE_FLAG_SYNCING);
-                } else {
+                if (!result.isSuccess()) {
                     logger.error("Full sync failed for slave {}", slave.getSlaveId());
                     tracker.onError("RDB transfer failed");
+                    return;
                 }
+                
+                logger.info("Full sync RDB transfer completed for slave {}, transferred {} bytes, snapshotOffset: {}",
+                           slave.getSlaveId(), result.getTransferredBytes(), result.getSnapshotOffset());
+                
+                // 重放窗口期命令：从 RDB 落盘时刻的 snapshotOffset 到当前 master offset
+                if (!replayWindowCommands(slave, result.getSnapshotOffset(), channel)) {
+                    // 窗口期数据已被 backlog 覆盖，无法重放 -> 从节点需重新发起全量同步
+                    logger.warn("Window replay failed for slave {}, marking for re-sync", slave.getSlaveId());
+                    slave.removeFlag(SlaveInfo.SLAVE_FLAG_SYNCING);
+                    slave.setState(ReplicationState.FULL_SYNC);
+                    tracker.onError("Window replay failed, need full re-sync");
+                    return;
+                }
+                
+                // 重放完成后才标记从节点为在线
+                slave.setState(ReplicationState.ONLINE);
+                slave.addFlag(SlaveInfo.SLAVE_FLAG_ONLINE);
+                slave.removeFlag(SlaveInfo.SLAVE_FLAG_SYNCING);
+                slave.updateReplicationLag(backlog.getMasterReplOffset());
                 
             } catch (Exception e) {
                 logger.error("Error during full sync for slave {}", slave.getSlaveId(), e);
@@ -280,6 +304,69 @@ public class MasterReplicationManager {
         });
         
         return true;
+    }
+    
+    /**
+     * 重放全量同步窗口期命令
+     * 
+     * <p>从 {@code snapshotOffset} 到当前 backlog 偏移量之间的命令会被重放给从节点。
+     * 重放期间从节点保持 SYNCING 状态（调用方负责），避免 {@link #propagateCommand}
+     * 并发直发导致命令乱序。
+     * 
+     * @param slave 从节点信息
+     * @param snapshotOffset RDB 落盘时刻的 backlog 偏移量（-1 表示无快照偏移量，跳过重放）
+     * @param channel 从节点通道
+     * @return 是否重放成功（窗口期数据未被 backlog 覆盖）
+     */
+    private boolean replayWindowCommands(SlaveInfo slave, long snapshotOffset, Channel channel) {
+        if (snapshotOffset < 0) {
+            logger.debug("No snapshot offset, skipping window replay for slave {}", slave.getSlaveId());
+            // 仍将 slave offset 对齐到当前 master offset
+            slave.updateOffset(backlog.getMasterReplOffset());
+            return true;
+        }
+        
+        long currentOffset = backlog.getMasterReplOffset();
+        if (currentOffset <= snapshotOffset) {
+            logger.debug("No window commands to replay for slave {}, snapshotOffset: {}, currentOffset: {}",
+                        slave.getSlaveId(), snapshotOffset, currentOffset);
+            // 无窗口期命令，slave offset 对齐到 snapshotOffset（即当前 master offset）
+            slave.updateOffset(currentOffset);
+            return true;
+        }
+        
+        byte[] windowData = backlog.getBacklogData(snapshotOffset);
+        if (windowData == null) {
+            // 窗口期数据已被 backlog 覆盖，无法重放
+            logger.warn("Window data out of backlog range for slave {}, snapshotOffset: {}, currentOffset: {}, " +
+                       "cannot replay - slave should re-initiate full sync",
+                       slave.getSlaveId(), snapshotOffset, currentOffset);
+            return false;
+        }
+        
+        if (windowData.length == 0) {
+            logger.debug("Empty window data for slave {}, snapshotOffset: {}", slave.getSlaveId(), snapshotOffset);
+            slave.updateOffset(currentOffset);
+            return true;
+        }
+        
+        if (!channel.isActive()) {
+            logger.warn("Channel inactive during window replay for slave {}", slave.getSlaveId());
+            return false;
+        }
+        
+        try {
+            ByteBuf buf = Unpooled.wrappedBuffer(windowData);
+            channel.writeAndFlush(buf);
+            // 更新从节点偏移量到重放结束位置
+            slave.updateOffset(currentOffset);
+            logger.info("Window replay completed for slave {}, replayed {} bytes, offset: {} -> {}",
+                       slave.getSlaveId(), windowData.length, snapshotOffset, currentOffset);
+            return true;
+        } catch (Exception e) {
+            logger.error("Failed to replay window commands for slave {}", slave.getSlaveId(), e);
+            return false;
+        }
     }
     
     /**

@@ -69,24 +69,48 @@ public class RdbSnapshotGenerator {
      */
     public long generateAndTransfer(MemoryStore memoryStore, Channel channel, 
                                     TransferProgressMonitor progressMonitor) {
+        return generateAndTransfer(memoryStore, channel, progressMonitor, null).getTransferredBytes();
+    }
+    
+    /**
+     * 生成 RDB 快照并传输给从节点
+     * 
+     * <p>当提供 {@code backlog} 时，会在 RDB 文件落盘（{@code persistSync} 完成）之后、
+     * 传输之前，记录 {@code backlog.getMasterReplOffset()} 作为快照偏移量，
+     * 供主节点在全量同步完成后重放窗口期命令使用。
+     * 
+     * @param memoryStore 内存存储
+     * @param channel 从节点通道
+     * @param progressMonitor 进度监控器（可选）
+     * @param backlog 复制积压缓冲区（可选，用于记录快照偏移量）
+     * @return 快照结果，包含传输字节数与快照偏移量
+     */
+    public SnapshotResult generateAndTransfer(MemoryStore memoryStore, Channel channel,
+                                              TransferProgressMonitor progressMonitor,
+                                              ReplicationBacklog backlog) {
         if (!isGenerating.compareAndSet(false, true)) {
             logger.warn("RDB snapshot generation is already in progress");
-            return -1;
+            return SnapshotResult.failure();
         }
         
         try {
             long startTime = System.currentTimeMillis();
             totalBytesTransferred.set(0);
             
-            // 生成临时 RDB 文件
+            // 生成临时 RDB 文件（persistSync 完成后落盘）
             File tempRdbFile = generateTempRdbFile(memoryStore);
             if (tempRdbFile == null || !tempRdbFile.exists()) {
                 logger.error("Failed to generate RDB file");
-                return -1;
+                return SnapshotResult.failure();
             }
             
+            // 在 RDB 文件落盘后记录 backlog 偏移量，
+            // 此后窗口期写入的命令都会进入 backlog，可被主节点重放给从节点
+            long snapshotOffset = backlog != null ? backlog.getMasterReplOffset() : -1;
+            
             long fileSize = tempRdbFile.length();
-            logger.info("RDB snapshot generated, size: {} bytes, starting transfer...", fileSize);
+            logger.info("RDB snapshot generated, size: {} bytes, snapshotOffset: {}, starting transfer...",
+                       fileSize, snapshotOffset);
             
             // 传输 RDB 文件
             long transferredBytes = transferRdbFile(tempRdbFile, channel, progressMonitor);
@@ -99,11 +123,11 @@ public class RdbSnapshotGenerator {
                        transferredBytes, duration,
                        duration > 0 ? (transferredBytes / 1024.0 / duration * 1000) : 0);
             
-            return transferredBytes;
+            return new SnapshotResult(transferredBytes, snapshotOffset);
             
         } catch (Exception e) {
             logger.error("Error during RDB snapshot generation and transfer", e);
-            return -1;
+            return SnapshotResult.failure();
         } finally {
             isGenerating.set(false);
         }
@@ -265,5 +289,57 @@ public class RdbSnapshotGenerator {
      */
     public String getDataDir() {
         return dataDir;
+    }
+    
+    /**
+     * RDB 快照传输结果
+     * 
+     * <p>包含本次传输的字节数以及 RDB 文件落盘时刻对应的 backlog 偏移量。
+     * 主节点在全量同步完成后，可据此偏移量从 backlog 中重放窗口期命令。
+     */
+    public static class SnapshotResult {
+        private final long transferredBytes;
+        private final long snapshotOffset;
+        
+        public SnapshotResult(long transferredBytes, long snapshotOffset) {
+            this.transferredBytes = transferredBytes;
+            this.snapshotOffset = snapshotOffset;
+        }
+        
+        /**
+         * 传输的字节数，失败时为 -1
+         */
+        public long getTransferredBytes() {
+            return transferredBytes;
+        }
+        
+        /**
+         * RDB 落盘时刻的 backlog 偏移量。
+         * 未提供 backlog 时为 -1，表示不进行窗口期重放。
+         */
+        public long getSnapshotOffset() {
+            return snapshotOffset;
+        }
+        
+        /**
+         * 是否传输成功
+         */
+        public boolean isSuccess() {
+            return transferredBytes > 0;
+        }
+        
+        /**
+         * 是否包含可用于重放的快照偏移量
+         */
+        public boolean hasSnapshotOffset() {
+            return snapshotOffset >= 0;
+        }
+        
+        /**
+         * 创建失败结果
+         */
+        public static SnapshotResult failure() {
+            return new SnapshotResult(-1, -1);
+        }
     }
 }
