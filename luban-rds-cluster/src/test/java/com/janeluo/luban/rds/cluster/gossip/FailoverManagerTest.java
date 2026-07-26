@@ -338,7 +338,7 @@ class FailoverManagerTest {
     // ==================== 手动故障转移 ====================
 
     @Test
-    @DisplayName("手动 performManualFailover 不触发选举状态机、不广播 RESULT")
+    @DisplayName("手动 performManualFailover 不触发选举状态机、广播 RESULT（C9）")
     void testManualFailoverBypassesStateMachine() {
         ClusterNode master = createMasterNode(NODE_ID_1, 7000);
         for (int i = 0; i < 100; i++) master.addSlot(i);
@@ -352,7 +352,8 @@ class FailoverManagerTest {
         assertTrue(slave.isMaster());
         assertTrue(master.isSlave());
         assertEquals(100, slave.getSlotCount());
-        Mockito.verifyNoInteractions(busClient);  // 不广播 RESULT
+        // C9: 手动 failover 广播 FailoverResult 使全网拓扑收敛
+        Mockito.verify(busClient).broadcast(Mockito.any(FailoverResultMessage.class));
     }
 
     // ==================== 辅助方法 ====================

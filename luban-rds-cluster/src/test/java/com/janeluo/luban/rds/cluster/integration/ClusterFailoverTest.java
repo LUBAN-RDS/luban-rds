@@ -19,6 +19,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
@@ -533,8 +534,8 @@ class ClusterFailoverTest {
     }
 
     @Test
-    @DisplayName("集成：FailoverManager.performManualFailover 不广播 RESULT")
-    void testManualFailoverDoesNotBroadcastResult() {
+    @DisplayName("集成：FailoverManager.performManualFailover 广播 RESULT（C9）")
+    void testManualFailoverBroadcastsResult() {
         ClusterConfig cfg = new ClusterConfig();
         SlotManager sm = new DefaultSlotManager();
         ClusterStateManager stm = new ClusterStateManager(cfg);
@@ -553,7 +554,20 @@ class ClusterFailoverTest {
         assertEquals(FailoverState.IDLE, fm.getState());
         assertTrue(slave.isMaster());
         assertTrue(master.isSlave());
-        Mockito.verifyNoInteractions(busClient);  // 手动接管不广播 RESULT
+        // C9: 手动 failover 广播 FailoverResult 使全网拓扑收敛
+        ArgumentCaptor<FailoverResultMessage> captor =
+                ArgumentCaptor.forClass(FailoverResultMessage.class);
+        Mockito.verify(busClient).broadcast(captor.capture());
+        FailoverResultMessage msg = captor.getValue();
+        assertEquals(slave.getNodeId(), msg.getWinnerNodeId(), "winner 应为被提升的 slave");
+        assertEquals(slave.getNodeId(), msg.getSenderNodeId(), "sender 应为被提升的 slave");
+        assertEquals(cfg.getCurrentEpoch(), msg.getNewConfigEpoch(), "epoch 应为自增后的值");
+        assertEquals(100, msg.getInheritedSlots().cardinality(), "应继承原 master 的 100 槽位");
+        // C9/3.22: 原 master configEpoch 对齐自动路径
+        assertEquals(cfg.getCurrentEpoch(), master.getConfigEpoch(),
+                "原 master configEpoch 应对齐 currentEpoch");
+        assertEquals(cfg.getCurrentEpoch(), slave.getConfigEpoch(),
+                "新 master configEpoch 应对齐 currentEpoch");
     }
 
     /**

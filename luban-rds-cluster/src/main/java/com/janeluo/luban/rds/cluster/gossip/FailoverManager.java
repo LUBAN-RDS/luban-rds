@@ -429,13 +429,8 @@ public class FailoverManager {
         oldMaster.setConfigEpoch(clusterConfig.getCurrentEpoch());
         state = FailoverState.ELECTED;
 
-        FailoverResultMessage result = new FailoverResultMessage(
-                me.getNodeId(),
-                me.getNodeId(),
-                clusterConfig.getCurrentEpoch(),
-                me.getSlots());
-        busClient.broadcast(result);
-        notifyTopologyChanged();
+        // 广播收敛到共用方法（自动+手动共用），避免重复广播（C9）
+        broadcastFailoverResult(me, oldMaster);
         logger.warn("slave 自动提升为 master: nodeId={}, epoch={}, slotCount={}",
                 me.getNodeId(), clusterConfig.getCurrentEpoch(), me.getSlotCount());
 
@@ -446,8 +441,9 @@ public class FailoverManager {
 
     /**
      * 手动 CLUSTER FAILOVER [FORCE|TAKEOVER] 入口。
-     * 不经选举状态机、不广播 RESULT（直接接管语义），
-     * 但保留原 performFailover 的 epoch 自增行为（手动接管也需要更高的 configEpoch 使全网收敛）。
+     * 不经选举状态机，但<b>广播 FailoverResult</b>使全网拓扑收敛（对齐 Redis 7，C9）。
+     * 保留 epoch 自增行为（手动接管也需要更高的 configEpoch 使全网收敛），
+     * 并对齐自动路径：旧 master 也同步提升 configEpoch。
      *
      * @param slaveNode  当前 slave 节点（将被提升）
      * @param masterNode 原 master 节点（将被降级）
@@ -456,7 +452,11 @@ public class FailoverManager {
         performFailover(slaveNode, masterNode);
         clusterConfig.incrementEpoch();
         slaveNode.setConfigEpoch(clusterConfig.getCurrentEpoch());
-        notifyTopologyChanged();
+        // 旧 master 降级后同步提升 configEpoch，对齐自动路径（C9/3.22）：
+        // 使 gossip 传播的 epoch 严格大于旧主本地恢复值，触发自降级门控。
+        masterNode.setConfigEpoch(clusterConfig.getCurrentEpoch());
+        // 广播 FailoverResult 使全网拓扑收敛（自动+手动共用，C9/3.21）。
+        broadcastFailoverResult(slaveNode, masterNode);
     }
 
     /**
@@ -496,6 +496,34 @@ public class FailoverManager {
         if (masterNode.isMyself()) {
             replicationLifecycleListener.demoteToSlave(slaveNode);
         }
+    }
+
+    /**
+     * 广播 FailoverResult 使全网拓扑收敛（自动胜选 + 手动 FAILOVER 共用，C9）。
+     * <p>
+     * 必须在调用方完成 epoch 自增与新/旧 master 的 configEpoch 对齐<b>之后</b>调用，
+     * 以保证广播携带的 {@code newConfigEpoch} 为最终值，避免以陈旧 epoch 广播。
+     * 同时触发 {@link #notifyTopologyChanged()} 持久化 nodes.conf。
+     * </p>
+     * <p>
+     * 重复广播安全：{@link #onFailoverResult} 已有纪元裁决（旧纪元忽略）与相等 epoch
+     * 的 nodeId 字典序决胜，重复/回放消息不会破坏拓扑。
+     * </p>
+     *
+     * @param newMaster 已提升的新 master 节点（原 slave）
+     * @param oldMaster 已降级的原 master 节点
+     */
+    private void broadcastFailoverResult(ClusterNode newMaster, ClusterNode oldMaster) {
+        FailoverResultMessage result = new FailoverResultMessage(
+                newMaster.getNodeId(),
+                newMaster.getNodeId(),
+                clusterConfig.getCurrentEpoch(),
+                newMaster.getSlots());
+        busClient.broadcast(result);
+        notifyTopologyChanged();
+        logger.debug("广播 FailoverResult: newMaster={}, oldMaster={}, epoch={}, slotCount={}",
+                newMaster.getNodeId(), oldMaster.getNodeId(),
+                clusterConfig.getCurrentEpoch(), newMaster.getSlotCount());
     }
 
     // ==================== 全节点：处理 FailoverResult ====================
