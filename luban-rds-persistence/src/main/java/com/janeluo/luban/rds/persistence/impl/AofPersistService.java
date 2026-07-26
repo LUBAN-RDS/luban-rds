@@ -61,7 +61,8 @@ public class AofPersistService implements PersistService {
         // 初始化AOF文件写入器
         try {
             this.aofOutputStream = new FileOutputStream(aofFilePath, true);
-            this.aofWriter = new OutputStreamWriter(aofOutputStream);
+            // 显式指定 ISO-8859-1 编码，保证二进制安全（任意字节无损往返）
+            this.aofWriter = new OutputStreamWriter(aofOutputStream, StandardCharsets.ISO_8859_1);
             logger.info("AOF写入器已初始化: file={}", aofFilePath);
         } catch (IOException e) {
             logger.error("初始化AOF写入器失败: file={}", aofFilePath, e);
@@ -176,40 +177,34 @@ public class AofPersistService implements PersistService {
     }
 
     /**
-     * 记录写命令到AOF文件
+     * 记录写命令到 AOF 文件。
      *
-     * @param command 命令
-     * @param args    命令参数
+     * <p>接收原始 RESP 帧字节并原样追加写入 AOF 文件，与复制传播使用的
+     * {@code rawRespFrame} 是同一份数据，避免重复序列化。使用 ISO-8859-1
+     * 编码写入以保证二进制安全（任意字节均可无损往返）。
+     *
+     * <p>当 {@code fsyncInterval == 0} 时，写入后立即 flush，确保数据落盘。
+     *
+     * @param respFrame 原始 RESP 命令帧字节（不可为 null）
      */
-    public void recordCommand(String command, String[] args) {
+    @Override
+    public void recordCommand(byte[] respFrame) {
         if (!isRunning || aofWriter == null) {
+            return;
+        }
+        if (respFrame == null || respFrame.length == 0) {
             return;
         }
 
         try {
-            // 构建AOF格式的命令 - 使用ISO-8859-1编码确保二进制安全
-            StringBuilder sb = new StringBuilder();
-            sb.append("*")
-                    .append(args.length)
-                    .append("\r\n");
+            // ISO-8859-1 编码保证二进制安全：任意字节 -> 字符 -> 原字节无损往返
+            String frame = new String(respFrame, StandardCharsets.ISO_8859_1);
+            aofWriter.write(frame, 0, frame.length());
 
-            for (String arg : args) {
-                byte[] argBytes = arg.getBytes(StandardCharsets.ISO_8859_1);
-                sb.append("$")
-                        .append(argBytes.length)
-                        .append("\r\n")
-                        .append(arg)
-                        .append("\r\n");
-            }
-
-            // 写入AOF文件 - 使用ISO-8859-1编码
-            aofWriter.write(sb.toString(), 0, sb.length());
-
-            // 如果fsync间隔为0，立即fsync
+            // fsync 间隔为 0 时立即落盘
             if (fsyncInterval == 0) {
                 flush();
             }
-
         } catch (IOException e) {
             logger.error("Error recording command to AOF", e);
         }
@@ -268,7 +263,7 @@ public class AofPersistService implements PersistService {
                 aofOutputStream.close();
             }
             this.aofOutputStream = new FileOutputStream(aofFilePath, true); // 追加模式
-            this.aofWriter = new OutputStreamWriter(aofOutputStream);
+            this.aofWriter = new OutputStreamWriter(aofOutputStream, StandardCharsets.ISO_8859_1);
 
             long endTime = System.currentTimeMillis();
             logger.info("AOF rewrite completed in {} ms", endTime - startTime);
@@ -308,6 +303,20 @@ public class AofPersistService implements PersistService {
                 logger.error("Error flushing AOF", e);
             }
         }
+    }
+
+    /**
+     * 测试辅助方法：手动触发 flush（将缓冲区数据落盘到 AOF 文件）。
+     */
+    void flushForTest() {
+        flush();
+    }
+
+    /**
+     * 测试辅助方法：标记服务已停止（isRunning = false），用于验证停止后不再写入。
+     */
+    void stopForTest() {
+        isRunning = false;
     }
 
     private int currentDb = 0;
