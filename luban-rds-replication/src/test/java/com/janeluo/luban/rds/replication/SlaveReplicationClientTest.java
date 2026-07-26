@@ -8,7 +8,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -211,6 +213,129 @@ class SlaveReplicationClientTest {
         client.start();
         client.stop();
         assertEquals(ReplicationState.DISCONNECTED, client.getState());
+    }
+
+    // ==================== PSYNC 响应路由测试 (C2) ====================
+
+    @Test
+    @DisplayName("PSYNC 响应路由到 handlePsyncResponse 而非 handleReplconfResponse - FULLRESYNC")
+    void testPsyncResponseRoutedToPsyncHandler_FullResync() throws Exception {
+        setClientState(client, ReplicationState.HANDSHAKE_PSYNC);
+
+        String fullResync = "+FULLRESYNC abc123def456 1000\r\n";
+        invokeHandleResponse(client, Unpooled.copiedBuffer(fullResync, StandardCharsets.UTF_8));
+
+        // 路由正确：触发 onFullSync，进入 FULL_SYNC
+        assertTrue(callback.fullSyncCalled, "FULLRESYNC 应触发 onFullSync 回调");
+        assertFalse(callback.partialSyncCalled, "FULLRESYNC 不应触发 onPartialSync");
+        assertEquals(ReplicationState.FULL_SYNC, client.getState());
+        assertEquals("abc123def456", callback.lastReplId);
+        assertEquals(1000L, callback.lastOffset);
+        assertEquals("abc123def456", client.getMasterReplId());
+        assertEquals(1000L, client.getReplicationOffset());
+    }
+
+    @Test
+    @DisplayName("PSYNC 响应路由到 handlePsyncResponse - CONTINUE")
+    void testPsyncResponseRoutedToPsyncHandler_Continue() throws Exception {
+        // 模拟已有 replid/offset 的重连场景
+        client.setMasterReplId("existing-replid");
+        client.setReplicationOffset(500L);
+        setClientState(client, ReplicationState.HANDSHAKE_PSYNC);
+
+        String continueResp = "+CONTINUE newreplid789\r\n";
+        invokeHandleResponse(client, Unpooled.copiedBuffer(continueResp, StandardCharsets.UTF_8));
+
+        assertTrue(callback.partialSyncCalled, "CONTINUE 应触发 onPartialSync 回调");
+        assertFalse(callback.fullSyncCalled, "CONTINUE 不应触发 onFullSync");
+        assertEquals(ReplicationState.PARTIAL_SYNC, client.getState());
+        assertEquals("newreplid789", callback.lastReplId);
+        assertEquals(500L, callback.lastOffset, "CONTINUE 不携带 offset，应保留现有偏移量");
+        assertEquals("newreplid789", client.getMasterReplId());
+    }
+
+    @Test
+    @DisplayName("CONTINUE 响应不带 replid 时保留现有 replid")
+    void testPsyncResponse_ContinueWithoutReplid() throws Exception {
+        client.setMasterReplId("old-replid");
+        client.setReplicationOffset(42L);
+        setClientState(client, ReplicationState.HANDSHAKE_PSYNC);
+
+        String continueResp = "+CONTINUE\r\n";
+        invokeHandleResponse(client, Unpooled.copiedBuffer(continueResp, StandardCharsets.UTF_8));
+
+        assertTrue(callback.partialSyncCalled);
+        assertEquals(ReplicationState.PARTIAL_SYNC, client.getState());
+        assertEquals("old-replid", client.getMasterReplId(), "无 replid 的 CONTINUE 应保留现有 replid");
+        assertEquals("old-replid", callback.lastReplId);
+        assertEquals(42L, callback.lastOffset);
+    }
+
+    @Test
+    @DisplayName("PSYNC 异常响应回退到 DISCONNECTED")
+    void testPsyncResponse_ErrorFallsBackToDisconnected() throws Exception {
+        setClientState(client, ReplicationState.HANDSHAKE_PSYNC);
+
+        String errResp = "-ERR PSYNC failed\r\n";
+        invokeHandleResponse(client, Unpooled.copiedBuffer(errResp, StandardCharsets.UTF_8));
+
+        assertFalse(callback.fullSyncCalled);
+        assertFalse(callback.partialSyncCalled);
+        assertEquals(ReplicationState.DISCONNECTED, client.getState(), "错误响应应回退到 DISCONNECTED");
+    }
+
+    @Test
+    @DisplayName("FULLRESYNC 解析失败时不崩溃且进入 DISCONNECTED")
+    void testPsyncResponse_MalformedFullResync() throws Exception {
+        setClientState(client, ReplicationState.HANDSHAKE_PSYNC);
+
+        // 缺少 offset，格式异常
+        String malformed = "+FULLRESYNC onlyreplid\r\n";
+        invokeHandleResponse(client, Unpooled.copiedBuffer(malformed, StandardCharsets.UTF_8));
+
+        assertEquals(ReplicationState.DISCONNECTED, client.getState(),
+                "格式异常的 FULLRESYNC 应安全回退到 DISCONNECTED");
+    }
+
+    @Test
+    @DisplayName("PSYNC 响应不再被路由到 handleReplconfResponse")
+    void testPsyncResponseNotRoutedToReplconfHandler() throws Exception {
+        // 处于 HANDSHAKE_PSYNC 时收到 +OK（旧的错误路由会把它当 REPLCONF 响应静默忽略）
+        setClientState(client, ReplicationState.HANDSHAKE_PSYNC);
+
+        invokeHandleResponse(client, Unpooled.copiedBuffer("+OK\r\n", StandardCharsets.UTF_8));
+
+        // 既非 FULLRESYNC 也非 CONTINUE，应被视为异常并回退
+        assertFalse(callback.fullSyncCalled);
+        assertFalse(callback.partialSyncCalled);
+        assertNotEquals(ReplicationState.HANDSHAKE_PSYNC, client.getState(),
+                "+OK 在 PSYNC 阶段不应被当作正常响应");
+    }
+
+    // ==================== 反射辅助方法 ====================
+
+    @SuppressWarnings("unchecked")
+    private static void setClientState(SlaveReplicationClient client, ReplicationState state) {
+        try {
+            var field = SlaveReplicationClient.class.getDeclaredField("state");
+            field.setAccessible(true);
+            AtomicReference<ReplicationState> ref =
+                    (AtomicReference<ReplicationState>) field.get(client);
+            ref.set(state);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static void invokeHandleResponse(SlaveReplicationClient client, ByteBuf msg) {
+        try {
+            Method method = SlaveReplicationClient.class.getDeclaredMethod(
+                    "handleResponse", ByteBuf.class);
+            method.setAccessible(true);
+            method.invoke(client, msg);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static class TestCallback implements ReplicationCallback {

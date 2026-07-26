@@ -47,6 +47,12 @@ public enum ReplicationState {
     HANDSHAKE_REPLCONF_ACK("handshake_replconf_ack"),
     
     /**
+     * 正在进行握手 - PSYNC 阶段
+     * 已发送 PSYNC 命令，等待主节点返回 +FULLRESYNC 或 +CONTINUE 响应
+     */
+    HANDSHAKE_PSYNC("handshake_psync"),
+    
+    /**
      * 正在进行全量同步
      */
     FULL_SYNC("full_sync"),
@@ -90,7 +96,8 @@ public enum ReplicationState {
                this == HANDSHAKE_REPLCONF_PORT ||
                this == HANDSHAKE_REPLCONF_IP ||
                this == HANDSHAKE_REPLCONF_CAPA ||
-               this == HANDSHAKE_REPLCONF_ACK;
+               this == HANDSHAKE_REPLCONF_ACK ||
+               this == HANDSHAKE_PSYNC;
     }
     
     /**

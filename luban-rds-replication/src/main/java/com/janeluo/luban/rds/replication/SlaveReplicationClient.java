@@ -203,6 +203,9 @@ public class SlaveReplicationClient {
             case HANDSHAKE_REPLCONF_ACK:
                 handleReplconfResponse(response);
                 break;
+            case HANDSHAKE_PSYNC:
+                handlePsyncResponse(response);
+                break;
             case FULL_SYNC:
             case PARTIAL_SYNC:
             case LOADING_RDB:
@@ -279,6 +282,8 @@ public class SlaveReplicationClient {
      * 开始 PSYNC
      */
     private void startPsync() {
+        // 进入 PSYNC 握手阶段，等待 +FULLRESYNC 或 +CONTINUE 响应
+        state.set(ReplicationState.HANDSHAKE_PSYNC);
         if (masterReplId != null) {
             // 部分重同步 - 优先尝试
             logger.info("尝试部分重同步，replId: {}, offset: {}", masterReplId, replicationOffset);
@@ -292,19 +297,38 @@ public class SlaveReplicationClient {
     
     /**
      * 处理 PSYNC 响应
+     * 
+     * 解析主节点对 PSYNC 命令的响应：
+     * - "+FULLRESYNC <replid> <offset>"：进入全量同步
+     * - "+CONTINUE [replid]"：进入部分重同步
+     * - 其他响应：视为异常，回退到 DISCONNECTED 等待重连
      */
     private void handlePsyncResponse(String response) {
         if (response.startsWith("+FULLRESYNC")) {
             // 全量同步
             logger.info("开始全量同步");
-            state.set(ReplicationState.FULL_SYNC);
             
-            // 解析响应
-            String[] parts = response.split(" ");
-            if (parts.length >= 3) {
-                masterReplId = parts[1];
-                replicationOffset = Long.parseLong(parts[2].trim());
+            // 解析 "+FULLRESYNC <replid> <offset>"
+            String[] parts = response.split("\\s+");
+            if (parts.length < 3) {
+                logger.error("FULLRESYNC 响应格式异常，缺少 replid 或 offset: {}", response);
+                state.set(ReplicationState.DISCONNECTED);
+                return;
             }
+            
+            String newReplId = parts[1];
+            long newOffset;
+            try {
+                newOffset = Long.parseLong(parts[2].trim());
+            } catch (NumberFormatException e) {
+                logger.error("FULLRESYNC 响应 offset 解析失败: {}", response, e);
+                state.set(ReplicationState.DISCONNECTED);
+                return;
+            }
+            
+            masterReplId = newReplId;
+            replicationOffset = newOffset;
+            state.set(ReplicationState.FULL_SYNC);
             
             if (callback != null) {
                 callback.onFullSync(masterReplId, replicationOffset);
@@ -312,18 +336,23 @@ public class SlaveReplicationClient {
         } else if (response.startsWith("+CONTINUE")) {
             // 部分重同步
             logger.info("部分重同步成功");
-            state.set(ReplicationState.PARTIAL_SYNC);
             
-            String[] parts = response.split(" ");
+            // 解析 "+CONTINUE [replid]"，replid 可选
+            String[] parts = response.split("\\s+");
             if (parts.length >= 2) {
                 masterReplId = parts[1].trim();
             }
+            // CONTINUE 不携带 offset，保留现有 replicationOffset
+            
+            state.set(ReplicationState.PARTIAL_SYNC);
             
             if (callback != null) {
                 callback.onPartialSync(masterReplId, replicationOffset);
             }
         } else {
-            logger.error("PSYNC 响应异常: {}", response);
+            // 异常响应（-ERR 等），回退到 DISCONNECTED 等待重连
+            logger.error("PSYNC 响应异常，回退到 DISCONNECTED: {}", response);
+            state.set(ReplicationState.DISCONNECTED);
         }
     }
     
