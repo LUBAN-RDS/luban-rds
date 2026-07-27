@@ -219,25 +219,25 @@ Luban-RDS 项目使用了以下第三方依赖，这些依赖可能采用不同�
 
 | 依赖名称 | 版本 | 许可证 | 用途 |
 |---------|------|--------|------|
-| Netty | 4.2.x | Apache License 2.0 | 网络服务器实现 |
-| LuaJ | 3.0.x | MIT License | Lua 脚本执行 |
-| Guava | 33.5.x | Apache License 2.0 | 工具库 |
-| SLF4J | 1.7.x | MIT License | 日志框架 |
-| Caffeine | 3.2.x | Apache License 2.0 | 高性能缓存 |
-| Spring Boot | 2.7.x | Apache License 2.0 | 框架集成 |
+| Netty | 4.2.10.Final | Apache License 2.0 | 网络服务器实现 |
+| Spring Boot | 3.4.11 | Apache License 2.0 | 框架集成 |
+| Caffeine | 3.2.3 | Apache License 2.0 | 高性能缓存 |
+| Guava | 33.5.0-jre | Apache License 2.0 | 工具库 |
+| SLF4J | 1.7.36 | MIT License | 日志框架 |
+| LuaJ | 3.0.1 | MIT License | Lua 脚本执行 |
 
 ### 开发依赖
 
 | 依赖名称 | 版本 | 许可证 | 用途 |
 |---------|------|--------|------|
 | JUnit | 4.13.x | Eclipse Public License 1.0 | 单元测试 |
-| VitePress | 1.0.x | MIT License | 文档生成 |
+| VitePress | （开发文档站可选依赖） | MIT License | 文档生成 |
 | Maven | 3.8.x | Apache License 2.0 | 构建工具 |
 
 ## 版权信息
 
 - **版权所有者**：Luban-RDS Contributors
-- **版权年份**：2024
+- **版权年份**：2025
 - **联系方式**：https://github.com/LUBAN-RDS/luban-rds
 
 ## 商标声明

@@ -1,7 +1,7 @@
 ---
 title: 集群部署
-last_updated: 2026-07-08
-version: 1.0.4
+last_updated: 2026-07-27
+version: 1.0.8
 ---
 
 # 集群部署
@@ -39,7 +39,7 @@ version: 1.0.4
 
 ## 2. 初始化流程
 
-以最小 3 主节点集群（端口 9736/9737/9738）为例。
+以最小 3 主节点集群（端口 9736/9737/9738）为例，下文示例使用 `192.168.8.161` 作为演示地址，请按实际部署替换。
 
 ### 2.1 启动各节点
 
@@ -47,13 +47,13 @@ version: 1.0.4
 
 ```bash
 # node-1
-java -jar luban-rds.jar /etc/luban-rds/node-1.conf
+java -jar luban-rds-jar-with-dependencies.jar --config /app/config/node-1.conf
 
 # node-2
-java -jar luban-rds.jar /etc/luban-rds/node-2.conf
+java -jar luban-rds-jar-with-dependencies.jar --config /app/config/node-2.conf
 
 # node-3
-java -jar luban-rds.jar /etc/luban-rds/node-3.conf
+java -jar luban-rds-jar-with-dependencies.jar --config /app/config/node-3.conf
 ```
 
 此时三个节点相互独立，`CLUSTER INFO` 显示 `cluster_state:fail`、`cluster_known_nodes:1`、`cluster_slots_assigned:0`。
@@ -63,14 +63,14 @@ java -jar luban-rds.jar /etc/luban-rds/node-3.conf
 在任一节点上对其他两个节点执行 `CLUSTER MEET`：
 
 ```bash
-redis-cli -h 192.168.1.10 -p 9736 CLUSTER MEET 192.168.1.11 9737
-redis-cli -h 192.168.1.10 -p 9736 CLUSTER MEET 192.168.1.12 9738
+redis-cli -h 192.168.8.161 -p 9736 CLUSTER MEET 192.168.8.161 9737
+redis-cli -h 192.168.8.161 -p 9736 CLUSTER MEET 192.168.8.161 9738
 ```
 
 也可在每个节点上分别 `MEET` 其余两个（实现全连接）。验证：
 
 ```bash
-redis-cli -h 192.168.1.10 -p 9736 CLUSTER NODES
+redis-cli -h 192.168.8.161 -p 9736 CLUSTER NODES
 ```
 
 应看到 3 个节点，`connected` 标志均为 `connected`。
@@ -81,19 +81,19 @@ redis-cli -h 192.168.1.10 -p 9736 CLUSTER NODES
 
 ```bash
 # 节点 1：0-5460
-redis-cli -h 192.168.1.10 -p 9736 CLUSTER ADDSLOTS $(seq 0 5460)
+redis-cli -h 192.168.8.161 -p 9736 CLUSTER ADDSLOTS $(seq 0 5460)
 
 # 节点 2：5461-10922
-redis-cli -h 192.168.1.11 -p 9737 CLUSTER ADDSLOTS $(seq 5461 10922)
+redis-cli -h 192.168.8.161 -p 9737 CLUSTER ADDSLOTS $(seq 5461 10922)
 
 # 节点 3：10923-16383
-redis-cli -h 192.168.1.12 -p 9738 CLUSTER ADDSLOTS $(seq 10923 16383)
+redis-cli -h 192.168.8.161 -p 9738 CLUSTER ADDSLOTS $(seq 10923 16383)
 ```
 
 ### 2.4 验证集群健康
 
 ```bash
-redis-cli -h 192.168.1.10 -p 9736 CLUSTER INFO
+redis-cli -h 192.168.8.161 -p 9736 CLUSTER INFO
 ```
 
 期望关键字段：
@@ -115,9 +115,10 @@ Luban-RDS 自带 `RedisCliMain`，对齐 `redis-cli --cluster create` 子集，�
 
 ```bash
 # 启动 6 个节点（端口 9736–9741），分别使用各自配置文件
+# 节点启动脚本示例：java -jar luban-rds-jar-with-dependencies.jar --config /app/config/node-N.conf
 
 # 创建 3 主 + 3 从集群
-java -cp luban-rds-client.jar com.janeluo.luban.rds.client.cli.RedisCliMain \
+java -cp luban-rds-jar-with-dependencies.jar com.janeluo.luban.rds.client.cli.RedisCliMain \
      --cluster create \
      192.168.8.161:9736 192.168.8.161:9737 192.168.8.161:9738 \
      192.168.8.161:9739 192.168.8.161:9740 192.168.8.161:9741 \
@@ -163,22 +164,22 @@ ClusterSetupCommand.createCluster(nodes, /*replicas*/ 1, /*verbose*/ false);
 | 错误 | 原因 | 处理 |
 |------|------|------|
 | `节点连接失败` | 节点未启动或 `port` / `requirepass` 与配置不一致 | 检查 `port`、`requirepass` 是否生效；防火墙是否放行 |
-| `集群状态校验失败: cluster_state=ok 但 cluster_slots_assigned < 16384` | Gossip 拓扑未收敛 | v1.0.2 已修复，升级到 1.0.2+ 即可 |
+| `集群状态校验失败: cluster_state=ok 但 cluster_slots_assigned < 16384` | Gossip 拓扑未收敛 | v1.0.4/v1.0.8 已修复 |
 | `--cluster-replicas 的值必须为整数` | 参数格式错误 | 传整数 N |
 | `节点数 (N) 与 replicas (M) 不匹配` | N ≤ M 或 (N - M*master) ≠ 0 | 调整节点数，确保 `N / (1 + M) ≥ 3` |
 
-> v1.0.2 之前版本在 `redis-cli --cluster create` 场景下会卡在 `Waiting for the cluster to join`。v1.0.2+ 通过三项修复（Gossip 主动建连、`GossipTask` 不再跳过 HANDSHAKE、Gossip 携带槽位所有权）彻底解决。
+> 历史版本在 `redis-cli --cluster create` 场景下会卡在 `Waiting for the cluster to join`。v1.0.4 / v1.0.8 通过多项修复（Gossip 主动建连、`GossipTask` 不再跳过 HANDSHAKE、Gossip 携带槽位所有权）彻底解决。
 
 ## 3. 添加从节点
 
-新增节点 `192.168.1.13:9739` 作为 `192.168.1.10:9736` 的从节点：
+新增节点 `192.168.8.161:9739` 作为 `192.168.8.161:9736` 的从节点：
 
 ```bash
 # 1. 在新节点加入集群
-redis-cli -h 192.168.1.10 -p 9736 CLUSTER MEET 192.168.1.13 9739
+redis-cli -h 192.168.8.161 -p 9736 CLUSTER MEET 192.168.8.161 9739
 
 # 2. 在新节点上执行 REPLICATE 指定主节点
-redis-cli -h 192.168.1.13 -p 9739 CLUSTER REPLICATE <master-node-id>
+redis-cli -h 192.168.8.161 -p 9739 CLUSTER REPLICATE <master-node-id>
 ```
 
 `<master-node-id>` 可通过 `CLUSTER NODES` 在主节点标志为 `master` 的行第一列获取。
@@ -186,31 +187,31 @@ redis-cli -h 192.168.1.13 -p 9739 CLUSTER REPLICATE <master-node-id>
 验证：
 
 ```bash
-redis-cli -h 192.168.1.13 -p 9739 CLUSTER NODES
+redis-cli -h 192.168.8.161 -p 9739 CLUSTER NODES
 ```
 
-应看到该节点角色为 `slave`，主节点字段对应 `192.168.1.10:9736` 的节点 ID。
+应看到该节点角色为 `slave`，主节点字段对应 `192.168.8.161:9736` 的节点 ID。
 
 ## 4. 扩容
 
-新增主节点 `192.168.1.14:9740`，从其他主节点迁移部分槽位过来：
+新增主节点 `192.168.8.161:9740`，从其他主节点迁移部分槽位过来：
 
 ```bash
 # 1. 加入集群
-redis-cli -h 192.168.1.10 -p 9736 CLUSTER MEET 192.168.1.14 9740
+redis-cli -h 192.168.8.161 -p 9736 CLUSTER MEET 192.168.8.161 9740
 
 # 2. 在源主节点上标记待迁移槽位为迁移状态
-redis-cli -h 192.168.1.10 -p 9736 CLUSTER SETSLOT 5000 MIGRATING <new-master-id>
+redis-cli -h 192.168.8.161 -p 9736 CLUSTER SETSLOT 5000 MIGRATING <new-master-id>
 
 # 3. 在目标主节点上标记为导入状态
-redis-cli -h 192.168.1.14 -p 9740 CLUSTER SETSLOT 5000 IMPORTING <source-master-id>
+redis-cli -h 192.168.8.161 -p 9740 CLUSTER SETSLOT 5000 IMPORTING <source-master-id>
 
 # 4. 逐键迁移（生产建议按批执行并限速）
-redis-cli -h 192.168.1.10 -p 9736 MIGRATE 192.168.1.14 9740 "" 0 5000 <timeout>
+redis-cli -h 192.168.8.161 -p 9736 MIGRATE 192.168.8.161 9740 "" 0 5000 <timeout>
 
 # 5. 槽位转移完成
-redis-cli -h 192.168.1.10 -p 9736 CLUSTER SETSLOT 5000 NODE <new-master-id>
-redis-cli -h 192.168.1.14 -p 9740 CLUSTER SETSLOT 5000 NODE <new-master-id>
+redis-cli -h 192.168.8.161 -p 9736 CLUSTER SETSLOT 5000 NODE <new-master-id>
+redis-cli -h 192.168.8.161 -p 9740 CLUSTER SETSLOT 5000 NODE <new-master-id>
 ```
 
 对每个待迁移槽位重复 2–5 步。
@@ -269,11 +270,23 @@ redis-cli -h <slave-host> -p <slave-port> CLUSTER FAILOVER
 
 ### Jedis 客户端示例
 
+Maven 依赖：
+
+```xml
+<dependency>
+    <groupId>redis.clients</groupId>
+    <artifactId>jedis</artifactId>
+    <version>4.4.0</version>
+</dependency>
+```
+
+Java 调用示例：
+
 ```java
 Set<HostAndPort> nodes = new HashSet<>();
-nodes.add(new HostAndPort("192.168.1.10", 9736));
-nodes.add(new HostAndPort("192.168.1.11", 9737));
-nodes.add(new HostAndPort("192.168.1.12", 9738));
+nodes.add(new HostAndPort("192.168.8.161", 9736));
+nodes.add(new HostAndPort("192.168.8.161", 9737));
+nodes.add(new HostAndPort("192.168.8.161", 9738));
 
 JedisCluster client = new JedisCluster(nodes);
 // client 会自动处理 MOVED/ASK 重定向

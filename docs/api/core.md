@@ -125,7 +125,7 @@ public interface MemoryStore {
 }
 ```
 
-### 1.2 Hash 操作优化接口
+### 1.2 Hash 操作接口
 
 ```java
 // ==================== Hash 操作优化接口 ====================
@@ -223,7 +223,7 @@ int hlen(int database, String key);
 java.util.List<Object> hscan(int database, String key, long cursor, String pattern, int count);
 ```
 
-### 1.3 List 操作优化接口
+### 1.3 List 操作接口
 
 ```java
 // ==================== List 操作优化接口 ====================
@@ -281,7 +281,7 @@ int llen(int database, String key);
 java.util.List<String> lrange(int database, String key, long start, long stop);
 ```
 
-### 1.4 Set 操作优化接口
+### 1.4 Set 操作接口
 
 ```java
 // ==================== Set 操作优化接口 ====================
@@ -330,7 +330,7 @@ java.util.Set<String> smembers(int database, String key);
 int scard(int database, String key);
 ```
 
-### 1.5 ZSet 操作优化接口
+### 1.5 ZSet 操作接口
 
 ```java
 // ==================== ZSet 操作优化接口 ====================
@@ -511,17 +511,24 @@ public interface RedisClient {
 
 ## 6. 版本信息
 
-- **当前版本**：1.0.0
-- **核心模块**：
-  - luban-rds-core：核心命令处理器和内存存储
-  - luban-rds-protocol：RESP 协议解析
-  - luban-rds-server：Netty 服务器实现
-  - luban-rds-persistence：持久化支持
-  - luban-rds-client：Java 客户端
-  - luban-rds-common：公共工具类
+- **当前版本**：1.0.8
+- **核心模块**（共 12 个 Maven 模块）：
+  - `luban-rds-common`：公共工具类
+  - `luban-rds-core`：核心命令处理器和内存存储
+  - `luban-rds-protocol`：RESP 协议解析
+  - `luban-rds-server`：Netty 服务器实现
+  - `luban-rds-client`：Java 客户端（含 CLI 与 cluster 管理）
+  - `luban-rds-cluster`：集群协议与槽位管理
+  - `luban-rds-replication`：主从复制实现
+  - `luban-rds-sentinel`：Sentinel 高可用
+  - `luban-rds-spring-boot-starter`：Spring Boot 自动装配（包 `com.janeluo.luban.rds.autoconfigure`）
+  - `luban-rds-persistence`：RDB / AOF 持久化
+  - `luban-rds-bin`：fat-jar 产物（`luban-rds-jar-with-dependencies.jar`）
+  - `luban-rds-benchmark`：基准测试工具
 - **依赖**：
-  - Netty 4.1.x：网络通信
+  - Netty 4.2.10.Final：网络通信
   - LuaJ 3.0.1：Lua 脚本执行
+  - Spring Boot 3.4.11（starter 模块）
   - Jackson：JSON 处理
   - SLF4J：日志处理
 
@@ -535,11 +542,11 @@ public interface RedisClient {
 
 Luban-RDS 使用 `DefaultCommandHandler` 根据命令名将请求分发到具体的命令处理器。服务器会将客户端发送的参数“完整原样”传递到处理器，包括命令名及其后续所有参数，从而保持与原始请求一致（二进制安全、无截断）。
 
-- 分发入口参考：[DefaultCommandHandler.java:L55-L62](file:///d:/workspaces_idea/igbp-luban-rds/luban-rds-core/src/main/java/com/igbp/luban/rds/core/handler/DefaultCommandHandler.java#L55-L62)
-- 参数传递参考：[RedisServerHandler.java:L685-L694](file:///d:/workspaces_idea/igbp-luban-rds/luban-rds-server/src/main/java/com/igbp/luban/rds/server/RedisServerHandler.java#L685-L694)
+- 分发入口参考：`DefaultCommandHandler#dispatch(...)`（参见 `DefaultCommandHandler#registerHandlers()` 注册逻辑）。
+- 参数传递参考：`RedisServerHandler` 入站命令循环中向处理器传入完整 `String[] args`，位置以方法名 `handleCommand` / `channelRead0` 为准，1.0.8 版本未变动语义。
 
 ## 9. 事务内 SELECT 的状态更新
 
 在事务执行过程中，`SELECT` 命令会更新客户端当前数据库状态，并影响后续命令的执行上下文。该行为在事务命令循环中得到处理：
 
-- 代码参考：[RedisServerHandler.java:L695-L701](file:///d:/workspaces_idea/igbp-luban-rds/luban-rds-server/src/main/java/com/igbp/luban/rds/server/RedisServerHandler.java#L695-L701)
+- 代码参考：`RedisServerHandler` 事务 `EXEC` 分支（参见 `handleExecCommand` 方法）。

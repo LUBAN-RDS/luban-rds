@@ -30,7 +30,7 @@ Luban-RDS 支持多种部署方式，适应不同的应用场景：
 
 | 环境 | 最低要求 | 推荐配置 |
 |------|----------|----------|
-| **操作系统** | Windows 7+, Linux, macOS | Linux (CentOS 7+, Ubuntu 18.04+) |
+| **操作系统** | Windows 7+, Linux, macOS | Linux (Rocky/AlmaLinux 8/9, Ubuntu 20.04+) |
 | **Java 版本** | JDK 17+ | JDK 17+ (LTS) |
 | **内存** | 512MB | 2GB+ |
 | **CPU** | 1 核 | 2 核+ |

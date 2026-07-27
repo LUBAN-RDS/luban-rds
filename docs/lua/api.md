@@ -278,11 +278,13 @@ Lua 脚本中可以使用几乎所有的 Redis 命令，包括：
 ### 7.6 通用命令
 - `EXISTS`, `DEL`, `EXPIRE`, `TTL`, `FLUSHALL`, `FLUSHDB`, `TYPE`, `ECHO`, `SELECT`, `INFO`, `SCAN`, `DBSIZE`, `TIME`
 
+> 说明：以上通用命令的可用范围以当前共享处理器实际支持为准，未来版本可能增减。
+
 ### 7.7 发布订阅命令
 - `PUBLISH`（注意：`SUBSCRIBE` 和 `UNSUBSCRIBE` 在脚本中不支持）
 
 ### 7.8 事务命令
-- `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`（在脚本中使用有限制）
+- `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH`（脚本内 `MULTI` / `EXEC` / `DISCARD` / `WATCH` / `UNWATCH` 被当作普通命令执行，不开启事务，也不参与客户端事务状态机）
 
 ## 8. 数据类型处理
 

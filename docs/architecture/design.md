@@ -104,14 +104,18 @@ title: 设计决策
 - **部署灵活**：可以根据需要部署不同的模块
 
 **模块划分**：
+- **luban-rds-common**：公共工具
 - **luban-rds-core**：核心业务逻辑
 - **luban-rds-protocol**：协议解析
 - **luban-rds-server**：网络服务
-- **luban-rds-persistence**：持久化
 - **luban-rds-client**：Java 客户端
-- **luban-rds-common**：公共工具
-- **luban-rds-bin**：启动和基准测试
+- **luban-rds-cluster**：Redis Cluster 集群
+- **luban-rds-replication**：主从复制
+- **luban-rds-sentinel**：哨兵模式
 - **luban-rds-spring-boot-starter**：Spring Boot 集成
+- **luban-rds-persistence**：持久化
+- **luban-rds-bin**：启动和基准测试入口
+- **luban-rds-benchmark**：性能基准测试
 
 ### 2.3 内存存储设计
 
@@ -231,9 +235,10 @@ title: 设计决策
 - **开发效率**：减少配置和样板代码
 
 **实现**：
-- 自动配置 Luban-RDS 服务器
-- 注册 `RedisTemplate` 为 Spring Bean
-- 提供配置属性，支持自定义配置
+- `LubanRdsAutoConfiguration` 自动配置 Luban-RDS 服务器
+- `LubanRdsProperties` 提供配置属性，支持自定义配置
+- `LubanRdsClientAutoConfiguration` 自动配置 Java 客户端
+- `LubanRdsBootstrapAutoConfigurationRegistrar` 注册 Bootstrap 组件
 
 ## 4. 性能设计
 

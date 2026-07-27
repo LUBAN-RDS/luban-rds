@@ -105,7 +105,7 @@ title: 系统架构
 #### 入站缓冲与循环解析
 - 每连接维护入站 ByteBuf，channelRead 到来的数据先累积以处理半包/粘包。
 - 使用 while 循环解析缓冲区中的完整 RESP 帧并依次执行，支持 pipeline。
-- 参考代码：[RedisServerHandler.java:L69-L88](file:///d:/workspaces_idea/igbp-luban-rds/luban-rds-server/src/main/java/com/igbp/luban/rds/server/RedisServerHandler.java#L69-L88)
+- 参考代码：[RedisServerHandler.java:L69-L88](../luban-rds-server/src/main/java/com/janeluo/luban/rds/server/RedisServerHandler.java#L69-L88)
 
 ### 3.3 线程模型
 
@@ -188,7 +188,7 @@ Luban-RDS 采用三层线程模型，基于 Netty 实现高性能的并发处理
 - MULTI 后普通命令返回 QUEUED 并入队；入队错误导致 EXEC 返回 EXECABORT。
 - WATCH 检测到监视键版本变更时，EXEC 返回 Null Array（`*-1\r\n`），事务不执行。
 - 事务内 `SELECT` 更新客户端数据库状态，影响后续命令上下文。
-- 参考代码：[RedisServerHandler.java:L654-L661](file:///d:/workspaces_idea/igbp-luban-rds/luban-rds-server/src/main/java/com/igbp/luban/rds/server/RedisServerHandler.java#L654-L661)、[RedisServerHandler.java:L695-L701](file:///d:/workspaces_idea/igbp-luban-rds/luban-rds-server/src/main/java/com/igbp/luban/rds/server/RedisServerHandler.java#L695-L701)
+- 参考代码：[RedisServerHandler.java:L654-L661](../luban-rds-server/src/main/java/com/janeluo/luban/rds/server/RedisServerHandler.java#L654-L661)、[RedisServerHandler.java:L695-L701](../luban-rds-server/src/main/java/com/janeluo/luban/rds/server/RedisServerHandler.java#L695-L701)
 
 ### 5.3 LuaCommandHandler
 
@@ -407,7 +407,7 @@ Luban-RDS 提供内存碎片监控和整理机制：
 
 ### QUIT 响应与关闭流程
 - QUIT 写回 `+OK\r\n` 后主动关闭连接。
-- 参考代码：[RedisServerHandler.java:L752-L761](file:///d:/workspaces_idea/igbp-luban-rds/luban-rds-server/src/main/java/com/igbp/luban/rds/server/RedisServerHandler.java#L752-L761)
+- 参考代码：[RedisServerHandler.java:L752-L761](../luban-rds-server/src/main/java/com/janeluo/luban/rds/server/RedisServerHandler.java#L752-L761)
 
 ## 12. 配置系统
 
@@ -536,7 +536,7 @@ Luban-RDS 提供哨兵模式实现自动故障转移：
 ### 18.1 单机部署
 
 - **独立服务**：作为独立的 Redis 兼容服务运行
-- **嵌入式部署**：通过 `EmbeddedRedisServer` 嵌入到应用中
+- **嵌入式部署**：通过 `EmbeddedRedisServer`（`luban-rds-server` 模块）嵌入到应用中
 
 ### 18.2 集群部署
 

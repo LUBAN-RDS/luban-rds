@@ -35,32 +35,25 @@ title: 测试指南
 
 ### 2.1 JUnit 5
 
-JUnit 5 是 Luban-RDS 项目使用的主要测试框架，它由三个核心模块组成：
+JUnit 5（Jupiter）是 Luban-RDS 项目使用的主要测试框架，由根 `pom.xml` 统一管理依赖版本：
 
 - **JUnit Platform**：测试执行的基础平台
 - **JUnit Jupiter**：新的编程模型和扩展模型
-- **JUnit Vintage**：兼容 JUnit 3 和 JUnit 4 的测试
+- **JUnit Vintage**：兼容 JUnit 3 和 JUnit 4 的测试（按需启用）
 
-**依赖配置**：
+**依赖配置**（实际根 `pom.xml`）：
 
 ```xml
 <dependency>
     <groupId>org.junit.jupiter</groupId>
-    <artifactId>junit-jupiter-api</artifactId>
-    <version>5.9.1</version>
-    <scope>test</scope>
-</dependency>
-<dependency>
-    <groupId>org.junit.jupiter</groupId>
-    <artifactId>junit-jupiter-engine</artifactId>
-    <version>5.9.1</version>
+    <artifactId>junit-jupiter</artifactId>
     <scope>test</scope>
 </dependency>
 ```
 
 ### 2.2 Mockito
 
-Mockito 是一个用于创建模拟对象的框架，用于隔离测试对象，避免依赖外部资源。
+Mockito 是 Luban-RDS 项目使用的 Java 模拟对象框架，用于隔离测试对象。
 
 **依赖配置**：
 
@@ -68,67 +61,18 @@ Mockito 是一个用于创建模拟对象的框架，用于隔离测试对象，
 <dependency>
     <groupId>org.mockito</groupId>
     <artifactId>mockito-core</artifactId>
-    <version>4.8.1</version>
     <scope>test</scope>
 </dependency>
 <dependency>
     <groupId>org.mockito</groupId>
     <artifactId>mockito-junit-jupiter</artifactId>
-    <version>4.8.1</version>
     <scope>test</scope>
 </dependency>
 ```
 
-### 2.3 Hamcrest
+### 2.3 Hamcrest / AssertJ / TestContainers
 
-Hamcrest 是一个匹配器库，用于编写更具可读性的断言。
-
-**依赖配置**：
-
-```xml
-<dependency>
-    <groupId>org.hamcrest</groupId>
-    <artifactId>hamcrest</artifactId>
-    <version>2.2</version>
-    <scope>test</scope>
-</dependency>
-```
-
-### 2.4 AssertJ
-
-AssertJ 是一个流畅的断言库，提供了更丰富的断言方法。
-
-**依赖配置**：
-
-```xml
-<dependency>
-    <groupId>org.assertj</groupId>
-    <artifactId>assertj-core</artifactId>
-    <version>3.24.2</version>
-    <scope>test</scope>
-</dependency>
-```
-
-### 2.5 TestContainers
-
-TestContainers 是一个用于容器化测试的框架，用于测试依赖外部服务的代码。
-
-**依赖配置**：
-
-```xml
-<dependency>
-    <groupId>org.testcontainers</groupId>
-    <artifactId>testcontainers</artifactId>
-    <version>1.17.6</version>
-    <scope>test</scope>
-</dependency>
-<dependency>
-    <groupId>org.testcontainers</groupId>
-    <artifactId>junit-jupiter</artifactId>
-    <version>1.17.6</version>
-    <scope>test</scope>
-</dependency>
-```
+> 当前根 `pom.xml` **未引入** Hamcrest、AssertJ、TestContainers。JUnit Jupiter 自带的 `Assertions` 已可满足绝大多数断言需求；如需容器化或更丰富的匹配器，请按需临时在对应模块的 `pom.xml` 中添加，避免无谓引入扩大镜像体积。
 
 ## 3. 单元测试
 
@@ -291,6 +235,8 @@ public class TestConfig {
 
 ### 4.3 测试数据库
 
+> 当前仓库根 `pom.xml` 未集成 TestContainers（`org.testcontainers:testcontainers` / `junit-jupiter`），如下示例仅作为按需引入时的参考模板。`RedisClient` 接口目前未提供 `ping()` 方法，示例中应替换为业务命令（如 `set/get`）。
+
 使用 TestContainers 测试数据库连接：
 
 ```java
@@ -301,22 +247,23 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 @Testcontainers
 public class RedisClientTest {
-    
+
     @Container
     private static final GenericContainer<?> redisContainer = new GenericContainer<>("redis:6.2")
             .withExposedPorts(9736);
-    
+
     @Test
     void testRedisConnection() {
         // 获取容器端口
         int port = redisContainer.getMappedPort(9736);
-        
+
         // 创建客户端
         RedisClient client = new NettyRedisClient("localhost", port);
-        
-        // 测试连接
-        String result = client.ping();
-        assertEquals("PONG", result);
+        client.connect();
+
+        // 测试连接（RedisClient 未提供 ping，可使用业务命令验证连通性）
+        String result = client.set("hello", "world");
+        assertEquals("OK", result);
     }
 }
 ```
@@ -408,12 +355,12 @@ Luban-RDS 提供了多层次的性能测试方案：
 mvn clean package -pl luban-rds-benchmark -am
 ```
 
-构建完成后，可以在 `luban-rds-benchmark/target` 目录下找到可执行的 JAR 包（通常名为 `luban-rds-benchmark-1.0.1-SNAPSHOT-jar-with-dependencies.jar`）。
+构建完成后，可以在 `luban-rds-benchmark/target` 目录下找到可执行的 JAR 包（产物名遵循 `${project.artifactId}-${project.version}-jar-with-dependencies.jar`，例如 `luban-rds-benchmark-1.0.8-jar-with-dependencies.jar`，具体以 `luban-rds-benchmark/pom.xml` 配置为准）。
 
 运行示例：
 
 ```bash
-java -jar luban-rds-benchmark/target/luban-rds-benchmark-1.0.1-SNAPSHOT-jar-with-dependencies.jar \
+java -jar luban-rds-benchmark/target/luban-rds-benchmark-1.0.8-jar-with-dependencies.jar \
     -h 127.0.0.1 -p 9736 -t 20 -n 100000 -c set,get
 ```
 
@@ -482,10 +429,9 @@ java -jar luban-rds-benchmark.jar -t 100 -n 1000000 -pipeline 100 -pool 50
 
 ### 6.3 微基准测试 (JMH)
 
-对于内部核心组件的性能优化，我们推荐使用 JMH。
+> 当前仓库 `pom.xml` 未集成 JMH（`org.openjdk.jmh:jmh-core` / `jmh-generator-annprocess`）。如后续需要对 `MemoryStore` 等核心组件做纳秒级分析，可按如下模板接入：
 
-**依赖配置**：
-
+**依赖配置**（按需新增）：
 
 ```xml
 <dependency>
@@ -502,53 +448,7 @@ java -jar luban-rds-benchmark.jar -t 100 -n 1000000 -pipeline 100 -pool 50
 </dependency>
 ```
 
-**示例**：
-
-```java
-import org.openjdk.jmh.annotations.*;
-import org.openjdk.jmh.runner.Runner;
-import org.openjdk.jmh.runner.RunnerException;
-import org.openjdk.jmh.runner.options.Options;
-import org.openjdk.jmh.runner.options.OptionsBuilder;
-
-import java.util.concurrent.TimeUnit;
-
-@BenchmarkMode(Mode.AverageTime)
-@OutputTimeUnit(TimeUnit.MICROSECONDS)
-@State(Scope.Benchmark)
-@Fork(1)
-@Warmup(iterations = 5)
-@Measurement(iterations = 10)
-public class MemoryStoreBenchmark {
-    
-    private MemoryStore memoryStore;
-    
-    @Setup
-    public void setUp() {
-        memoryStore = new DefaultMemoryStore();
-    }
-    
-    @Benchmark
-    public void testSet() {
-        memoryStore.set("key", "value", 0);
-    }
-    
-    @Benchmark
-    public String testGet() {
-        memoryStore.set("key", "value", 0);
-        return memoryStore.get("key");
-    }
-    
-    public static void main(String[] args) throws RunnerException {
-        Options options = new OptionsBuilder()
-                .include(MemoryStoreBenchmark.class.getSimpleName())
-                .build();
-        new Runner(options).run();
-    }
-}
-```
-
-### 6.2 性能测试指标
+### 6.4 性能测试指标
 
 常见的性能测试指标：
 
@@ -558,9 +458,9 @@ public class MemoryStoreBenchmark {
 - **CPU 使用**：CPU 使用率
 - **并发性能**：并发请求下的性能
 
-### 6.3 性能测试工具
+### 6.5 性能测试工具
 
-- **JMH**：Java 微基准测试框架
+- **JMH**（可选）：Java 微基准测试框架，仓库当前未集成
 - **Gatling**：负载测试工具
 - **JMeter**：性能测试工具
 - **Redis-benchmark**：Redis 官方性能测试工具
@@ -619,10 +519,9 @@ public class MemoryStoreBenchmark {
 
 ### 8.3 Maven
 
-- **运行测试**：`mvn test`
+- **运行测试**：`mvn test`（JaCoCo 已由根 `pom.xml` 绑定到 `test` 阶段，运行测试即可同时产出覆盖率报告，无需额外执行 `jacoco:report`）
 - **运行特定测试**：`mvn test -Dtest=TestClassName`
-- **生成覆盖率报告**：`mvn test jacoco:report`
-- **运行集成测试**：`mvn verify`
+- **运行集成测试**：`mvn verify`（当前仍由 Surefire 执行单元测试）
 
 ## 9. 常见测试问题解决
 
@@ -686,10 +585,12 @@ mvn test
 
 ### 10.2 生成覆盖率报告
 
-使用 JaCoCo 插件生成覆盖率报告：
+`jacoco-maven-plugin` 已由根 `pom.xml` 绑定到 `test` 阶段，运行 `mvn test` 即可自动产出报告。
+
+如需手动重新生成：
 
 ```bash
-# 运行测试并生成覆盖率报告
+# 运行测试并生成覆盖率报告（Jacoco 报告已在 test 阶段产出，单独执行可选）
 mvn test jacoco:report
 ```
 
@@ -820,7 +721,7 @@ private void updateExpiration(String key, long expire) {
 本指南提供了 Luban-RDS 项目的测试方法和最佳实践，包括：
 
 - **测试类型**：单元测试、集成测试、端到端测试、性能测试
-- **测试框架**：JUnit 5、Mockito、Hamcrest、AssertJ、TestContainers
+- **测试框架**：JUnit 5（Jupiter）、Mockito（按需引入 Hamcrest / AssertJ / TestContainers）
 - **单元测试**：编写、生命周期、异常测试、参数化测试
 - **集成测试**：编写、配置、测试数据库
 - **端到端测试**：编写、测试场景
@@ -842,3 +743,5 @@ private void updateExpiration(String key, long expire) {
 - **TestContainers 官方文档**：[https://www.testcontainers.org/](https://www.testcontainers.org/)
 - **JMH 官方文档**：[https://openjdk.org/projects/code-tools/jmh/](https://openjdk.org/projects/code-tools/jmh/)
 - **测试驱动开发**：[https://en.wikipedia.org/wiki/Test-driven_development](https://en.wikipedia.org/wiki/Test-driven_development)
+
+> Hamcrest / AssertJ / TestContainers / JMH 当前未在根 `pom.xml` 中引入，仅作为可选扩展参考资料。

@@ -1,7 +1,7 @@
 ---
 title: Luban-RDS 文档
-last_updated: 2026-07-08
-version: 1.0.4
+last_updated: 2026-07-27
+version: 1.0.8
 ---
 
 <div align="center">
@@ -74,6 +74,46 @@ version: 1.0.4
 ---
 
 ## ✨ 版本特性
+
+### v1.0.8 (已发布 · 2026-07-27)
+
+#### 🛡️ P0 数据安全与 Redis 7 兼容性修复
+- ✅ **C1 CROSSSLOT 校验**: 集群模式下对多键命令执行 CROSSSLOT 验证，避免数据路由到错误槽位
+  - `ClusterCommandHandler` 新增多键命令槽位归属校验
+  - 不在同一槽位的多键命令返回标准的 `-CROSSSLOT Keys in request don't hash to the same slot`
+- ✅ **C7 MIGRATE 原子性**: 多键槽位迁移改用一次性 RESTORE，保证迁移过程原子化
+- ✅ **C8 故障转移选举**: 选举算法改用真实复制偏移（replication offset）替代旧的随机/固定值
+- ✅ **C9 手动故障转移广播**: `CLUSTER FAILOVER` 完成后通过 `FAILOVER_RESULT` 消息向全集群广播结果
+- ✅ **C11 AOF 重写按类型**: AOF rewrite 改为按数据类型分别重写，二进制安全；AOF 加载同样二进制安全
+- ✅ **C12 ZSet 同分数排序**: ZSet 相同分数成员的排序改为字典序（与 Redis 官方一致）
+- 📝 **参考验证报告**: `superpowers/reports/2026-07-27-fix-p0-data-safety-redis7-verify.md`
+
+### v1.0.7 (已发布)
+
+#### 🔧 集群通信与复制路径增强
+- ✅ **集群通信重构**: 重构集群总线通信机制，提升 Gossip 与 PING/PONG 可靠性
+- ✅ **`CLUSTER SET-CONFIG-EPOCH`**: 新增命令支持，`ADDSLOTS` 后自动同步 configEpoch
+- ✅ **槽位归属一致性**: 全面修复 `slotManager` / `clusterConfig` / `ClusterNode` 三重槽位归属不一致
+- ✅ **故障转移后 `CLUSTER SLOTS`**: 修复 `ClusterConfig.slotAssignment` 同步，避免路由信息错乱
+- ✅ **Gossip 携带 masterNodeId**: `GossipNodeInfo` 新增字段，传播 master-slave 关系
+- ✅ **CLUSTER REPLICATE 角色传播**: 从节点角色经 Gossip 协议正确扩散
+- ✅ **ClusterNode 线程安全**: 关键读写方法加 `synchronized`
+
+### v1.0.6 (已发布)
+
+#### 🔧 集群 PFAIL / 自动故障转移联动
+- ✅ **PFAIL 投票经 Gossip 传播**: 修复 PFAIL 状态无法通过 Gossip 扩散的问题，恢复自动故障转移链路
+- ✅ **FailoverManager 状态机**: 新增状态机 + 消息分发接线 + NettyRedisServer 注入
+- ✅ **`FAILOVER_RESULT` 消息类型**: 新增 0x08 消息类型（`FailoverResultMessage`），优雅通知故障转移结果
+- ✅ **`ClusterConfig.getSlavesOfMaster`**: 暴露主从关系查询
+- ✅ **gracePeriod 配置**: 故障转移宽限期可配置
+
+### v1.0.5 (已发布)
+
+#### 🚀 集群自动故障转移（initial）
+- ✅ **FailoverManager 骨架**: 引入自动选举 / 状态切换的基础组件
+- ✅ **Gossip 状态整合**: 为后续 PFAIL→FAIL 升级与投票链路预留接入点
+- 🛠️ **工程内部**: 累积若干调试日志与可观测性改进
 
 ### v1.0.4 (已发布)
 
@@ -169,7 +209,7 @@ version: 1.0.4
 - [环境搭建](./development/setup.md)
 - [构建指南](./development/build.md)
 - [测试指南](./development/testing.md)
-- [代码规范](./development/code-style.md)
+- [代码规范](./development/standards.md)
 - [贡献流程](./development/contributing.md)
 
 ---

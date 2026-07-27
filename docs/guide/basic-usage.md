@@ -12,13 +12,13 @@ title: 基本使用
 
 ```bash
 # 默认连接（本地 9736 端口）
-redis-cli
+redis-cli -p 9736
 
 # 指定主机和端口
 redis-cli -h localhost -p 9736
 
 # 使用密码连接
-redis-cli -a your-password
+redis-cli -p 9736 -a your-password
 ```
 
 ### 使用 Java 客户端
@@ -27,12 +27,15 @@ redis-cli -a your-password
 // 创建客户端
 RedisClient client = new NettyRedisClient("localhost", 9736);
 
-// 验证连接
-String result = client.ping();
-System.out.println(result); // 输出: PONG
+// 建立连接
+client.connect();
 
-// 关闭客户端
-client.close();
+// 执行业务命令，例如 SET/GET ...
+// String pong = client.ping();
+// System.out.println(pong); // 输出: PONG
+
+// 关闭连接
+client.disconnect();
 ```
 
 ## String 类型操作

@@ -12,7 +12,7 @@ title: 构建和测试
 
 - **操作系统**：Windows 7+, Linux, macOS
 - **Java 版本**：Java 17+（推荐 Java 17）
-- **Maven**：Maven 3.8+（构建工具）
+- **Maven**：Maven 3.6.3+（构建工具，仓库根目录提供 `mvn-java17.bat` 包装脚本自动指向本地 JDK 17）
 - **Git**：Git 2.20+（版本控制）
 - **IDE**：推荐 IntelliJ IDEA 或 Eclipse（可选）
 
@@ -40,7 +40,7 @@ title: 构建和测试
    sudo apt install openjdk-17-jdk
    
    # CentOS/RHEL
-   sudo yum install java-11-openjdk-devel
+   sudo yum install java-17-openjdk-devel
    ```
 2. 验证安装：
    ```bash
@@ -65,8 +65,9 @@ title: 构建和测试
 #### Windows
 
 1. 下载 Maven：[https://maven.apache.org/download.cgi](https://maven.apache.org/download.cgi)
-2. 解压到本地目录，例如 `C:\apache-maven-3.8.8`
-3. 配置环境变量：
+2. 解压到本地目录，例如 `C:\Developments\apache-maven-3.6.3`
+3. 也可以直接使用仓库根目录下的 `mvn-java17.bat`，它会设置 `JAVA_HOME=C:\Developments\Java\jdk-17.0.4.1` 并调用本地 Maven 3.6.3
+4. 配置环境变量：
    - 新建 `MAVEN_HOME` 环境变量，值为 Maven 安装目录
    - 将 `%MAVEN_HOME%\bin` 添加到 `PATH` 环境变量
 4. 验证安装：
@@ -151,30 +152,34 @@ git branch -a
 
 5. **构建特定模块**：
    ```bash
-   # 构建核心模块
-   mvn package -pl luban-rds-core
+   # 构建核心模块（同时构建依赖模块）
+   mvn package -pl luban-rds-core -am
    
-   # 构建服务器模块
-   mvn package -pl luban-rds-server
+   # 构建服务器模块（同时构建依赖模块）
+   mvn package -pl luban-rds-server -am
+   
+   # 构建可执行 bin 模块（含依赖 fat JAR），-am 会构建依赖模块
+   mvn package -pl luban-rds-bin -am
    ```
 
 6. **构建带依赖的可执行 JAR**：
    ```bash
-   mvn package assembly:single -pl luban-rds-bin
+   # bin 模块在 package 阶段即通过 maven-shade-plugin 生成 fat JAR
+   mvn package -pl luban-rds-bin -am
    ```
 
 ### 2.3 构建输出
 
 构建完成后，各模块的输出文件位于：
 
-- **luban-rds-core**：`luban-rds-core/target/luban-rds-core-1.0.4.jar`
-- **luban-rds-protocol**：`luban-rds-protocol/target/luban-rds-protocol-1.0.4.jar`
-- **luban-rds-server**：`luban-rds-server/target/luban-rds-server-1.0.4.jar`
-- **luban-rds-persistence**：`luban-rds-persistence/target/luban-rds-persistence-1.0.4.jar`
-- **luban-rds-client**：`luban-rds-client/target/luban-rds-client-1.0.4.jar`
-- **luban-rds-common**：`luban-rds-common/target/luban-rds-common-1.0.4.jar`
-- **luban-rds-bin**：`luban-rds-bin/target/luban-rds-bin-1.0.4.jar`
-- **luban-rds-spring-boot-starter**：`luban-rds-spring-boot-starter/target/luban-rds-spring-boot-starter-1.0.4.jar`
+- **luban-rds-core**：`luban-rds-core/target/luban-rds-core-1.0.8.jar`
+- **luban-rds-protocol**：`luban-rds-protocol/target/luban-rds-protocol-1.0.8.jar`
+- **luban-rds-server**：`luban-rds-server/target/luban-rds-server-1.0.8.jar`
+- **luban-rds-persistence**：`luban-rds-persistence/target/luban-rds-persistence-1.0.8.jar`
+- **luban-rds-client**：`luban-rds-client/target/luban-rds-client-1.0.8.jar`
+- **luban-rds-common**：`luban-rds-common/target/luban-rds-common-1.0.8.jar`
+- **luban-rds-bin**：`luban-rds-bin/target/luban-rds-jar-with-dependencies.jar`（含所有依赖的可执行 fat JAR，启动入口 `com.janeluo.luban.rds.bin.RedisServerMain`）
+- **luban-rds-spring-boot-starter**：`luban-rds-spring-boot-starter/target/luban-rds-spring-boot-starter-1.0.8.jar`
 
 ## 3. 测试流程
 
@@ -214,12 +219,12 @@ git branch -a
    ```bash
    mvn verify
    ```
+   说明：当前仓库 `mvn verify` 与 `mvn test` 等价，仍由 maven-surefire-plugin 执行单元测试，未单独配置 failsafe / 集成测试阶段；HTML 与并行 Surefire XML 报告当前未生成。
 
 ### 3.3 测试报告
 
 测试完成后，测试报告位于各模块的 `target/surefire-reports` 目录下：
 
-- **HTML 报告**：`target/surefire-reports/index.html`
 - **XML 报告**：`target/surefire-reports/*.xml`
 - **文本报告**：`target/surefire-reports/*.txt`
 
@@ -307,25 +312,18 @@ git branch -a
 
 ### 5.1 CI/CD 配置
 
-Luban-RDS 项目使用 GitHub Actions 进行持续集成，配置文件位于 `.github/workflows/ci.yml`。
-
-**主要流程**：
-1. 当代码推送到 GitHub 时，触发 CI 流程
-2. 安装 Java 和 Maven
-3. 构建项目并运行测试
-4. 生成测试报告和代码覆盖率报告
-5. 部署构建产物到 Maven 仓库（仅对主分支）
+Luban-RDS 项目当前仅配置了 GitHub Pages 发布流水线（`.github/workflows/gh-pages.yml`），尚未启用独立的 `ci.yml` 持续集成工作流。构建、测试与覆盖率报告均在本地 Maven 流程中完成（参见上文 `mvn package` / `mvn verify` 与 JaCoCo 章节）。
 
 ### 5.2 本地 CI 测试
 
-可以使用 Docker 本地模拟 CI 环境：
+可以使用 Docker 本地构建并运行镜像：
 
 ```bash
 # 构建 Docker 镜像
-docker build -t luban-rds-ci .
+docker build -t luban-rds:1.0.8 .
 
-# 运行 CI 流程
-docker run -v $(pwd):/app luban-rds-ci mvn clean package
+# 在容器中运行并验证
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.8
 ```
 
 ## 6. 开发工具集成
@@ -519,13 +517,13 @@ public class TestDataFactory {
 
 ### 9.4 测试工具
 
-使用以下工具辅助测试：
+当前仓库 `pom.xml` 中实际引入的测试依赖仅有：
 
-- **Mockito**：模拟对象
-- **JUnit 5**：测试框架
-- **Hamcrest**：断言库
-- **AssertJ**：流畅的断言库
-- **TestContainers**：容器化测试
+- **JUnit Jupiter**（`org.junit.jupiter:junit-jupiter`）：测试框架
+- **Mockito**（`org.mockito:mockito-core` / `mockito-junit-jupiter`）：模拟对象
+- **JaCoCo**（由 `jacoco-maven-plugin` 绑定到 `test` 阶段）：测试覆盖率统计
+
+`Hamcrest`、`AssertJ`、`TestContainers` 当前未在 `pom.xml` 中引入，请按需临时添加，避免默认镜像下成为构建负担。
 
 ## 10. 部署构建产物
 
@@ -565,25 +563,25 @@ Luban-RDS 提供了完整的 Docker 支持，使用多阶段构建优化镜像�
 
 ```bash
 # 在项目根目录执行
-docker build -t luban-rds:1.0.4 .
+docker build -t luban-rds:1.0.8 .
 
 # 带构建参数
 docker build \
   --build-arg JAVA_VERSION=17 \
-  -t luban-rds:1.0.4 .
+  -t luban-rds:1.0.8 .
 ```
 
 #### 运行 Docker 容器
 
 ```bash
 # 基本运行
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.4
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.8
 
 # 带持久化存储
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v luban-rds-data:/data \
-  luban-rds:1.0.4
+  luban-rds:1.0.8
 
 # 带环境变量配置
 docker run -d --name luban-rds \
@@ -591,7 +589,7 @@ docker run -d --name luban-rds \
   -v luban-rds-data:/data \
   -e LUBAN_RDS_MAXMEMORY=1073741824 \
   -e JAVA_OPTS="-Xms512m -Xmx1g" \
-  luban-rds:1.0.4
+  luban-rds:1.0.8
 ```
 
 #### 使用 Docker Compose
@@ -630,10 +628,10 @@ Luban-RDS 的 Dockerfile 遵循行业最佳实践：
 docker login registry.example.com
 
 # 标记镜像
-docker tag luban-rds:1.0.4 registry.example.com/luban-rds:1.0.4
+docker tag luban-rds:1.0.8 registry.example.com/luban-rds:1.0.8
 
 # 推送镜像
-docker push registry.example.com/luban-rds:1.0.4
+docker push registry.example.com/luban-rds:1.0.8
 ```
 
 ## 11. 常见构建命令

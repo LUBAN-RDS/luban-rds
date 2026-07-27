@@ -1,11 +1,94 @@
 ---
 title: 更新日志
-last_updated: 2026-07-08
-version: 1.0.4
+last_updated: 2026-07-27
+version: 1.0.8
 ---
 # 更新日志
 
 Luban-RDS 是一款轻量级、高性能、完全兼容 RESP 协议的 Java 内存数据库，易于嵌入和扩展。
+
+## [1.0.8] - 2026-07-27
+
+### 新增功能
+
+- **P0 数据安全 / Redis 7 兼容性修复（审计 C1/C7/C8/C9/C11/C12）**
+  - **C1 CROSSSLOT 校验**（`c09903e`）：集群模式下对多键命令执行 CROSSSLOT 槽位归属校验，不在同一槽位的多键命令返回标准 `-CROSSSLOT Keys in request don't hash to the same slot` 错误
+  - **C7 MIGRATE 原子性**（`18c834d`）：多键槽位迁移改用一次性 `RESTORE`，保证迁移过程原子化，避免半迁移状态
+  - **C8 故障转移选举**（`9fed095`）：选举算法改用真实复制偏移（replication offset）作为选主依据，替代旧的随机/固定值选举
+  - **C9 手动故障转移广播**（`278b294`）：`CLUSTER FAILOVER` 完成后通过新增的 `FAILOVER_RESULT` 消息（类型码 0x08）向全集群广播结果
+  - **C11 AOF 二进制安全**（`21b8774`）：AOF rewrite 改为按数据类型分别重写；AOF 加载同样二进制安全，避免二进制数据损坏
+  - **C12 ZSet 同分数排序**（`252851c`）：ZSet 相同分数成员的排序改为字典序（lexicographic），与 Redis 官方语义一致
+
+### 修复
+
+- 配套修复 P0 审计报告中其余条目（C2/C3/C4/C5/C6/C10 等）已随上述 P0 批次合并，详见 `openspec/changes/archive/2026-07-27-fix-p0-data-safety-redis7/`
+
+### 兼容性
+
+- 与 v1.0.4 ~ v1.0.7 完全兼容，AOF/RDB 文件结构与 Redis 7 协议行为一致
+- 与 Jedis / Lettuce / Redisson / `redis-cli` 回归验证通过
+
+## [1.0.7] - 2026-07-XX
+
+### 新增功能
+
+- **`CLUSTER SET-CONFIG-EPOCH` 命令**：完整实现，支持设置节点 configEpoch
+- **`ADDSLOTS` 后自动同步 configEpoch**：`ClusterCommandHandler` 在槽位分配后主动同步 epoch
+- **Gossip 协议携带 `masterNodeId`**：`GossipNodeInfo` 新增字段，主从关系随 Gossip 扩散
+- **`CLUSTER REPLICATE` 角色传播**：从节点角色经 Gossip 协议正确传递到全集群
+- **集群总线通信重构**：提升 Gossip 与 PING/PONG 的可靠性
+
+### 修复
+
+- **修复 `slotManager` / `clusterConfig` / `ClusterNode` 三重槽位归属不一致**：统一以 `slotManager` 为准
+- **修复故障转移后 `CLUSTER SLOTS` 返回错误路由**：故障转移后 `ClusterConfig.slotAssignment` 同步更新
+- **修复从节点始终返回 `CLUSTERDOWN`**：`checkSlotAndRedirect` 改为从 `slotManager` 读取槽位归属
+- **修复 `CLUSTER MEET` 用 127.0.0.1 建连后节点地址未收敛为真实 IP**
+- **修复 Gossip 协议 `masterNodeId` 在 MASTER→SLAVE 角色切换时未同步**
+
+### 优化
+
+- **ClusterNode 线程安全**：关键读写方法加 `synchronized`
+- **ReplicationCoordinator 装配**：事务传播写入命令到复制链路
+- **`ReplicationLifecycleListener`**：将角色变更接入复制路径
+- **`ReplicationStreamApplier`**：实现并接入 `SlaveReplicationService`
+
+### 兼容性
+
+- 与 Jedis / Lettuce / Redisson / `redis-cli --cluster` 验证通过
+
+## [1.0.6] - 2026-07-XX
+
+### 修复
+
+- **修复集群 PFAIL 投票未通过 Gossip 传播**：修复 PFAIL 状态无法扩散导致自动故障转移失效
+- **`ClusterNode` 状态修正**：PFAIL→FAIL 升级链路恢复，触发后续自动选举
+
+### 新增功能
+
+- **`FAILOVER_RESULT` 消息类型**：新增 0x08 消息类型与 `FailoverResultMessage`
+- **`FailoverManager` 状态机**：状态机 + 消息分发接线 + 注入 `NettyRedisServer`
+- **`ClusterConfig.getSlavesOfMaster`**：暴露主从关系查询
+- **`gracePeriod` 配置**：故障转移宽限期可配置
+
+### 兼容性
+
+- 消息类型码向后兼容（0x07/0x08 不冲突）
+
+## [1.0.5] - 2026-07-XX
+
+### 新增功能
+
+- **`FailoverManager` 骨架**：引入自动选举 / 状态切换的基础组件，为后续 PFAIL→FAIL 投票链路预留接入点
+- **Gossip 状态整合**：接入点预留
+
+### 修复
+
+- **累积修复**：本版本以工程内部改进为主，未单独发布外部可见特性
+
+### 兼容性
+
+- 与 v1.0.4 协议层完全兼容
 
 ## [1.0.4] - 2026-07-08
 

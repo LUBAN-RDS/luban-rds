@@ -12,7 +12,7 @@ title: 安装部署
 
 | 环境 | 最低要求 | 推荐配置 |
 |------|----------|----------|
-| **操作系统** | Windows 7+, Linux, macOS | Linux (CentOS 7+, Ubuntu 18.04+) |
+| **操作系统** | Windows 7+, Linux, macOS | Linux (Rocky/AlmaLinux 8/9, Ubuntu 20.04+) |
 | **Java 版本** | Java 17+ | Java 17 |
 | **内存** | 512MB | 2GB+ |
 | **CPU** | 1 核 | 2 核+ |
@@ -86,7 +86,7 @@ mvn clean package -DskipTests
 cd luban-rds-bin/target/
 
 # 启动服务
-java -jar luban-rds-bin-1.0.4.jar
+java -jar luban-rds-jar-with-dependencies.jar
 
 # 或使用启动脚本
 chmod +x start.sh
@@ -98,12 +98,12 @@ chmod +x start.sh
 **步骤 1：下载预编译包**
 从 GitHub Releases 页面下载最新的预编译包：
 ```bash
-wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.4/luban-rds-bin-1.0.4.jar
+wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.8/luban-rds-jar-with-dependencies.jar
 ```
 
 **步骤 2：启动服务**
 ```bash
-java -jar luban-rds-bin-1.0.4.jar
+java -jar luban-rds-jar-with-dependencies.jar
 ```
 
 ### 2.3 Docker 部署
@@ -150,33 +150,33 @@ redis-cli -h localhost -p 9736 PING
 **步骤 1：构建镜像**
 ```bash
 # 在项目根目录执行
-docker build -t luban-rds:1.0.4 .
+docker build -t luban-rds:1.0.8 .
 ```
 
 **步骤 2：运行容器**
 ```bash
 # 基本运行
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.4
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.8
 
 # 带持久化存储
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v luban-rds-data:/data \
-  luban-rds:1.0.4
+  luban-rds:1.0.8
 
 # 带自定义配置
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v /path/to/luban-rds.conf:/app/config/luban-rds.conf:ro \
   -v luban-rds-data:/data \
-  luban-rds:1.0.4
+  luban-rds:1.0.8
 
 # 带密码认证
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v luban-rds-data:/data \
   -e LUBAN_RDS_REQUIREPASS=your-secure-password \
-  luban-rds:1.0.0
+  luban-rds:1.0.8
 
 # 带资源限制
 docker run -d --name luban-rds \
@@ -184,7 +184,7 @@ docker run -d --name luban-rds \
   -v luban-rds-data:/data \
   --memory="1g" \
   --cpus="2" \
-  luban-rds:1.0.0
+  luban-rds:1.0.8
 ```
 
 **步骤 3：管理容器**
@@ -219,12 +219,9 @@ docker rm -f luban-rds
 | `LUBAN_RDS_MAXMEMORY` | 最大内存限制（字节） | 0（无限制） |
 | `LUBAN_RDS_DATABASES` | 数据库数量 | 16 |
 | `LUBAN_RDS_REQUIREPASS` | 访问密码 | 空 |
-| `LUBAN_RDS_TIMEOUT` | 客户端超时（秒） | 0 |
-| `LUBAN_RDS_TCP_KEEPALIVE` | TCP 保活时间（秒） | 300 |
-| `LUBAN_RDS_MAXMEMORY_POLICY` | 内存淘汰策略 | noeviction |
-| `LUBAN_RDS_SLOWLOG_SLOWER_THAN` | 慢查询阈值（微秒） | 10000 |
-| `LUBAN_RDS_SLOWLOG_MAX_LEN` | 慢查询日志最大长度 | 128 |
 | `JAVA_OPTS` | JVM 参数 | -Xms256m -Xmx512m |
+
+> 注：`LUBAN_RDS_TIMEOUT`、`LUBAN_RDS_TCP_KEEPALIVE`、`LUBAN_RDS_MAXMEMORY_POLICY`、`LUBAN_RDS_SLOWLOG_SLOWER_THAN`、`LUBAN_RDS_SLOWLOG_MAX_LEN` 等变量当前 entrypoint.sh 未实现，请通过配置文件 `luban-rds.conf` 设置对应键（`timeout`、`tcp-keepalive`、`maxmemory-policy`、`slowlog-log-slower-than`、`slowlog-max-len`）。
 
 #### 2.3.4 Docker Compose 配置示例
 
@@ -233,7 +230,7 @@ version: '3.8'
 
 services:
   luban-rds:
-    image: luban-rds:1.0.0
+    image: luban-rds:1.0.8
     container_name: luban-rds
     restart: unless-stopped
     ports:
@@ -378,7 +375,7 @@ spec:
     spec:
       containers:
         - name: luban-rds
-          image: luban-rds:1.0.4
+          image: luban-rds:1.0.8
           ports:
             - containerPort: 9736
           volumeMounts:
@@ -424,7 +421,7 @@ kubectl get events -n luban-rds --sort-by='.lastTimestamp'
 <dependency>
     <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.4</version>
+    <version>1.0.8</version>
 </dependency>
 ```
 
@@ -434,54 +431,47 @@ kubectl get events -n luban-rds --sort-by='.lastTimestamp'
 **application.properties：**
 ```properties
 # 服务器配置
-spring.luban.rds.port=9736
-spring.luban.rds.host=localhost
+luban.rds.server.port=9736
+luban.rds.server.host=localhost
 
 # 认证配置
-spring.luban.rds.password=your-secure-password
+luban.rds.server.password=your-secure-password
 
-# 持久化配置
-spring.luban.rds.persistence.enabled=true
-spring.luban.rds.persistence.rdb-enabled=true
-spring.luban.rds.persistence.aof-enabled=false
-
-# 其他配置
-spring.luban.rds.databases=16
+# 持久化配置（持久化模式与数据库数）
+luban.rds.server.persist-mode=rdb
+luban.rds.server.databases=16
 ```
 
 **application.yml：**
 ```yaml
-spring:
-  luban:
-    rds:
+luban:
+  rds:
+    server:
       port: 9736
       host: localhost
       password: your-secure-password
-      persistence:
-        enabled: true
-        rdb-enabled: true
-        aof-enabled: false
+      persist-mode: rdb
       databases: 16
 ```
 
 **步骤 3：使用示例**
 ```java
+import com.janeluo.luban.rds.client.LubanRdsClient;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 @Service
 public class RedisService {
-    
+
     @Autowired
-    private StringRedisTemplate redisTemplate;
-    
+    private LubanRdsClient lubanRdsClient;
+
     public void setValue(String key, String value) {
-        redisTemplate.opsForValue().set(key, value);
+        lubanRdsClient.set(key, value);
     }
-    
+
     public String getValue(String key) {
-        return redisTemplate.opsForValue().get(key);
+        return lubanRdsClient.get(key);
     }
 }
 ```
@@ -497,7 +487,7 @@ Luban-RDS 支持嵌入到应用中使用，无需单独部署服务：
 <dependency>
     <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-server</artifactId>
-    <version>1.0.4</version>
+    <version>1.0.8</version>
 </dependency>
 ```
 
@@ -505,20 +495,24 @@ Luban-RDS 支持嵌入到应用中使用，无需单独部署服务：
 
 ```java
 import com.janeluo.luban.rds.server.EmbeddedRedisServer;
+import com.janeluo.luban.rds.common.config.RdsConfig;
 
 public class EmbeddedRedisExample {
     public static void main(String[] args) {
-        // 创建嵌入式服务器
+        // 构造嵌入式服务器（默认端口 9736，监听 0.0.0.0）
         EmbeddedRedisServer server = new EmbeddedRedisServer();
 
-        // 配置服务器
-        server.setPort(9736);
-        server.setHost("localhost");
-        server.setPassword("your-password");
+        // 通过 RdsConfig 配置服务器
+        RdsConfig config = server.getConfig();
+        config.setPort(9736);
+        config.setHost("localhost");
+        config.setPassword("your-password");
+        config.setDatabases(16);
+        config.setPersistMode("rdb");
 
         // 启动服务器
         server.start();
-        System.out.println("Embedded Redis server started on port 9736");
+        System.out.println("Embedded Luban-RDS server started on port 9736");
 
         // 应用逻辑...
 
@@ -557,30 +551,17 @@ public class RedisClientExample {
 
 ### 4.1 命令行参数
 
-Luban-RDS 支持通过命令行参数配置服务：
+Luban-RDS 目前仅支持通过 `--config` 指定配置文件路径这一命令行参数；其他 `--port`、`--host`、`--password`、`--rdb-*`、`--aof-*` 等开关当前未实现，请统一通过配置文件 `luban-rds.conf` 进行配置：
 
 ```bash
-# 基本启动
-java -jar luban-rds-bin-1.0.4.jar
+# 基本启动（使用默认配置）
+java -jar luban-rds-jar-with-dependencies.jar --config /app/config/luban-rds.conf
 
-# 带端口和主机
-java -jar luban-rds-bin-1.0.4.jar --port 9736 --host 0.0.0.0
-
-# 带密码
-java -jar luban-rds-bin-1.0.4.jar --password your-secure-password
-
-# 带持久化配置
-java -jar luban-rds-bin-1.0.4.jar \
-  --rdb-enabled true \
-  --rdb-filename dump.rdb \
-  --rdb-save 900 1 300 10 60 10000
-
-# 带 AOF 配置
-java -jar luban-rds-bin-1.0.4.jar \
-  --aof-enabled true \
-  --aof-filename appendonly.aof \
-  --aof-sync always
+# 自定义配置路径
+java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf
 ```
+
+> 历史版本中曾出现 `--port`、`--host`、`--password`、`--rdb-enabled`、`--aof-enabled` 等 CLI 开关，这些已迁移至配置项（`port`、`bind`、`requirepass`、`persist-mode`、`dbfilename`、`appendfilename`、`appendfsync`、`rdb-save-interval`）。
 
 ### 4.2 配置文件
 
@@ -591,8 +572,8 @@ Luban-RDS 支持通过配置文件配置服务：
 
 ```conf
 # 服务器配置
+bind 0.0.0.0
 port 9736
-host 0.0.0.0
 
 # 认证配置
 requirepass your-secure-password
@@ -601,22 +582,20 @@ requirepass your-secure-password
 databases 16
 
 # 持久化配置
-save 900 1
-save 300 10
-save 60 10000
-rdbfilename dump.rdb
-dir /data
+persist-mode rdb
+rdb-save-interval 900 1
+dbfilename dump.rdb
+dir ./data
 
 # AOF 配置
-aof-enabled yes
-aof-filename appendonly.aof
-aof-sync everysec
+appendfilename appendonly.aof
+appendfsync everysec
 
 # Lua 脚本配置
-lua-time-limit 5000
+lua-timeout 5000
 
 # 内存配置
-maxmemory 2gb
+maxmemory 0
 maxmemory-policy allkeys-lru
 
 # 客户端配置
@@ -630,7 +609,7 @@ logfile ""
 
 **步骤 2：使用配置文件启动**
 ```bash
-java -jar luban-rds-bin-1.0.0.jar --config /path/to/luban-rds.conf
+java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf
 ```
 
 ### 4.3 环境变量
@@ -640,12 +619,12 @@ Luban-RDS 支持通过环境变量配置服务：
 ```bash
 # 设置环境变量
 export LUBAN_RDS_PORT=9736
-export LUBAN_RDS_HOST=0.0.0.0
-export LUBAN_RDS_PASSWORD=your-secure-password
-export LUBAN_RDS_RDB_ENABLED=true
+export LUBAN_RDS_BIND=0.0.0.0
+export LUBAN_RDS_REQUIREPASS=your-secure-password
+export LUBAN_RDS_PERSIST_MODE=rdb
 
 # 启动服务
-java -jar luban-rds-bin-1.0.4.jar
+java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf
 ```
 
 ## 5. 服务验证
@@ -692,7 +671,7 @@ redis-cli -h localhost -p 9736 INFO
 
 # 输出示例
 # Server
-redis_version:1.0.0-SNAPSHOT
+redis_version:1.0.8
 redis_git_sha1:00000000
 redis_git_dirty:0
 redis_build_id:abcdef123456
@@ -710,7 +689,7 @@ server_time_usec:1618947600000000
 uptime_in_seconds:3600
 uptime_in_days:0
 hz:10
-default_config_file:/path/to/luban-rds.conf
+default_config_file:/app/config/luban-rds.conf
 
 # Clients
 connected_clients:1
@@ -754,7 +733,7 @@ mem_replication_backlog:0
 mem_clients_slaves:0
 mem_clients_normal:49696
 mem_aof_buffer:0
-mem_allocator:jemalloc-5.1.0
+mem_allocator:jemalloc
 active_defrag_running:0
 lazyfree_pending_objects:0
 
@@ -846,9 +825,9 @@ redis-cli -h localhost -p 9736 EXISTS test
 (integer) 1  # 键存在
 ```
 
-## 5. 停止服务
+## 6. 停止服务
 
-### 5.1 优雅停止
+### 6.1 优雅停止
 
 **使用 SHUTDOWN 命令：**
 ```bash
@@ -861,7 +840,7 @@ redis-cli -h localhost -p 9736 SHUTDOWN SAVE
 redis-cli -h localhost -p 9736 SHUTDOWN NOSAVE
 ```
 
-### 5.2 强制停止
+### 6.2 强制停止
 
 **使用 Ctrl+C：**
 在运行服务的终端中按下 Ctrl+C。
@@ -878,7 +857,7 @@ kill -SIGTERM <pid>
 kill -SIGKILL <pid>
 ```
 
-### 5.3 Docker 容器停止
+### 6.3 Docker 容器停止
 
 ```bash
 # 停止容器
@@ -888,7 +867,7 @@ docker stop luban-rds
 docker rm luban-rds
 ```
 
-### 5.4 Kubernetes 停止
+### 6.4 Kubernetes 停止
 
 ```bash
 # 停止部署
@@ -901,9 +880,9 @@ kubectl delete service luban-rds
 kubectl delete pvc luban-rds-pvc
 ```
 
-## 6. 常见问题
+## 7. 常见问题
 
-### 6.1 端口被占用
+### 7.1 端口被占用
 
 **问题**：启动时提示端口被占用
 
@@ -915,28 +894,28 @@ kubectl delete pvc luban-rds-pvc
 # 检查端口占用
 netstat -tulpn | grep 9736
 
-# 使用不同端口启动
-java -jar luban-rds-bin-1.0.0.jar --port 6380
+# 使用不同端口启动（修改配置文件 port 项）
+java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf
 ```
 
-### 6.2 内存不足
+### 7.2 内存不足
 
 **问题**：启动时提示内存不足
 
 **解决方案**：
 - 增加系统内存
 - 调整 JVM 内存参数
-- 调整 Luban-RDS 最大内存限制
+- 调整 Luban-RDS 最大内存限制（`maxmemory` 配置项）
 
 ```bash
 # 调整 JVM 内存
-java -Xms512m -Xmx2g -jar luban-rds-bin-1.0.0.jar
+java -Xms512m -Xmx2g -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf
 
-# 调整最大内存限制
-java -jar luban-rds-bin-1.0.0.jar --maxmemory 1g
+# 调整最大内存限制（通过配置文件 maxmemory，单位字节）
+java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf
 ```
 
-### 6.3 认证失败
+### 7.3 认证失败
 
 **问题**：连接时提示认证失败
 
@@ -954,7 +933,7 @@ redis-cli -h localhost -p 9736
 > AUTH your-secure-password
 ```
 
-### 6.4 持久化失败
+### 7.4 持久化失败
 
 **问题**：持久化文件创建失败
 
@@ -972,7 +951,7 @@ chmod 755 /data
 df -h
 ```
 
-## 7. 下一步
+## 8. 下一步
 
 - **[配置指南](./configuration.md)**：了解详细的配置选项和优化建议
 - **[监控维护](./monitoring.md)**：学习如何监控和维护 Luban-RDS 服务

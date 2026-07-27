@@ -10,8 +10,8 @@ title: 快速开始
 
 | 工具 | 版本要求 | 说明 |
 |------|---------|------|
-| **JDK** | 17+ | Luban-RDS 基于 Java 开发 |
-| **Maven** | 3.6+ | 用于构建项目 |
+| **JDK** | 17+ | Luban-RDS 基于 Java 开发（父 `pom.xml` 中 `source/target=17`） |
+| **Maven** | 3.6.3+ | 用于构建项目，仓库根目录提供 `mvn-java17.bat` |
 | **Docker** | 任意版本 | 可选，用于容器化部署 |
 
 ## 方式一：Docker 快速启动（推荐）
@@ -35,10 +35,10 @@ redis-cli -h localhost -p 9736 PING
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.4 .
+docker build -t luban-rds:1.0.8 .
 
 # 运行容器
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.4
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.8
 
 # 验证服务
 redis-cli -h localhost -p 9736 PING
@@ -56,7 +56,7 @@ git clone https://gitee.com/luban-rds/luban-rds.git
 cd luban-rds
 ```
 
-### 步骤 1：构建项目
+#### 步骤 1：构建项目
 
 ```bash
 # 构建所有模块
@@ -66,67 +66,70 @@ mvn clean package
 mvn clean package -DskipTests
 ```
 
-构建完成后，可执行文件会生成在 `luban-rds-bin/target/` 目录中。
+构建完成后，可执行文件会生成在 `luban-rds-bin/target/` 目录中（fat JAR 名为 `luban-rds-jar-with-dependencies.jar`）。
 
-### 步骤 2：启动服务器
+#### 步骤 2：启动服务器
 
-### 使用启动脚本
+推荐直接使用 bin 模块的 fat JAR：
+
+```bash
+java -jar luban-rds-bin/target/luban-rds-jar-with-dependencies.jar
+```
+
+服务器默认监听 **9736** 端口。如需自定义，可使用根目录 `luban-rds-server/src/main/resources/luban-rds.conf` 中各配置项（如 `port`、`bind`、`lua-timeout` 等）。
+
+也可使用仓库自带的启动脚本：
 
 ```bash
 # Linux/Mac
-cd luban-rds-bin
-bash start.sh
+bash luban-rds-bin/scripts/start.sh
 
 # Windows
-cd luban-rds-bin
-start.bat
+luban-rds-bin\\scripts\\start.bat
 ```
 
-### 使用 Java 命令
+#### 步骤 3：连接服务器
+
+##### 使用 Redis 客户端
 
 ```bash
-java -jar luban-rds-bin/target/luban-rds-bin-1.0.4.jar
-```
-
-服务器默认监听 **9736** 端口。
-
-### 步骤 3：连接服务器
-
-### 使用 Redis 客户端
-
-```bash
-# 使用 redis-cli 连接
-redis-cli
+# 使用 redis-cli 连接本地 9736 端口
+redis-cli -h 127.0.0.1 -p 9736
 
 # 测试连接
 > PING
 PONG
 ```
 
-### 使用 Java 客户端
+##### 使用 Java 客户端
+
+```xml
+<!-- Maven 依赖 -->
+<dependency>
+    <groupId>com.janeluo</groupId>
+    <artifactId>luban-rds-client</artifactId>
+    <version>1.0.8</version>
+</dependency>
+```
 
 ```java
-// 添加依赖
-// <dependency>
-//     <groupId>com.janeluo</groupId>
-//     <artifactId>luban-rds-client</artifactId>
-//     <version>1.0.1</version>
-// </dependency>
-
 // 创建客户端
 RedisClient client = new NettyRedisClient("localhost", 9736);
 
-// 测试连接
-String result = client.ping();
-System.out.println(result); // 输出: PONG
+// 建立连接
+client.connect();
 
-// 关闭客户端
-client.close();
+// 执行业务命令，例如 SET/GET ...
+// client.set("key", "value");
+// String value = client.get("key");
+
+// 关闭连接
+client.disconnect();
 ```
 
-### 步骤 4：基本操作
+#### 步骤 4：基本操作
 
-### String 类型
+##### String 类型
 
 ```bash
 # 设置值
@@ -144,7 +147,7 @@ OK
 (integer) 2
 ```
 
-### Hash 类型
+##### Hash 类型
 
 ```bash
 # 设置哈希字段
@@ -163,7 +166,7 @@ OK
 4) "30"
 ```
 
-### List 类型
+##### List 类型
 
 ```bash
 # 左侧推入元素
@@ -181,7 +184,7 @@ OK
 "apple"
 ```
 
-### Set 类型
+##### Set 类型
 
 ```bash
 # 添加成员
@@ -199,7 +202,7 @@ OK
 3) "javascript"
 ```
 
-### ZSet 类型
+##### ZSet 类型
 
 ```bash
 # 添加有序成员
@@ -216,16 +219,16 @@ OK
 6) "92"
 ```
 
-### 步骤 5：停止服务器
+#### 步骤 5：停止服务器
 
-### 使用 Ctrl+C
+##### 使用 Ctrl+C
 
 在启动服务器的终端中按下 `Ctrl+C` 停止服务。
 
-### 使用 shutdown 命令
+##### 使用 shutdown 命令
 
 ```bash
-redis-cli shutdown
+redis-cli -p 9736 shutdown
 ```
 
 ## 下一步

@@ -48,7 +48,7 @@ Luban-RDS 是一个开源的内存键值存储系统，兼容 Redis 协议，提
 
 ## 联系方式
 
-如果您对本服务条款有任何疑问，请联系：
+如果您对本服务条款有任何疑问，请通过以下渠道与我们联系：
 
-- 电子邮件：terms@luban-rds.com
+- GitHub Issues：<https://github.com/LUBAN-RDS/luban-rds/issues>
 - 地址：北京市海淀区中关村科技园区

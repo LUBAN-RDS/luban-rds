@@ -51,7 +51,7 @@ Luban-RDS 可能会使用第三方库和依赖，但这些库不会收集用户�
 
 ## 联系方式
 
-如果您对本隐私政策有任何疑问，请联系：
+如果您对本隐私政策有任何疑问，请通过以下渠道与我们联系：
 
-- 电子邮件：privacy@luban-rds.com
+- GitHub Issues：<https://github.com/LUBAN-RDS/luban-rds/issues>
 - 地址：北京市海淀区中关村科技园区

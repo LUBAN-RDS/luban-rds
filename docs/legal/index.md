@@ -22,7 +22,7 @@ Luban-RDS 项目采用 Apache License 2.0 许可证，详情请参考 [许可证
 
 ## 版权信息
 
-© 2026 Luban-RDS 团队。保留所有权利。
+© 2025 Luban-RDS 团队。保留所有权利。
 
 ## 商标声明
 
@@ -30,16 +30,11 @@ Luban-RDS 是 Luban-RDS 团队的商标。
 
 ## 第三方依赖
 
-Luban-RDS 使用了以下第三方依赖，这些依赖可能有自己的许可证：
-
-- [Netty](https://netty.io/) - Apache License 2.0
-- [LuaJ](https://github.com/luaj/luaj) - MIT License
-- [JUnit](https://junit.org/) - Eclipse Public License 1.0
-- [Maven](https://maven.apache.org/) - Apache License 2.0
+Luban-RDS 使用了多个第三方依赖，完整的依赖列表与版本号请参考 [许可证](license.md) 文档中的「第三方依赖」章节。
 
 ## 联系方式
 
-如果您对法律信息有任何疑问，请联系：
+如果您对法律信息有任何疑问，请通过以下渠道与我们联系：
 
-- 电子邮件：legal@luban-rds.com
+- GitHub Issues：<https://github.com/LUBAN-RDS/luban-rds/issues>
 - 地址：北京市海淀区中关村科技园区

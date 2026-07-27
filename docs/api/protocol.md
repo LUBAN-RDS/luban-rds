@@ -174,7 +174,7 @@ $4\r\nJohn\r\n
 ### 3.4 入站累积与循环解析
 - 每条连接维护入站缓冲区（ByteBuf），channelRead 到来的数据统一累积以应对半包/粘包。
 - 使用 while 循环持续解析缓冲区中的完整 RESP 帧，解析成功即分发执行，支持 pipeline。
-- 参考实现：[RedisServerHandler.java:L69-L88]
+- 参考实现：`RedisServerHandler` 入站循环解析方法（参见 `channelRead0` 中的累积 / 解析循环体）。
 
 ## 4. 特殊情况处理
 
@@ -228,19 +228,19 @@ $0\r\n\r\n
 
 ### 5.1 解析器
 
-Luban-RDS 使用 `RedisProtocolParser` 类解析 RESP 协议：
+Luban-RDS 使用 `RedisProtocolParser` 类解析 RESP 协议（基于 Netty `ByteBuf` 直接消费入站缓冲区，避免额外拷贝）：
 
 ```java
 public class RedisProtocolParser {
     /**
-     * 解析 RESP 格式的数据
-     * @param data 字节数组
-     * @return 解析后的数据对象
+     * 解析一个完整 RESP 帧。
+     * @param buffer Netty 入站 ByteBuf（消费当前帧后 readerIndex 推进到下一帧起点）
+     * @return 解析后的 Command 对象
      */
-    public Object parse(byte[] data) {
+    public Command parse(ByteBuf buffer) {
         // 实现解析逻辑
     }
-    
+
     /**
      * 编码对象为 RESP 格式
      * @param obj 要编码的对象
@@ -254,13 +254,13 @@ public class RedisProtocolParser {
 
 ### 5.2 命令对象
 
-解析后的命令会被封装为 `Command` 对象：
+解析后的命令会被封装为 `Command` 对象（简化结构示意，实际类在 `luban-rds-protocol` 模块中）：
 
 ```java
 public class Command {
     private String name;
     private String[] args;
-    
+
     // 构造器、getter、setter 等
 }
 ```
@@ -274,7 +274,7 @@ public class Command {
 ### 5.4 QUIT 响应与连接关闭
 - QUIT 的响应为 `+OK\r\n`（Simple String）
 - 响应写回后服务器主动关闭连接
-- 参考实现：[RedisServerHandler.java:L752-L761]
+- 参考实现：`RedisServerHandler#handleQuitCommand` 方法（2026-07-27 / 1.0.8 版本核对）。
 
 ## 6. 客户端实现
 
@@ -379,6 +379,8 @@ Luban-RDS 现在完全支持 RESP2 和 RESP3 协议，与 Redis 6.0+ 客户端�
 | **Boolean** | `#` | 布尔类型，t 表示 true，f 表示 false |
 | **Double** | `,` | 浮点数类型 |
 | **Big number** | `(` | 大整数类型 |
+
+> 注：序列化侧对部分 RESP3 类型（Map / Set / Boolean / Double / Big number 等）以透传方式输出。
 
 #### 协议版本协商
 

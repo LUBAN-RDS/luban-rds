@@ -59,10 +59,10 @@ Luban-RDS 支持通过以下方式配置：
 
 ```bash
 # 基本启动
-java -jar luban-rds-bin-1.0.0.jar
+java -jar luban-rds-jar-with-dependencies.jar
 
 # 带配置文件启动
-java -jar luban-rds-bin-1.0.0.jar --config /path/to/luban-rds.conf
+java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf
 ```
 
 ## 3. 使用问题
@@ -151,6 +151,8 @@ rdbfilename dump.rdb
 dir /data
 ```
 
+> 说明：`save 900 1` 等是 Redis 兼容写法（被识别为可选项保留）。Luban-RDS 实际的主配置项为 `luban.rds.server.rdb-save-interval`（秒），用于触发周期快照。
+
 **AOF 配置**：
 ```conf
 aof-enabled yes
@@ -222,9 +224,9 @@ tcp-keepalive 300
 1. 添加依赖：
    ```xml
    <dependency>
-       <groupId>com.janeluo</groupId>
+       <groupId>com.janeluo.luban</groupId>
        <artifactId>luban-rds-spring-boot-starter</artifactId>
-       <version>1.0.1</version>
+       <version>1.0.8</version>
    </dependency>
    ```
 
@@ -237,7 +239,7 @@ tcp-keepalive 300
 3. 注入使用：
    ```java
    @Autowired
-   private StringRedisTemplate redisTemplate;
+   private LubanRdsClient redisTemplate;
    ```
 
 ## 8. 故障排查
@@ -307,6 +309,6 @@ tcp-keepalive 300
 
 ## 10. 下一步
 
- - [更新日志](/changelog)：了解版本更新内容
- - [路线图](https://github.com/janeluo/luban-rds)：了解未来规划
- - [相关资源](https://github.com/janeluo/luban-rds)：获取相关学习资源
+ - [更新日志](../changelog.md)：了解版本更新内容
+ - [路线图](https://github.com/LUBAN-RDS/luban-rds)：了解未来规划
+ - [相关资源](https://github.com/LUBAN-RDS/luban-rds)：获取相关学习资源

@@ -32,7 +32,7 @@ if (condition) {
 
 ### 1.2 行宽
 
-- **最大行宽**：每行代码不超过 100 个字符
+- **最大行宽**：每行代码不超过 120 个字符（与 `standards.md` 一致）
 - **换行原则**：当一行代码超过最大行宽时，应进行合理换行
 - **换行位置**：在操作符之前换行，保持操作符在新行的开头
 
@@ -45,7 +45,7 @@ public void doSomething(String param1, String param2, String param3,
     // 方法体
 }
 
-// 错误（行宽超过 100 字符）
+// 错误（行宽超过 120 字符）
 public void doSomething(String param1, String param2, String param3, int param4, int param5, String param6, String param7) {
     // 方法体
 }
@@ -696,21 +696,21 @@ public void testCommandHandler() {
 ### 7.1 IDE 配置
 
 - **IntelliJ IDEA**：
-  - 导入项目根目录下的 `.editorconfig` 文件
-  - 在 `File > Settings > Editor > Code Style > Java` 中配置代码风格
+  - 在 `File > Settings > Editor > Code Style > Java` 中按本文规范（4 空格缩进、120 行宽）配置代码风格
   - 启用 `Reformat Code` 和 `Optimize Imports` 功能
+  - 当前仓库根目录未提供 `.editorconfig`，如团队需要可在 `pom.xml` 中引入 `editorconfig-maven-plugin` 后再添加该文件
 
 - **Eclipse**：
-  - 导入项目根目录下的 `eclipse-formatter.xml` 文件
   - 在 `Window > Preferences > Java > Code Style > Formatter` 中配置代码风格
   - 启用自动格式化功能
+  - 当前仓库根目录未提供 `eclipse-formatter.xml`，可由 IDE 自行导出
 
 ### 7.2 构建工具配置
 
 - **Maven**：
-  - 使用 `maven-compiler-plugin` 配置 Java 版本
+  - 使用 `maven-compiler-plugin` 配置 Java 版本（父 `pom.xml` 已统一为 `source/target=17`）
   - 使用 `maven-surefire-plugin` 配置测试
-  - 使用 `maven-checkstyle-plugin` 检查代码风格
+  - 当前仓库未启用 `maven-checkstyle-plugin` / `maven-pmd-plugin` / `spotbugs-maven-plugin`
 
 **示例**：
 
@@ -720,8 +720,8 @@ public void testCommandHandler() {
     <artifactId>maven-compiler-plugin</artifactId>
     <version>3.8.1</version>
     <configuration>
-        <source>1.8</source>
-        <target>1.8</target>
+        <source>17</source>
+        <target>17</target>
         <encoding>UTF-8</encoding>
     </configuration>
 </plugin>
@@ -729,22 +729,17 @@ public void testCommandHandler() {
 
 ### 7.3 代码检查工具
 
-- **Checkstyle**：检查代码风格和规范
-- **PMD**：检查潜在的代码问题
-- **FindBugs**：检查潜在的 bug
-- **SonarQube**：综合代码质量分析
+当前仓库 `pom.xml` 未引入 Checkstyle / PMD / FindBugs / SonarQube 相关插件。如需启用，推荐使用 `SpotBugs`（FindBugs 的继任者）替代 FindBugs。可选插件：
 
-**示例**：
+- **SpotBugs**（`com.github.spotbugs:spotbugs-maven-plugin`）：静态字节码分析，FindBugs 的替代品
+- **Checkstyle**（`org.apache.maven.plugins:maven-checkstyle-plugin`）：代码风格校验
+- **PMD**（`org.apache.maven.plugins:maven-pmd-plugin`）：潜在问题检测
+
+**示例**（启用 SpotBugs 后）：
 
 ```bash
-# 运行 Checkstyle
-mvn checkstyle:check
-
-# 运行 PMD
-mvn pmd:check
-
-# 运行 FindBugs
-mvn findbugs:check
+# 运行 SpotBugs 分析
+mvn spotbugs:check
 ```
 
 ## 8. 常见错误和最佳实践

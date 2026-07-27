@@ -47,6 +47,7 @@ title: 功能架构
 - **SetCommandHandler** - 集合命令处理
 - **ZSetCommandHandler** - 有序集合命令处理
 - **StreamCommandHandler** - 流命令处理
+- **StreamGroupCommandHandler** - Stream 消费者组命令处理（XREADGROUP、XACK、XPENDING、XCLAIM 等）
 
 ### 2.3 命令执行流程
 
@@ -397,6 +398,15 @@ Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
 | GossipProtocol | Gossip 协议实现，心跳检测和故障发现；节点变更时主动触发配置持久化 |
 | ClusterBusServer | 集群总线服务器，端口 = 服务端口 + 10000 |
 | ClusterCommandHandler | CLUSTER 命令处理器；处理 MEET/FORGET/ADDSLOTS 等命令时通知拓扑变更 |
+| FailoverManager | 故障转移管理器，编排主节点选举与切换流程 |
+| FailureDetector | 故障检测器，基于 Gossip 消息标记 PFAIL/FAIL 状态 |
+| ClusterStateManager | 集群状态管理器，维护节点表与拓扑状态 |
+| ClusterStats | 集群统计信息聚合（节点数、槽位状态、Gossip 计数等） |
+| bus/ | 集群总线通信子包（`ClusterBusClient`、`ClusterBusCodec`、`ClusterBusHandler`、`ClusterBusServer`） |
+| migration/ | 槽位迁移子包（`MigrateCommandHandler`、`SlotMigrationManager`、`MigrationState`、`ExportResult`、`ImportState`） |
+| lifecycle/ | 生命周期子包（`ReplicationLifecycleListener`、`NoOpReplicationLifecycleListener`） |
+| slot/ | 槽位管理子包（`SlotManager`、`DefaultSlotManager`、`SlotUtils`） |
+| node/ | 节点子包（`ClusterNode`、`ClusterNodeState`、`ClusterLink`） |
 
 ### 17.3 槽位管理
 
@@ -416,14 +426,14 @@ Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
 |------|----------|
 | CLUSTER INFO | 集群状态信息（含 `cluster_enabled`） |
 | CLUSTER NODES | 节点列表和槽位分配（裸 `\n` 行尾，兼容 Redisson） |
-| CLUSTER MEET ip port | 添加节点到集群（v1.0.2 修复装配缺陷与临时 ID 解析） |
+| CLUSTER MEET ip port | 添加节点到集群（修复装配缺陷与临时 ID 解析） |
 | CLUSTER FORGET nodeid | 从集群移除节点 |
 | CLUSTER ADDSLOTS slot [...] | 分配槽位 |
 | CLUSTER SETSLOT slot NODE nodeid | 设置槽位归属 |
 | CLUSTER KEYSLOT key | 计算键的槽位 |
 | CLUSTER REPLICATE nodeid | 配置为从节点 |
 | CLUSTER FAILOVER | 手动故障转移 |
-| CLUSTER SLOTS | 返回当前槽位分布数组（v1.0.2 完整实现） |
+| CLUSTER SLOTS | 返回当前槽位分布数组（完整实现） |
 
 ### 17.5 重定向机制
 
@@ -455,11 +465,11 @@ Executor traceableExecutor = TraceableExecutor.wrap(rawExecutor);
 - Jedis Cluster（完整兼容）
 - Lettuce Cluster（完整兼容）
 - Redisson Cluster（完整兼容，`CLUSTER NODES` 行尾修复后）
-- `redis-cli --cluster create`（v1.0.2+ 完整兼容，不再卡在 `Waiting for the cluster to join`）
+- `redis-cli --cluster create`（完整兼容，不再卡在 `Waiting for the cluster to join`）
 
-### 17.8 集群配置持久化与节点状态恢复（v1.0.4+）
+### 17.8 集群配置持久化与节点状态恢复
 
-v1.0.4 实现了对标 Redis 7 的集群配置持久化与节点状态恢复机制，节点重启后无需重新执行 `MEET`/`ADDSLOTS` 等初始化操作。
+集群配置持久化与节点状态恢复机制对标 Redis 7，节点重启后无需重新执行 `MEET`/`ADDSLOTS` 等初始化操作。
 
 **核心机制**：
 
@@ -472,7 +482,7 @@ v1.0.4 实现了对标 Redis 7 的集群配置持久化与节点状态恢复机�
 | 状态恢复加载 | 启动时从 `nodes.conf` 加载节点列表、槽位分配与 config epoch，复用已有节点 ID |
 | 槽位表重建 | 从恢复的 `ClusterConfig` 重建 `SlotManager` 槽位表，重启即可正常服务请求 |
 | 启动期连接 | 启动时主动 `MEET` 已知节点，避免全集群重启后节点成孤岛 |
-| 兼容旧版格式 | 解析时忽略 `fail` 标志，对 v1.0.0 ~ v1.0.3 已生成的 `nodes.conf` 完全兼容 |
+| 兼容旧版格式 | 解析时忽略 `fail` 标志，对历史版本生成的 `nodes.conf` 完全兼容 |
 
 **持久化触发点**：
 
@@ -500,10 +510,10 @@ f6e5d4c3b2a1 192.168.8.161:9739@19739 master - 0 1234567890 2 connected
 > 运行时状态 `fail` / `fail?` 标志不会被持久化，避免重启后误判节点状态。
 
 **运维建议**：
-- 升级到 v1.0.4 后无需手动干预，旧版 `nodes.conf` 会被自动迁移
+- 升级后无需手动干预，旧版 `nodes.conf` 会被自动迁移
 - 全集群同时重启时建议保持 `cluster-node-timeout` 内的时钟同步，避免节点孤立超时
 
-### 17.9 集群一键搭建 CLI（v1.0.3+）
+### 17.9 集群一键搭建 CLI
 
 `luban-rds-client` 模块自带 `RedisCliMain`，对齐 `redis-cli --cluster create` 子集，可在不引入外部编排脚本的情况下远程搭建集群。
 
@@ -517,7 +527,7 @@ f6e5d4c3b2a1 192.168.8.161:9739@19739 master - 0 1234567890 2 connected
 | `ReplySupport` | RESP 协议回复判定工具 |
 | `ClusterSetupException` | 统一异常类型 |
 
-**关键修复（v1.0.2 → v1.0.3）**：
+**关键修复**：
 
 | 修复 | 影响 |
 |------|------|
@@ -527,18 +537,62 @@ f6e5d4c3b2a1 192.168.8.161:9739@19739 master - 0 1234567890 2 connected
 | `CLUSTER NODES` 行尾改裸 `\n` | Redisson `ClusterNodesDecoder` 不再抛 `NumberFormatException` |
 | `ClusterSetupCommand` 静默模式 | 进度输出可控，便于批量部署 |
 
-## 18. 总结
+## 18. 哨兵模式
 
-Luban-RDS 的功能架构设计具有以下特点：
+### 18.1 哨兵概述
 
-- 模块化：清晰的模块划分，便于维护和扩展
-- 高性能：基于 Netty 的 NIO 服务器，支持高并发
-- 兼容性：完全兼容 Redis 协议，可直接使用 Redis 客户端
-- 可靠性：支持持久化、备份和恢复机制
-- 安全性：Lua 脚本沙箱，超时控制，操作计数
-- 可观测性：分布式追踪支持，全链路 TraceId 追踪
-- 扩展性：支持命令扩展、存储扩展和插件系统
-- 易用性：提供 Spring Boot 集成，便于在 Spring 应用中使用
+**核心功能**：基于 Redis Sentinel 协议实现主从集群的自动故障检测与故障转移，提供高可用能力。
+
+**适用场景**：
+- 一主多从的复制拓扑需要自动主从切换
+- 业务侧希望由独立哨兵进程统一管理主节点健康
+
+### 18.2 核心组件
+
+| 组件 | 功能描述 |
+|------|----------|
+| `SentinelManager` | 哨兵管理器，负责被监控主从集合的注册、心跳调度、状态维护 |
+| `SentinelServerHandler` | 哨兵节点网络层处理器，处理 Sentinel 协议命令（`PING`/`SUBSCRIBE`/`SENTINEL` 等） |
+| `Sentinel` | 哨兵节点实例，描述单个哨兵的 ID、地址、配置 |
+| `SentinelInstance` | 哨兵之间互相发现与通信的实例对象 |
+| `SentinelState` | 哨兵运行期状态枚举（启动中、监控中、领导、故障转移中） |
+| `SentinelConfig` | 哨兵配置（监控主节点、quorum、down-after-milliseconds 等参数） |
+| `SentinelCommandHandler` | 哨兵协议命令处理器 |
+| `SentinelStats` | 哨兵运行时统计 |
+| `SentinelUtils` | 哨兵相关工具方法 |
+| `FailoverManager` | 故障转移管理器，编排主节点选举、切换、配置广播 |
+| `FailoverProcess` | 单次故障转移流程状态机 |
+| `SlaveElection` | 从节点选举算法，按优先级与复制偏移挑选新主 |
+| `NodeMonitor` | 节点监控任务，定期向被监控主从发送心跳 |
+| `HealthChecker` | 健康检查器 |
+| `QuorumChecker` | quorum 仲裁，判断客观下线 |
+| `NodeResponseHandler` | 节点心跳响应处理 |
+
+### 18.3 哨兵子包
+
+| 子包 | 职责 |
+|------|------|
+| `core/` | 哨兵核心运行时（`Sentinel`、`SentinelManager`、`SentinelServerHandler`、`SentinelState`、`SentinelInstance`、`MasterState`、`SlaveState`、`NodeState`、`FailoverState`） |
+| `config/` | 哨兵配置（`SentinelConfig`、`SentinelConstants`） |
+| `failover/` | 故障转移（`FailoverManager`、`FailoverProcess`、`SlaveElection`） |
+| `handler/` | 哨兵协议命令处理（`SentinelCommandHandler`） |
+| `monitor/` | 节点监控（`NodeMonitor`、`HealthChecker`、`NodeResponseHandler`、`QuorumChecker`） |
+| `util/` | 工具与统计（`SentinelUtils`、`SentinelStats`） |
+
+### 18.4 故障检测与转移
+
+**主观下线（SDOWN）**：
+- 单个哨兵在 `down-after-milliseconds` 内未收到主节点有效响应，标记为 SDOWN。
+
+**客观下线（ODOWN）**：
+- 达到 `quorum` 数量的哨兵同时认为主节点 SDOWN，标记为 ODOWN。
+
+**故障转移**：
+1. 哨兵集群在所有在线从节点中按优先级与复制偏移选举新主
+2. 向新主发送 `SLAVEOF NO ONE`
+3. 向其他从节点发送 `SLAVEOF <new-master>` 重新指向新主
+4. 旧主恢复后被自动切换为新主的从节点
+5. 通过 Pub/Sub 广播配置变更（`+switch-master`）
 
 ## 19. 主从复制
 
@@ -554,6 +608,19 @@ Luban-RDS 的功能架构设计具有以下特点：
 | SlaveReplicationService | 从节点复制服务，负责与主节点建立连接和同步数据 |
 | ReplicationBacklog | 复制积压缓冲区，用于增量同步 |
 | ReplicationCommandHandler | 处理复制相关命令（SLAVEOF、PSYNC、REPLCONF） |
+| ReplicationController | 复制控制器，统一编排主从握手、PSYNC、RDB 传输、命令流应用 |
+| ReplicationState | 复制状态机，描述从节点各阶段（DISCONNECTED/CONNECTING/HANDSHAKE/FULL_SYNC/PARTIAL_SYNC/ONLINE） |
+| ReplicationCallback | 复制回调接口，抽象主从同步过程的关键节点通知 |
+| ReplicationStreamApplier | 复制流应用器，将主节点发来的增量命令写入从节点存储 |
+| SlaveReplicationClient | 从节点侧与主节点通信的 Netty 客户端 |
+| WaitCommandExecutor | `WAIT` 命令执行器，等待指定副本确认到指定偏移 |
+| ReplicationLagMonitor | 复制延迟监控器，统计从节点落后主节点的字节数与时间 |
+| LoadProgressMonitor | 全量加载进度监控，跟踪 RDB 加载完成度 |
+| RdbSnapshotGenerator | RDB 快照生成器，序列化主节点全量数据 |
+| RdbDataLoader | RDB 数据加载器，在从节点侧解析并应用 RDB 快照 |
+| ReadOnlyModeManager | 只读模式管理器，在从节点尚未同步完成时拒绝写命令 |
+| TransferProgressMonitor / TransferProgressTracker | 传输进度监控与跟踪 |
+| SlaveInfo / ReplicationConstants / ReplicationApplyException | 从节点信息、复制常量与异常定义 |
 
 ### 19.3 复制流程
 

@@ -28,9 +28,9 @@ Luban-RDS 采用 Maven 多模块结构，主要模块包括：
 
 | 项目 | 版本 |
 |------|------|
-| **当前版本** | 1.0.4 |
+| **当前版本** | 1.0.8 |
 | **Java 版本要求** | JDK 17+ |
-| **兼容 Redis 版本** | 6.0+ |
+| **兼容 Redis 版本** | 7.0+ |
 
 ## 快速示例
 
@@ -60,19 +60,20 @@ client.close();
 // <dependency>
 //     <groupId>com.janeluo.luban</groupId>
 //     <artifactId>luban-rds-spring-boot-starter</artifactId>
-//     <version>1.0.4</version>
+//     <version>1.0.8</version>
 // </dependency>
 
-// 使用 RedisTemplate
+// Spring Boot 集成由 `com.janeluo.luban.rds.autoconfigure.LubanRdsAutoConfiguration` 自动装配。
+// 注入 `RedisClient`（由 starter 提供）即可直接调用：
 @Autowired
-private StringRedisTemplate redisTemplate;
+private com.janeluo.luban.rds.client.RedisClient redisClient;
 
 public void setValue(String key, String value) {
-    redisTemplate.opsForValue().set(key, value);
+    redisClient.set(key, value);
 }
 
 public String getValue(String key) {
-    return redisTemplate.opsForValue().get(key);
+    return redisClient.get(key);
 }
 ```
 

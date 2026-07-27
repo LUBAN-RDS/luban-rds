@@ -245,6 +245,7 @@ EXEC
 ```java
 // 使用管道
 RedisClient client = new NettyRedisClient("localhost", 9736);
+client.connect();
 
 // 开始管道
 client.pipelined();
@@ -257,7 +258,7 @@ for (int i = 0; i < 1000; i++) {
 // 执行并获取结果
 List<Object> results = client.sync();
 
-client.close();
+client.disconnect();
 ```
 
 **性能提升**：
@@ -353,7 +354,7 @@ requirepass your-secure-password
 
 ```bash
 # 连接时提供密码
-redis-cli -a your-password
+redis-cli -p 9736 -a your-password
 
 # 连接后认证
 AUTH your-password
@@ -381,33 +382,46 @@ Luban-RDS 提供了 Spring Boot starter 模块，方便在 Spring Boot 应用中
 <dependency>
     <groupId>com.janeluo.luban</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.1</version>
+    <version>1.0.8</version>
 </dependency>
 ```
 
 ### 8.2 配置属性
 
+Starter 的 `@ConfigurationProperties` 前缀为 `luban.rds`（参见 `LubanRdsProperties.java`）。常用配置项如下：
+
 ```yaml
-spring:
-  luban:
-    rds:
-      port: 9736
+luban:
+  rds:
+    enabled: true          # 是否启用嵌入式 server（默认 true）
+    port: 9736             # server 监听端口
+    host: 0.0.0.0          # server 绑定地址
+    # 客户端连接参数（仅当 luban.rds.client.enabled=true 时生效）
+  rds:
+    client:
+      enabled: true
       host: localhost
+      port: 9736
       password: your-password
 ```
+
+> 当前 starter 仅提供 `autoconfigure/` 自动配置模块，未提供 `RedisTemplate` 风格的 `template/` 包，注入的是 `com.janeluo.luban.rds.client.RedisClient` / `NettyRedisClient`。
 
 ### 8.3 使用示例
 
 ```java
 @Autowired
-private StringRedisTemplate redisTemplate;
+private RedisClient redisClient;
+
+// 启动时建立连接（也可在使用前再 connect）
+redisClient.connect();
 
 public void setValue(String key, String value) {
-    redisTemplate.opsForValue().set(key, value);
+    redisClient.set(key, value);
 }
 
 public String getValue(String key) {
-    return redisTemplate.opsForValue().get(key);
+    return redisClient.get(key);
 }
 ```
 

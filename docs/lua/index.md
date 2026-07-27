@@ -53,10 +53,10 @@ EVAL "local sum = 0; for i=1, #ARGV do sum = sum + tonumber(ARGV[i]) end; return
 ```bash
 # 加载脚本
 SCRIPT LOAD "return redis.call('GET', KEYS[1])"
-# 返回: "a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c"
+# 返回（占位示例，请以实际 SCRIPT LOAD 输出为准）: "<40 位 SHA1 十六进制字符串>"
 
 # 执行缓存的脚本
-EVALSHA "a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c" 1 name
+EVALSHA "<40 位 SHA1 十六进制字符串>" 1 name
 ```
 
 ## 应用场景

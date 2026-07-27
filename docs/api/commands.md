@@ -10,15 +10,23 @@ title: 命令列表
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
-| **SET** | `SET key value [EX seconds] [PX milliseconds] [NXXX]` | 设置字符串值 |
+| **SET** | `SET key value [EX seconds] [PX milliseconds] [NX|XX]` | 设置字符串值 |
 | **GET** | `GET key` | 获取字符串值 |
+| **SETNX** | `SETNX key value` | 键不存在时设置（等价于 `SET key value NX`） |
+| **SETEX** | `SETEX key seconds value` | 设置并以秒为单位设置过期时间 |
+| **PSETEX** | `PSETEX key milliseconds value` | 设置并以毫秒为单位设置过期时间 |
+| **GETSET** | `GETSET key value` | 设置新值并返回旧值 |
+| **SETRANGE** | `SETRANGE key offset value` | 从 offset 起覆盖写入 |
+| **GETRANGE** | `GETRANGE key start end` | 返回子串（旧名 `SUBSTR`） |
 | **INCR** | `INCR key` | 原子递增 |
 | **DECR** | `DECR key` | 原子递减 |
 | **INCRBY** | `INCRBY key increment` | 按指定值递增 |
 | **DECRBY** | `DECRBY key decrement` | 按指定值递减 |
+| **INCRBYFLOAT** | `INCRBYFLOAT key increment` | 按指定浮点数递增 |
 | **APPEND** | `APPEND key value` | 追加字符串 |
 | **STRLEN** | `STRLEN key` | 获取字符串长度 |
 | **MSET** | `MSET key value [key value ...]` | 同时设置一个或多个键值对 |
+| **MSETNX** | `MSETNX key value [key value ...]` | 仅当所有键都不存在时批量设置 |
 | **MGET** | `MGET key [key ...]` | 获取所有(一个或多个)给定键的值 |
 
 **示例**：
@@ -37,7 +45,7 @@ STRLEN message
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
-| **HSET** | `HSET key field value` | 设置哈希字段 |
+| **HSET** | `HSET key field value [field value ...]` | 设置一个或多个哈希字段 |
 | **HSETNX** | `HSETNX key field value` | 当字段不存在时设置 |
 | **HGET** | `HGET key field` | 获取哈希字段 |
 | **HGETALL** | `HGETALL key` | 获取所有哈希字段 |
@@ -46,9 +54,12 @@ STRLEN message
 | **HKEYS** | `HKEYS key` | 获取所有字段名 |
 | **HVALS** | `HVALS key` | 获取所有字段值 |
 | **HLEN** | `HLEN key` | 获取字段数量 |
+| **HINCRBY** | `HINCRBY key field increment` | 对整数字段做自增 |
+| **HINCRBYFLOAT** | `HINCRBYFLOAT key field increment` | 对数字字段按浮点自增 |
 | **HSCAN** | `HSCAN key cursor [MATCH pattern] [COUNT count]` | 迭代遍历字段，返回 `[cursor, [field,value,...]]` |
-| **HMSET** | `HMSET key field value [field value ...]` | 同时将多个 field-value (域-值)对设置到哈希表 key 中 |
+| **HMSET** | `HMSET key field value [field value ...]` | 同时将多个 field-value (域-值)对设置到哈希表 key 中（Redis 4.0 起已弃用，建议使用 HSET） |
 | **HMGET** | `HMGET key field [field ...]` | 获取哈希表中所有给定字段的值 |
+| **HRANDFIELD** | `HRANDFIELD key [count] [WITHVALUES]` | 随机返回字段（可选带值） |
 
 **示例**：
 ```bash
@@ -145,9 +156,18 @@ LPUSH task_queue "task1"
 | **SREM** | `SREM key member [member ...]` | 移除集合成员 |
 | **SMEMBERS** | `SMEMBERS key` | 获取所有成员 |
 | **SISMEMBER** | `SISMEMBER key member` | 检查成员是否存在 |
+| **SMISMEMBER** | `SMISMEMBER key member [member ...]` | 批量判断成员是否存在 |
 | **SCARD** | `SCARD key` | 获取成员数量 |
 | **SRANDMEMBER** | `SRANDMEMBER key [count]` | 随机获取成员 |
 | **SPOP** | `SPOP key [count]` | 随机弹出成员 |
+| **SMOVE** | `SMOVE source destination member` | 将成员从 source 移动到 destination |
+| **SINTER** | `SINTER key [key ...]` | 返回所有给定集合的交集 |
+| **SINTERSTORE** | `SINTERSTORE destination key [key ...]` | 交集结果保存到 destination |
+| **SUNION** | `SUNION key [key ...]` | 返回所有给定集合的并集 |
+| **SUNIONSTORE** | `SUNIONSTORE destination key [key ...]` | 并集结果保存到 destination |
+| **SDIFF** | `SDIFF key [key ...]` | 返回集合差集 |
+| **SDIFFSTORE** | `SDIFFSTORE destination key [key ...]` | 差集结果保存到 destination |
+| **SSCAN** | `SSCAN key cursor [MATCH pattern] [COUNT count]` | 迭代遍历集合成员 |
 
 **示例**：
 ```bash
@@ -162,14 +182,25 @@ SPOP tags
 
 | 命令 | 语法 | 说明 |
 |------|------|------|
-| **ZADD** | `ZADD key score member [score member ...]` | 添加有序集合成员 |
-| **ZRANGE** | `ZRANGE key start stop [WITHSCORES]` | 获取范围成员 |
+| **ZADD** | `ZADD key [NX|XX] [GT|LT] [CH] [INCR] score member [score member ...]` | 添加有序集合成员 |
 | **ZSCORE** | `ZSCORE key member` | 获取成员分数 |
-| **ZREM** | `ZREM key member [member ...]` | 移除成员 |
+| **ZMSCORE** | `ZMSCORE key member [member ...]` | 批量获取成员分数 |
 | **ZCARD** | `ZCARD key` | 获取成员数量 |
-| **ZREVRANGE** | `ZREVRANGE key start stop [WITHSCORES]` | 倒序获取范围成员 |
+| **ZREM** | `ZREM key member [member ...]` | 移除成员 |
+| **ZRANGE** | `ZRANGE key start stop [BYSCORE|BYLEX] [REV] [LIMIT offset count] [WITHSCORES]` | 按索引/分数/字典序获取成员（Redis 6.2+ 语法） |
+| **ZREVRANGE** | `ZREVRANGE key start stop [WITHSCORES]` | 倒序按索引获取范围成员（建议改用 `ZRANGE ... REV`） |
 | **ZRANGEBYSCORE** | `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]` | 按分数范围获取 |
+| **ZREVRANGEBYSCORE** | `ZREVRANGEBYSCORE key max min [WITHSCORES] [LIMIT offset count]` | 按分数倒序获取 |
+| **ZRANGEBYLEX** | `ZRANGEBYLEX key min max [LIMIT offset count]` | 按字典序获取 |
+| **ZREVRANGEBYLEX** | `ZREVRANGEBYLEX key max min [LIMIT offset count]` | 按字典序倒序获取 |
+| **ZRANK** | `ZRANK key member` | 获取成员升序排名 |
+| **ZREVRANK** | `ZREVRANK key member` | 获取成员降序排名 |
 | **ZINCRBY** | `ZINCRBY key increment member` | 增加成员分数 |
+| **ZCOUNT** | `ZCOUNT key min max` | 统计分数区间内成员数 |
+| **ZLEXCOUNT** | `ZLEXCOUNT key min max` | 统计字典序区间内成员数 |
+| **ZPOPMAX** | `ZPOPMAX key [count]` | 弹出分数最高的成员 |
+| **ZPOPMIN** | `ZPOPMIN key [count]` | 弹出分数最低的成员 |
+| **ZSCAN** | `ZSCAN key cursor [MATCH pattern] [COUNT count]` | 迭代遍历有序集合成员 |
 
 **示例**：
 ```bash
@@ -275,22 +306,42 @@ Stream 中的每个消息都有一个唯一的 ID，格式为 `<millisecondsTime
 |------|------|------|
 | **EXISTS** | `EXISTS key [key ...]` | 检查键是否存在 |
 | **DEL** | `DEL key [key ...]` | 删除键 |
-| **EXPIRE** | `EXPIRE key seconds` | 设置过期时间 |
-| **TTL** | `TTL key` | 获取剩余生存时间 |
-| **FLUSHALL** | `FLUSHALL` | 清空所有数据库 |
-| **FLUSHDB** | `FLUSHDB` | 清空当前数据库 |
+| **UNLINK** | `UNLINK key [key ...]` | 异步回收内存版 DEL |
+| **EXPIRE** | `EXPIRE key seconds [NX|XX|GT|LT]` | 设置过期时间（支持选项） |
+| **EXPIREAT** | `EXPIREAT key unix-time-seconds` | 在指定 Unix 时间过期 |
+| **PEXPIRE** | `PEXPIRE key milliseconds [NX|XX|GT|LT]` | 以毫秒为单位设置过期时间 |
+| **PEXPIREAT** | `PEXPIREAT key unix-time-milliseconds` | 毫秒精度的 Unix 时间过期 |
+| **TTL** | `TTL key` | 获取剩余生存时间（秒） |
+| **PTTL** | `PTTL key` | 获取剩余生存时间（毫秒） |
+| **PERSIST** | `PERSIST key` | 移除键的过期时间 |
+| **EXPIRETIME** | `EXPIRETIME key` | 返回键过期的 Unix 时间（Redis 7.0+） |
+| **PEXPIRETIME** | `PEXPIRETIME key` | 返回键过期的毫秒时间（Redis 7.0+） |
+| **FLUSHALL** | `FLUSHALL [ASYNC]` | 清空所有数据库 |
+| **FLUSHDB** | `FLUSHDB [ASYNC]` | 清空当前数据库 |
 | **TYPE** | `TYPE key` | 获取键类型 |
 | **ECHO** | `ECHO message` | 回显字符串 |
+| **PING** | `PING [message]` | 测试连接是否可用 |
+| **HELLO** | `HELLO [protover [AUTH password]]` | 切换协议版本（RESP2/RESP3）并可携带鉴权 |
 | **SELECT** | `SELECT index` | 选择数据库 |
 | **INFO** | `INFO [section]` | 获取服务器信息和统计数据。支持的 section 包括：Server, Clients, Memory, Persistence, Stats, Replication, CPU, Commandstats, Cluster, Keyspace 等。如果不指定 section，默认返回所有信息。 |
-| **SCAN** | `SCAN cursor [MATCH pattern] [COUNT count]` | 遍历键 |
+| **SCAN** | `SCAN cursor [MATCH pattern] [COUNT count] [TYPE type]` | 遍历键（Redis 6+ 支持 TYPE） |
 | **DBSIZE** | `DBSIZE` | 获取数据库键数量 |
 | **TIME** | `TIME` | 获取服务器时间 |
 | **LASTSAVE** | `LASTSAVE` | 获取最后保存时间 |
 | **BGREWRITEAOF** | `BGREWRITEAOF` | 后台重写 AOF |
-| **BGSAVE** | `BGSAVE` | 后台保存 |
+| **BGSAVE** | `BGSAVE [SCHEDULE]` | 后台保存 |
 | **SAVE** | `SAVE` | 同步保存 |
 | **QUIT** | `QUIT` | 返回 `+OK\r\n` 后关闭连接 |
+| **SHUTDOWN** | `SHUTDOWN [NOSAVE|SAVE]` | 关闭服务器 |
+| **DEBUG** | `DEBUG subcommand [args]` | 调试命令（如 `DEBUG SLEEP`、`DEBUG OBJECT`） |
+| **COMMAND** | `COMMAND` | 返回所有命令详情 |
+| **COMMAND COUNT** | `COMMAND COUNT` | 返回命令总数 |
+| **COMMAND INFO** | `COMMAND INFO command [command ...]` | 查询指定命令的元信息 |
+| **COMMAND GETKEYS** | `COMMAND GETKEYS command args...` | 提取命令中的 key 列表 |
+| **CONFIG GET** | `CONFIG GET parameter` | 读取配置参数 |
+| **CONFIG SET** | `CONFIG SET parameter value` | 动态设置配置参数 |
+| **CONFIG REWRITE** | `CONFIG REWRITE` | 重写配置文件 |
+| **CONFIG RESETSTAT** | `CONFIG RESETSTAT` | 重置统计信息 |
 
 **示例**：
 ```bash
@@ -518,8 +569,10 @@ Luban-RDS 完整支持 Redis Cluster 协议，提供完整的集群管理命令�
 | **CLUSTER GETKEYSINSLOT** | `CLUSTER GETKEYSINSLOT slot count` | 获取槽位中的键列表 |
 | **CLUSTER REPLICATE** | `CLUSTER REPLICATE nodeid` | 将当前节点配置为指定节点的从节点 |
 | **CLUSTER FAILOVER** | `CLUSTER FAILOVER [FORCE\|TAKEOVER]` | 手动触发故障转移 |
-| **CLUSTER RESET** | `CLUSTER RESET [HARD\|SOFT]` | 重置集群状态 |
 | **CLUSTER SAVECONFIG** | `CLUSTER SAVECONFIG` | 保存集群配置到文件 |
+| **CLUSTER FLUSHSLOTS** | `CLUSTER FLUSHSLOTS` | 清空当前节点所有槽位分配 |
+| **CLUSTER BUMPEPOCH** | `CLUSTER BUMPEPOCH` | 自增当前节点 epoch |
+| **CLUSTER SET-CONFIG-EPOCH** | `CLUSTER SET-CONFIG-EPOCH epoch` | 为新建节点设置 config epoch |
 | **CLUSTER SLAVES** | `CLUSTER SLAVES nodeid` | 获取指定节点的从节点列表 |
 | **CLUSTER REPLICAS** | `CLUSTER REPLICAS nodeid` | 获取指定节点的副本列表 |
 | **CLUSTER MYID** | `CLUSTER MYID` | 获取当前节点的 ID |
@@ -528,6 +581,8 @@ Luban-RDS 完整支持 Redis Cluster 协议，提供完整的集群管理命令�
 | **ASKING** | `ASKING` | 发送 ASKING 标记（用于 ASK 重定向） |
 | **READONLY** | `READONLY` | 启用从节点只读模式 |
 | **READWRITE** | `READWRITE` | 禁用从节点只读模式 |
+
+> 备注：`CLUSTER RESET [HARD\|SOFT]` 在 1.0.8 版本中尚未实现，调用将返回 `-ERR unsupported command` 类型的错误，不在本表列出。
 
 **示例**：
 ```bash
@@ -615,8 +670,12 @@ Luban-RDS 支持完整的 Redis 主从复制协议，提供复制相关的命令
 |------|------|------|
 | **SLAVEOF** | `SLAVEOF host port` | 将当前节点设置为指定主节点的从节点 |
 | **SLAVEOF** | `SLAVEOF NO ONE` | 取消从节点身份，成为主节点 |
+| **REPLICAOF** | `REPLICAOF host port` | Redis 5+ 起为 `SLAVEOF` 的别名，含义相同 |
+| **REPLICAOF** | `REPLICAOF NO ONE` | 取消副本身份（同 `SLAVEOF NO ONE`） |
 | **PSYNC** | `PSYNC replid offset` | 部分同步命令，用于从节点与主节点同步数据 |
+| **SYNC** | `SYNC` | 旧版完整同步命令（出于兼容性保留） |
 | **REPLCONF** | `REPLCONF option value` | 复制配置命令，用于从节点向主节点发送配置信息 |
+| **WAIT** | `WAIT numreplicas timeout` | 阻塞等待指定副本确认写入 |
 | **ROLE** | `ROLE` | 查看当前节点的角色和复制状态 |
 
 **示例**：

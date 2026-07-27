@@ -35,7 +35,7 @@ title: 故障排查
    grep "port" /path/to/luban-rds.conf
    
    # 检查绑定地址配置
-   grep "host" /path/to/luban-rds.conf
+   grep "bind" /path/to/luban-rds.conf
    ```
 
 3. **检查防火墙**：
@@ -57,7 +57,7 @@ title: 故障排查
    ```
 
 **解决方案**：
-- 启动服务：`java -jar luban-rds-bin-1.0.4.jar`
+- 启动服务：`java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf`
 - 修正端口配置：确保端口未被占用
 - 修正绑定地址：设置为 `0.0.0.0` 允许所有地址访问
 - 配置防火墙：开放 9736 端口
@@ -199,7 +199,7 @@ title: 故障排查
 
 **解决方案**：
 - 增加系统内存
-- 调整 JVM 堆内存：`java -Xms4g -Xmx8g -jar luban-rds-bin-1.0.4.jar`
+- 调整 JVM 堆内存：`java -Xms4g -Xmx8g -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf`
 - 减少数据量：删除不必要的数据
 - 调整 `maxmemory` 限制：设置为系统内存的 70-80%
 
@@ -265,7 +265,8 @@ title: 故障排查
 
 2. **检查命令重命名配置**：
    ```bash
-   redis-cli -h localhost -p 9736 CONFIG GET "rename-command"
+   # Luban-RDS 当前未实现 rename-command；若配置文件中存在该指令，启动时会被忽略并告警
+   grep "rename-command" /path/to/luban-rds.conf
    ```
 
 3. **检查认证状态**：
@@ -292,7 +293,7 @@ title: 故障排查
 1. **检查脚本内容**：确保脚本语法正确
 2. **检查脚本执行时间**：
    ```bash
-   redis-cli -h localhost -p 9736 CONFIG GET lua-time-limit
+   redis-cli -h localhost -p 9736 CONFIG GET lua-timeout
    ```
 
 3. **检查脚本内存使用**：
@@ -302,7 +303,7 @@ title: 故障排查
 
 **解决方案**：
 - 修正脚本语法错误
-- 增加脚本执行时间限制：`CONFIG SET lua-time-limit 10000`
+- 增加脚本执行时间限制：`CONFIG SET lua-timeout 10000`
 - 优化脚本：减少复杂度和执行时间
 - 检查沙箱配置：确保脚本有权限执行所需操作
 
@@ -419,7 +420,7 @@ title: 故障排查
 - 增加内存：避免内存溢出
 - 升级版本：修复已知 bug
 - 检查硬件：确保硬件正常
-- 重启服务：`java -jar luban-rds-bin-1.0.4.jar`
+- 重启服务：`java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf`
 
 ### 5.2 服务启动失败
 
@@ -439,7 +440,9 @@ title: 故障排查
 
 2. **检查配置文件**：
    ```bash
-   redis-cli -h localhost -p 9736 --test-config --config /path/to/luban-rds.conf
+   # Luban-RDS 当前未提供 --test-config 开关。
+   # 建议：先用配置文件启动一次，观察启动日志中是否有解析错误。
+   java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf
    ```
 
 3. **检查持久化文件**：
@@ -579,13 +582,13 @@ title: 故障排查
 
 2. **检查绑定地址**：
    ```bash
-   redis-cli -h localhost -p 9736 CONFIG GET host
+   redis-cli -h localhost -p 9736 CONFIG GET bind
    ```
 
 **解决方案**：
 - 设置强密码：`CONFIG SET requirepass YourStrongPassword123!`
-- 限制绑定地址：`CONFIG SET host 127.0.0.1`
-- 禁用危险命令：`CONFIG SET rename-command FLUSHALL ""`
+- 限制绑定地址：修改配置文件中 `bind 127.0.0.1` 并重启（`CONFIG SET bind` 当前不支持热更新）
+- 禁用危险命令：Luban-RDS 当前不提供 `rename-command`，请通过网络层与 ACL 配合
 
 ### 7.2 命令注入
 
@@ -602,14 +605,14 @@ title: 故障排查
    redis-cli -h localhost -p 9736 CONFIG GET lua-sandbox-enabled
    ```
 
-2. **检查命令重命名**：
+2. **检查命令重命名**（Luban-RDS 未实现）：
    ```bash
-   redis-cli -h localhost -p 9736 CONFIG GET "rename-command"
+   grep "rename-command" /path/to/luban-rds.conf
    ```
 
 **解决方案**：
 - 启用 Lua 沙箱：`CONFIG SET lua-sandbox-enabled true`
-- 禁用危险命令：`CONFIG SET rename-command FLUSHALL ""`
+- 禁用危险命令：Luban-RDS 当前不提供 `rename-command`，请通过网络层与 ACL 配合
 - 设置强密码：防止未授权访问
 
 ## 8. 排查工具
@@ -621,7 +624,7 @@ title: 故障排查
 - **CONFIG GET**：获取配置信息
 - **CLIENT LIST**：查看客户端连接详情
 - **SCAN**：迭代遍历键
-- **--bigkeys**：查找大键
+- **--bigkeys**：查找大键（外部 redis-cli 工具能力，服务端通过 `SCAN` 实现）
 - **--latency**：测试延迟
 
 **使用示例**：
@@ -629,12 +632,14 @@ title: 故障排查
 # 查看内存使用
 redis-cli -h localhost -p 9736 INFO memory
 
-# 查找大键
+# 查找大键（依赖外部 redis-cli 工具的 --bigkeys，服务端支持 SCAN）
 redis-cli -h localhost -p 9736 --bigkeys
 
 # 测试延迟
 redis-cli -h localhost -p 9736 --latency
 ```
+
+> 提示：`--bigkeys`、`--latency` 等 redis-cli 增强功能均为客户端工具能力，Luban-RDS 服务端通过标准 RESP 协议提供 `SCAN`、`INFO`、`MONITOR` 等命令；Prometheus 侧的 `redis_exporter` 同样为外部组件，按标准 RESP 协议采集指标。
 
 ### 8.2 系统工具
 
@@ -692,12 +697,12 @@ tail -f /var/log/syslog | grep luban-rds
 **从 RDB 文件恢复**：
 1. **停止服务**：`redis-cli -h localhost -p 9736 SHUTDOWN`
 2. **复制 RDB 文件**：`cp /path/to/backup/dump.rdb /data/`
-3. **启动服务**：`java -jar luban-rds-bin-1.0.4.jar`
+3. **启动服务**：`java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf`
 
 **从 AOF 文件恢复**：
 1. **停止服务**：`redis-cli -h localhost -p 9736 SHUTDOWN`
 2. **复制 AOF 文件**：`cp /path/to/backup/appendonly.aof /data/`
-3. **启动服务**：`java -jar luban-rds-bin-1.0.4.jar`
+3. **启动服务**：`java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf`
 
 ### 9.2 服务恢复
 
@@ -707,14 +712,14 @@ tail -f /var/log/syslog | grep luban-rds
    ```bash
    rm -f /data/dump.rdb /data/appendonly.aof
    ```
-3. **启动服务**：`java -jar luban-rds-bin-1.0.4.jar`
+3. **启动服务**：`java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf`
 4. **导入数据**：从备份或其他来源导入数据
 
 **常规恢复**：
 1. **停止服务**：`redis-cli -h localhost -p 9736 SHUTDOWN`
 2. **检查配置**：确保配置正确
 3. **检查持久化文件**：确保文件完整
-4. **启动服务**：`java -jar luban-rds-bin-1.0.4.jar`
+4. **启动服务**：`java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf`
 5. **验证服务**：`redis-cli -h localhost -p 9736 PING`
 
 ## 10. 预防措施

@@ -9,7 +9,7 @@
 - 不要使用制表符（Tab）
 
 ### 行宽
-- 每行代码不超过 120 个字符
+- 每行代码不超过 120 个字符（与 `code-style.md` 一致）
 - 长行应适当换行，保持代码可读性
 
 ### 空格
@@ -46,7 +46,7 @@
 ### 包名
 - 使用小写字母，单词之间用点分隔
 - 包名应反映代码的组织结构
-- 示例：`com.luban.rds.core`、`com.luban.rds.protocol`
+- 示例：`com.janeluo.luban.rds.core`、`com.janeluo.luban.rds.protocol`、`com.janeluo.luban.rds.server`
 
 ### 枚举名
 - 使用驼峰命名法（PascalCase）
@@ -188,8 +188,8 @@
 - 应在 pom.xml 中配置编译插件，确保代码符合规范
 
 ### 代码质量工具
-- 推荐使用 SonarQube 进行代码质量检查
-- 应定期运行代码质量检查，确保代码质量
+- 当前仓库 `pom.xml` 未启用 SonarQube / Checkstyle / PMD 等静态检查插件；如需启用，推荐按需引入 SpotBugs 或 Checkstyle
+- 应通过 `mvn test` + JaCoCo 覆盖率统计保证基础代码质量
 
 ## 常见问题
 

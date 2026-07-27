@@ -87,6 +87,8 @@
 
 ## 参考书籍
 
+> 以下为参考资料链接（豆瓣读书条目），仅供延伸阅读，不构成项目官方推荐。
+
 - [《Redis 设计与实现》](https://book.douban.com/subject/25900156/) - 黄健宏
 - [《Netty 实战》](https://book.douban.com/subject/26740938/) - Norman Maurer
 - [《Java 并发编程实战》](https://book.douban.com/subject/10484692/) - Brian Goetz

@@ -22,7 +22,7 @@ title: 贡献指南
 
 - **操作系统**：Windows 7+, Linux, macOS
 - **Java 版本**：Java 17+（必需）
-- **Maven**：Maven 3.8+（构建工具）
+- **Maven**：Maven 3.6.3+（构建工具）
 - **Git**：Git 2.20+（版本控制）
 - **IDE**：推荐 IntelliJ IDEA 或 Eclipse
 
@@ -73,19 +73,18 @@ mvn test -Dtest=LuaCommandHandlerTest
 ### 2.5 启动开发服务器
 
 ```bash
-# 启动嵌入式服务器
-java -cp luban-rds-server/target/luban-rds-server-1.0.4.jar com.janeluo.luban.rds.server.EmbeddedRedisServer
+# 启动嵌入式服务器（适用于单元测试 / IDE 内嵌运行）
+java -cp luban-rds-server/target/luban-rds-server-1.0.8.jar com.janeluo.luban.rds.server.EmbeddedRedisServer
 
-# 启动独立服务器
-java -cp luban-rds-bin/target/luban-rds-bin-1.0.4.jar com.janeluo.luban.rds.bin.RedisServerMain
+# 启动独立服务器（推荐：使用 bin 模块 fat JAR，启动入口 com.janeluo.luban.rds.bin.RedisServerMain）
+java -jar luban-rds-bin/target/luban-rds-jar-with-dependencies.jar
 ```
 
 ## 3. 开发流程
 
 ### 3.1 分支管理
 
-- **main**：主分支，包含稳定的代码
-- **develop**：开发分支，集成新功能
+- **master**：主分支，包含稳定的代码（当前仓库的默认分支）
 - **feature/**：功能分支，开发新功能
 - **fix/**：修复分支，修复 bug
 - **release/**：发布分支，准备发布版本
@@ -95,13 +94,13 @@ java -cp luban-rds-bin/target/luban-rds-bin-1.0.4.jar com.janeluo.luban.rds.bin.
 
 1. **Fork 仓库**：在 GitHub/Gitee 上 Fork 代码仓库
 2. **克隆代码**：克隆到本地开发环境
-3. **创建分支**：从 develop 分支创建功能分支或修复分支
+3. **创建分支**：从 `master` 分支创建功能分支或修复分支
 4. **开发代码**：实现功能或修复 bug
 5. **运行测试**：确保测试通过
 6. **提交代码**：提交代码并推送到远程仓库
-7. **创建 PR**：在 GitHub/Gitee 上创建 Pull Request
+7. **创建 PR**：在 GitHub/Gitee 上以 `master` 为目标创建 Pull Request
 8. **代码审查**：等待维护者审查代码
-9. **合并代码**：代码通过审查后合并到主分支
+9. **合并代码**：代码通过审查后合并到 `master`
 
 ### 3.3 提交规范
 
@@ -148,7 +147,7 @@ Closes #123
   - 常量名：全大写，下划线分隔（SNAKE_CASE）
   - 包名：小写，点分隔
 - **缩进**：4 个空格（不使用制表符）
-- **行宽**：每行不超过 100 个字符
+- **行宽**：每行不超过 120 个字符（与 `code-style.md` / `standards.md` 一致）
 - **括号**：使用大括号包裹所有代码块
 - **导入**：按包名排序，使用静态导入时需谨慎
 
@@ -350,7 +349,7 @@ Luban-RDS 项目采用 Apache License 2.0 许可证开源，详细信息请参�
 
 ### 11.1 如何解决构建失败的问题？
 
-- **检查 Java 版本**：确保使用 Java 8+ 版本
+- **检查 Java 版本**：确保使用 Java 17+ 版本（与父 `pom.xml` 中 `maven.compiler.source/target=17` 一致）
 - **检查 Maven 配置**：确保 Maven 配置正确，网络连接正常
 - **清理缓存**：运行 `mvn clean` 清理构建缓存
 - **查看日志**：查看详细的构建日志，定位错误原因
@@ -364,7 +363,7 @@ Luban-RDS 项目采用 Apache License 2.0 许可证开源，详细信息请参�
 
 ### 11.3 如何处理代码冲突？
 
-- **拉取最新代码**：运行 `git pull origin develop` 拉取最新代码
+- **拉取最新代码**：运行 `git pull origin master` 拉取最新代码
 - **解决冲突**：手动编辑冲突文件，解决冲突
 - **标记冲突**：使用 `git add` 标记冲突已解决
 - **提交代码**：提交解决冲突后的代码

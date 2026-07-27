@@ -69,10 +69,10 @@ EVALSHA sha1 numkeys key [key ...] arg [arg ...]
 ```bash
 # 先加载脚本
 SCRIPT LOAD "return redis.call('GET', KEYS[1])"
-# 返回: "a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c"
+# 返回（占位示例，请以实际 SCRIPT LOAD 输出为准）: "<40 位 SHA1 十六进制字符串>"
 
 # 使用 SHA1 执行
-EVALSHA a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c 1 mykey
+EVALSHA <40 位 SHA1 十六进制字符串> 1 mykey
 ```
 
 ### 2.3 SCRIPT 命令族
@@ -88,7 +88,7 @@ EVALSHA a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c 1 mykey
 SCRIPT LOAD "return 'Hello'"
 
 # 检查脚本是否存在
-SCRIPT EXISTS "a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c"
+SCRIPT EXISTS "<40 位 SHA1 十六进制字符串>"
 
 # 清除脚本缓存
 SCRIPT FLUSH
@@ -233,19 +233,6 @@ return #KEYS
 EVAL "for i = 1, #KEYS do redis.call('SET', KEYS[i], ARGV[i]) end; return #KEYS" 3 key1 key2 key3 value1 value2 value3
 ```
 
-## 5. 最佳实践
-
-### 5.1 参数一致性校验
-- 在脚本开头校验 `#KEYS` 与 `#ARGV` 的一致性，避免参数不齐导致运行时错误：
-```lua
-if #KEYS ~= #ARGV then
-  return redis.error_reply('ERR number of keys and values must match')
-end
-```
-
-### 5.2 使用 pcall 保护复杂逻辑
-- 对可能失败的命令使用 `redis.pcall` 包裹，结合错误表判断，增强脚本健壮性。
-
 ### 4.3 列表操作
 
 **场景**：从列表左侧弹出元素，如果列表为空则返回默认值
@@ -353,14 +340,14 @@ EVAL "local top3 = redis.call('ZREVRANGE', KEYS[1], 0, 2, 'WITHSCORES'); return 
 ```bash
 # 1. 加载脚本
 local sha1 = SCRIPT LOAD "return redis.call('GET', KEYS[1])"
-# 返回: "a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c"
+# 返回（占位示例，请以实际 SCRIPT LOAD 输出为准）: "<40 位 SHA1 十六进制字符串>"
 
 # 2. 检查脚本是否存在
-SCRIPT EXISTS "a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c"
+SCRIPT EXISTS "<40 位 SHA1 十六进制字符串>"
 # 返回: 1
 
 # 3. 使用 SHA1 执行
-EVALSHA "a94d8e6e8b8c8e8c8e8c8e8c8e8c8e8c8e8c8e8c" 1 mykey
+EVALSHA "<40 位 SHA1 十六进制字符串>" 1 mykey
 
 # 4. 清除脚本缓存
 SCRIPT FLUSH
@@ -375,7 +362,18 @@ SCRIPT FLUSH
 
 ## 6. 最佳实践
 
-### 6.1 使用脚本缓存
+### 6.1 参数一致性校验
+- 在脚本开头校验 `#KEYS` 与 `#ARGV` 的一致性，避免参数不齐导致运行时错误：
+```lua
+if #KEYS ~= #ARGV then
+  return redis.error_reply('ERR number of keys and values must match')
+end
+```
+
+### 6.2 使用 pcall 保护复杂逻辑
+- 对可能失败的命令使用 `redis.pcall` 包裹，结合错误表判断，增强脚本健壮性。
+
+### 6.3 使用脚本缓存
 
 对于频繁执行的脚本，使用 `SCRIPT LOAD` 和 `EVALSHA` 可以提高性能：
 
@@ -389,7 +387,7 @@ EVALSHA sha1 1 key2
 EVALSHA sha1 1 key3
 ```
 
-### 6.2 错误处理
+### 6.4 错误处理
 
 使用 `redis.pcall()` 进行错误处理：
 
@@ -401,7 +399,7 @@ end
 return result
 ```
 
-### 6.3 参数验证
+### 6.5 参数验证
 
 在脚本开始时验证参数：
 
@@ -415,7 +413,7 @@ if #ARGV < 1 then
 end
 ```
 
-### 6.4 使用局部变量
+### 6.6 使用局部变量
 
 使用局部变量提高性能：
 
@@ -425,7 +423,7 @@ local value = ARGV[1]
 redis.call('SET', key, value)
 ```
 
-### 6.5 避免长时间运行的脚本
+### 6.7 避免长时间运行的脚本
 
 Lua 脚本执行期间会阻塞服务器，避免执行耗时操作：
 
@@ -438,7 +436,7 @@ end
 -- 推荐：分批处理
 ```
 
-### 6.6 合理使用键和参数
+### 6.8 合理使用键和参数
 
 - **键**：使用 `KEYS` 传递所有需要操作的键
 - **参数**：使用 `ARGV` 传递其他参数
@@ -461,12 +459,12 @@ Luban-RDS 支持 Lua 沙箱，可以限制脚本的行为：
 
 ```conf
 # Lua 沙箱配置
-lua.sandbox-enabled=true
-lua.allowed-modules=base,string,table,math
-lua.blocked-functions=os.execute,io.open
-lua.script-timeout-ms=5000
-lua.max-script-bytes=524288
-lua.max-return-bytes=524288
+lua-sandbox-enabled=true
+lua-allowed-modules=base,string,table,math
+lua-blocked-functions=os.execute,io.open
+lua-script-timeout-ms=5000
+lua-max-script-bytes=524288
+lua-max-return-bytes=524288
 ```
 
 ### 7.3 潜在风险

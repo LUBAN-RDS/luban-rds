@@ -8,6 +8,8 @@ title: 使用示例
 
 ## 1. 基本操作示例
 
+> 本章示例使用 Spring Data Redis 风格的 `RedisTemplate` 演示常见模式。Luban-RDS 通过 `luban-rds-spring-boot-starter` 提供 `LubanRdsAutoConfiguration` 自动配置 `RedisClient` Bean；如需直接使用底层 `RedisTemplate` 风格 API，可参考本章示例并搭配第三方 Spring Data Redis 适配层，或在应用侧自行构建 `RedisTemplate` 委托给 `RedisClient`。
+
 ### 1.1 String 类型示例
 
 **场景**：存储用户会话信息
@@ -234,18 +236,28 @@ public void updateUser(User user) {
 
 **场景**：防止并发操作
 
-```java
-// 尝试获取锁
-String lockKey = "lock:order:" + orderId;
-Boolean acquired = redisTemplate.opsForValue().setIfAbsent(lockKey, "", 5, TimeUnit.SECONDS);
+> 推荐使用 **唯一 token + Lua 原子释放** 的安全模式，避免误删其他持有者的锁。
 
-if (acquired) {
+```java
+// 获取锁：唯一 token + 过期时间
+String lockKey = "lock:order:" + orderId;
+String token = UUID.randomUUID().toString();
+Boolean acquired = redisTemplate.opsForValue().setIfAbsent(lockKey, token, 5, TimeUnit.SECONDS);
+
+if (Boolean.TRUE.equals(acquired)) {
     try {
         // 执行业务逻辑
         processOrder(orderId);
     } finally {
-        // 释放锁
-        redisTemplate.delete(lockKey);
+        // 通过 Lua 脚本原子地判断 token 后删除，避免误删其他线程持有的锁
+        String releaseScript =
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then " +
+            "  return redis.call('DEL', KEYS[1]) " +
+            "else " +
+            "  return 0 " +
+            "end";
+        DefaultRedisScript<Long> script = new DefaultRedisScript<>(releaseScript, Long.class);
+        redisTemplate.execute(script, Collections.singletonList(lockKey), token);
     }
 } else {
     // 锁获取失败
@@ -426,27 +438,27 @@ public class RedisUtils {
         return value != null ? JSON.parseObject(value.toString(), clazz) : null;
     }
     
-    // 批量获取
+    // 批量获取（multiGet 返回值类型与 RedisTemplate 序列化器相关，此处明确以 List<String> 为例）
     public <T> Map<String, T> multiGet(Collection<String> keys, Class<T> clazz) {
         Map<String, T> result = new HashMap<>();
-        List<Object> values = redisTemplate.opsForValue().multiGet(keys);
+        List<String> values = redisTemplate.opsForValue().multiGet(keys);
         if (values != null) {
             Iterator<String> keyIter = keys.iterator();
-            Iterator<Object> valueIter = values.iterator();
+            Iterator<String> valueIter = values.iterator();
             while (keyIter.hasNext() && valueIter.hasNext()) {
                 String key = keyIter.next();
-                Object value = valueIter.next();
+                String value = valueIter.next();
                 if (value != null) {
-                    result.put(key, JSON.parseObject(value.toString(), clazz));
+                    result.put(key, JSON.parseObject(value, clazz));
                 }
             }
         }
         return result;
     }
     
-    // 执行 Lua 脚本
-    public <T> T executeScript(String script, List<String> keys, Object... args) {
-        DefaultRedisScript<T> redisScript = new DefaultRedisScript<>(script, null);
+    // 执行 Lua 脚本（需指定返回类型，例如 Long.class / List.class / String.class）
+    public <T> T executeScript(String script, Class<T> returnType, List<String> keys, Object... args) {
+        DefaultRedisScript<T> redisScript = new DefaultRedisScript<>(script, returnType);
         return redisTemplate.execute(redisScript, keys, args);
     }
 }

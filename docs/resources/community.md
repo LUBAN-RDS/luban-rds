@@ -17,8 +17,8 @@ title: 社区资源
 
 ### 1.2 Gitee 仓库（国内镜像）
 
-- **代码仓库**：[gitee.com/luban-rds/luban-rds](https://gitee.com/luban-rds/luban-rds)
-- **问题跟踪**：[Issues](https://gitee.com/luban-rds/luban-rds/issues)
+- **代码仓库**：[gitee.com/luban-rds/luban-rds](https://gitee.com/luban-rds/luban-rds)（待核实 / 计划中）
+- **问题跟踪**：[Issues](https://gitee.com/luban-rds/luban-rds/issues)（待核实 / 计划中）
 
 ### 1.3 官方文档
 
@@ -26,6 +26,8 @@ title: 社区资源
 - **API 参考**：[https://luban-rds.github.io/luban-rds/api/](https://luban-rds.github.io/luban-rds/api/)
 - **架构文档**：[https://luban-rds.github.io/luban-rds/architecture/](https://luban-rds.github.io/luban-rds/architecture/)
 - **部署指南**：[https://luban-rds.github.io/luban-rds/deployment/](https://luban-rds.github.io/luban-rds/deployment/)
+
+> 说明：文档站点由 GitHub Org `LUBAN-RDS` 提供，URL 中 `luban-rds` 为仓库名（小写）。
 
 ### 1.4 博客与新闻
 
@@ -38,18 +40,9 @@ title: 社区资源
 ### 2.1 讨论组
 
 - **GitHub Discussions**：[https://github.com/LUBAN-RDS/luban-rds/discussions](https://github.com/LUBAN-RDS/luban-rds/discussions)
-- **Gitter 聊天室**：[https://gitter.im/luban-rds/community](https://gitter.im/luban-rds/community)
+- **Gitter 聊天室**：[https://gitter.im/luban-rds/community](https://gitter.im/luban-rds/community)（待核实 / 已废弃，建议改用 GitHub Discussions）
 
-### 2.2 问答平台
-
-- **Stack Overflow**：使用标签 `luban-rds` 提问
-  [https://stackoverflow.com/questions/tagged/luban-rds](https://stackoverflow.com/questions/tagged/luban-rds)
-- **知乎**：搜索话题「Luban-RDS」
-  [https://www.zhihu.com/topic/luban-rds](https://www.zhihu.com/topic/luban-rds)
-- **SegmentFault**：搜索话题「Luban-RDS」
-  [https://segmentfault.com/t/luban-rds](https://segmentfault.com/t/luban-rds)
-
-### 2.3 社交媒体
+### 2.2 社交媒体
 
 - **GitHub 社交**：关注 [luban-rds](https://github.com/LUBAN-RDS/luban-rds)
 
@@ -78,7 +71,7 @@ title: 社区资源
 
 ### 3.3 编码规范
 
-- **Java 版本**：使用 Java 8+ 语法
+- **Java 版本**：使用 Java 17+ 语法
 - **代码风格**：遵循 Google Java 风格指南
 - **命名规范**：使用有意义的变量和方法名
 - **文档注释**：为公共类和方法添加 Javadoc
@@ -127,6 +120,10 @@ title: 社区资源
 ### 5.1 商业支持
 
 暂不支持
+
+## 6. 行为准则
+
+参考通用的开源社区行为准则（贡献前请阅读 GitHub 仓库的 `CODE_OF_CONDUCT`）。
 
 ## 7. 常见问题
 
@@ -198,4 +195,3 @@ title: 社区资源
 
 - **GitHub Issues**：[https://github.com/LUBAN-RDS/luban-rds/issues](https://github.com/LUBAN-RDS/luban-rds/issues)
 - **GitHub Discussions**：[https://github.com/LUBAN-RDS/luban-rds/discussions](https://github.com/LUBAN-RDS/luban-rds/discussions)
-- **Gitter 聊天室**：[https://gitter.im/luban-rds/community](https://gitter.im/luban-rds/community)

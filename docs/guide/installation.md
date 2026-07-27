@@ -11,7 +11,7 @@ title: 安装指南
 | 环境 | 最低要求 | 推荐配置 |
 |------|----------|----------|
 | **操作系统** | Windows 7+, Linux, macOS | Linux (CentOS 7+, Ubuntu 18.04+) |
-| **Java 版本** | JDK 17+ | JDK 17 (LTS) |
+| **Java 版本** | JDK 17+ | JDK 17 (LTS，与父 `pom.xml` 一致) |
 | **内存** | 512MB | 2GB+ |
 | **CPU** | 1 核 | 2 核+ |
 | **网络** | 100Mbps | 1Gbps |
@@ -47,11 +47,11 @@ mvn clean package -DskipTests
 ### 方式二：下载预构建版本
 
 ```bash
-# 下载最新版本
-wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.4/luban-rds-bin-1.0.4.jar
+# 下载最新版本（fat JAR）
+wget https://github.com/janeluo/luban-rds/releases/download/v1.0.8/luban-rds-jar-with-dependencies.jar
 
 # 启动服务器
-java -jar luban-rds-bin-1.0.4.jar
+java -jar luban-rds-jar-with-dependencies.jar
 ```
 
 ## 配置选项
@@ -65,10 +65,10 @@ Luban-RDS 使用 `luban-rds.conf` 配置文件，默认位于 `luban-rds-server/
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `port` | 9736 | 服务器端口 |
-| `host` | 0.0.0.0 | 绑定地址 |
+| `bind` | 0.0.0.0 | 绑定地址（与 `luban-rds-server/src/main/resources/luban-rds.conf` 中 `bind` 一致） |
 | `databases` | 16 | 数据库数量 |
 | `maxmemory` | 0 | 最大内存限制（0 表示无限制） |
-| `maxmemory-policy` | volatile-lru | 内存不足时的淘汰策略 |
+| `maxmemory-policy` | noeviction | 内存不足时的淘汰策略（默认 noeviction，可选 `volatile-lru` / `allkeys-lru` 等） |
 
 ### 3. 持久化配置
 
@@ -92,13 +92,13 @@ Luban-RDS 使用 `luban-rds.conf` 配置文件，默认位于 `luban-rds-server/
 
 ```bash
 # 指定端口
-java -jar luban-rds-bin-1.0.4.jar --port 6380
+java -jar luban-rds-jar-with-dependencies.jar --port 6380
 
 # 指定配置文件
-java -jar luban-rds-bin-1.0.4.jar --config /path/to/luban-rds.conf
+java -jar luban-rds-jar-with-dependencies.jar --config /path/to/luban-rds.conf
 
 # 后台运行（Linux/Mac）
-nohup java -jar luban-rds-bin-1.0.4.jar > luban-rds.log 2>&1 &
+nohup java -jar luban-rds-jar-with-dependencies.jar > luban-rds.log 2>&1 &
 ```
 
 ### 2. 环境变量
@@ -114,18 +114,18 @@ nohup java -jar luban-rds-bin-1.0.4.jar > luban-rds.log 2>&1 &
 ### 1. 检查服务状态
 
 ```bash
-# 使用 redis-cli 连接
-redis-cli ping
+# 使用 redis-cli 连接本地 9736 端口
+redis-cli -p 9736 ping
 # 输出: PONG
 
 # 检查版本
-redis-cli info server
+redis-cli -p 9736 info server
 ```
 
 ### 2. 测试基本命令
 
 ```bash
-redis-cli
+redis-cli -p 9736
 > SET test hello
 OK
 > GET test
@@ -157,7 +157,7 @@ netstat -ano | findstr :9736
 
 **错误信息**：`Unsupported major.minor version`
 
-**解决方案**：安装 Java 8 或更高版本
+**解决方案**：安装 Java 17 或更高版本（与父 `pom.xml` 中 `maven.compiler.source/target=17` 一致）
 
 ### 3. 内存不足
 

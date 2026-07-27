@@ -14,8 +14,7 @@
 
 Luban-RDS 使用 Git 进行版本控制，采用以下分支策略：
 
-- **main**：主分支，包含稳定的代码
-- **dev**：开发分支，包含正在开发的功能
+- **master**：主分支，包含稳定的代码（当前仓库默认分支）
 - **feature/**：特性分支，用于开发新功能
 - **bugfix/**：修复分支，用于修复 bug
 
@@ -23,16 +22,16 @@ Luban-RDS 使用 Git 进行版本控制，采用以下分支策略：
 
 ### 1. 创建分支
 
-从 `dev` 分支创建新的特性分支或修复分支：
+从 `master` 分支创建新的特性分支或修复分支：
 
 ```bash
 # 创建特性分支
-git checkout dev
+git checkout master
 git pull
 git checkout -b feature/your-feature-name
 
 # 或创建修复分支
-git checkout dev
+git checkout master
 git pull
 git checkout -b bugfix/your-bugfix-name
 ```
@@ -77,7 +76,7 @@ git push origin feature/your-feature-name
 ### 5. 创建 Pull Request
 
 - 在 GitHub 上创建 Pull Request
-- 选择 `dev` 作为目标分支
+- 选择 `master` 作为目标分支
 - 填写详细的 Pull Request 描述，包括：
   - 功能描述
   - 实现细节
@@ -92,8 +91,8 @@ git push origin feature/your-feature-name
 
 ### 7. 合并代码
 
-- 代码审查通过后，项目维护者会合并代码到 `dev` 分支
-- 定期从 `dev` 分支合并到 `main` 分支，发布新版本
+- 代码审查通过后，项目维护者会合并代码到 `master` 分支
+- 通过 Git tag / GitHub Release 发布新版本
 
 ## 开发规范
 
@@ -158,8 +157,8 @@ git push origin feature/your-feature-name
 
 ## 发布流程
 
-1. 从 `dev` 分支合并到 `main` 分支
-2. 更新版本号
-3. 运行构建和测试
+1. 在 `master` 分支更新版本号（修改根 `pom.xml` 中 `<revision>` 属性）
+2. 运行构建和测试（`mvn clean verify`）
+3. 打 Git tag 并创建 GitHub Release
 4. 发布新版本
 5. 更新文档

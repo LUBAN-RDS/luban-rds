@@ -8,18 +8,18 @@ title: 配置指南
 
 ## 1. 配置文件格式
 
-Luban-RDS 支持三种配置方式，优先级从高到低：
+ Luban-RDS 配置来源优先级从高到低为：
 
-1. **命令行参数**：通过启动命令传递的参数
-2. **配置文件**：通过 `luban-rds.conf` 文件配置
-3. **环境变量**：通过系统环境变量配置
+1. **配置文件**：通过启动命令 `--config` 指定的 `luban-rds.conf`（entrypoint.sh 中由环境变量生成）
+2. **环境变量**：Docker 部署下 entrypoint.sh 读取 `LUBAN_RDS_*` 系列环境变量并写入配置文件
+3. **默认值**：未设置则使用代码内的默认值（见 `RdsConfig.java`）
 
 ### 1.1 配置文件示例
 
 ```conf
 # 服务器配置
+bind 0.0.0.0
 port 9736
-host 0.0.0.0
 
 # 认证配置
 requirepass your-secure-password
@@ -28,22 +28,20 @@ requirepass your-secure-password
 databases 16
 
 # 持久化配置
-save 900 1
-save 300 10
-save 60 10000
-rdbfilename dump.rdb
-dir /data
+persist-mode rdb
+rdb-save-interval 900 1
+dbfilename dump.rdb
+dir ./data
 
 # AOF 配置
-aof-enabled yes
-aof-filename appendonly.aof
-aof-sync everysec
+appendfilename appendonly.aof
+appendfsync everysec
 
 # Lua 脚本配置
-lua-time-limit 5000
+lua-timeout 5000
 
 # 内存配置
-maxmemory 2gb
+maxmemory 0
 maxmemory-policy allkeys-lru
 
 # 客户端配置
@@ -53,34 +51,32 @@ tcp-keepalive 300
 # 日志配置
 loglevel notice
 logfile ""
-
-# 安全配置
-rename-command FLUSHALL ""
-rename-command FLUSHDB ""
-rename-command CONFIG ""
 ```
+
+> 注：`rename-command` 未在 Luban-RDS 中实现（基于 Java 的命令注册中心并不支持运行时重命名命令），如需限制危险命令请通过网络层与 ACL 配合。
 
 ### 1.2 环境变量映射
 
 | 配置项 | 环境变量 | 默认值 |
 |--------|----------|--------|
 | port | LUBAN_RDS_PORT | 9736 |
-| host | LUBAN_RDS_HOST | 0.0.0.0 |
-| requirepass | LUBAN_RDS_PASSWORD | "" |
+| bind | LUBAN_RDS_BIND | 0.0.0.0 |
+| requirepass | LUBAN_RDS_REQUIREPASS | "" |
 | databases | LUBAN_RDS_DATABASES | 16 |
-| dir | LUBAN_RDS_DIR | "." |
-| rdb-enabled | LUBAN_RDS_RDB_ENABLED | true |
-| rdbfilename | LUBAN_RDS_RDB_FILENAME | "dump.rdb" |
-| aof-enabled | LUBAN_RDS_AOF_ENABLED | false |
-| aof-filename | LUBAN_RDS_AOF_FILENAME | "appendonly.aof" |
-| aof-sync | LUBAN_RDS_AOF_SYNC | "everysec" |
-| lua-time-limit | LUBAN_RDS_LUA_TIME_LIMIT | 5000 |
+| dir | LUBAN_RDS_DATA_DIR | "./data" |
+| persist-mode | LUBAN_RDS_PERSIST_MODE | "rdb" |
+| dbfilename | （配置文件项） | "dump.rdb" |
+| appendfilename | （配置文件项） | "appendonly.aof" |
+| appendfsync | （配置文件项） | "everysec" |
+| lua-timeout | （配置文件项） | 5000 |
 | maxmemory | LUBAN_RDS_MAXMEMORY | 0 (无限制) |
-| maxmemory-policy | LUBAN_RDS_MAXMEMORY_POLICY | "noeviction" |
-| timeout | LUBAN_RDS_TIMEOUT | 0 (无超时) |
-| tcp-keepalive | LUBAN_RDS_TCP_KEEPALIVE | 300 |
-| loglevel | LUBAN_RDS_LOGLEVEL | "notice" |
-| logfile | LUBAN_RDS_LOGFILE | "" |
+| maxmemory-policy | （配置文件项） | "noeviction" |
+| timeout | （配置文件项） | 0 (无超时) |
+| tcp-keepalive | （配置文件项） | 300 |
+| loglevel | （配置文件项） | "notice" |
+| logfile | （配置文件项） | "" |
+
+> 注：上表中标注"（配置文件项）"的环境变量未在 entrypoint.sh 中实现，只能通过 `luban-rds.conf` 配置。
 
 ### 1.3 慢查询日志配置
 
@@ -96,10 +92,10 @@ rename-command CONFIG ""
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | port | 整数 | 9736 | 服务监听端口 |
-| host | 字符串 | 0.0.0.0 | 服务监听地址，0.0.0.0 表示监听所有地址 |
+| bind | 字符串 | 0.0.0.0 | 服务监听地址，0.0.0.0 表示监听所有地址 |
 | databases | 整数 | 16 | 数据库数量 |
 | requirepass | 字符串 | "" | 认证密码，为空表示不需要认证 |
-| dir | 字符串 | "." | 工作目录，用于存放持久化文件 |
+| dir | 字符串 | "./data" | 工作目录，用于存放持久化文件 |
 
 ### 2.2 网络配置
 
@@ -150,24 +146,24 @@ Luban-RDS 采用三层线程模型，实现高性能的并发处理：
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| rdb-enabled | 布尔值 | true | 是否启用 RDB 持久化 |
-| rdbfilename | 字符串 | "dump.rdb" | RDB 文件名 |
-| save | 字符串 | "900 1 300 10 60 10000" | RDB 保存策略，格式为 "秒数 键数" |
+| persist-mode | 字符串 | "rdb" | 持久化模式，取值：`rdb`、`aof`、`mixed`、`none`。使用 `rdb` 时启用 RDB 快照。 |
+| dbfilename | 字符串 | "dump.rdb" | RDB 文件名 |
+| rdb-save-interval | 字符串 | "900 1" | RDB 自动保存策略，格式为 "秒数 键数"。仅在 `persist-mode=rdb` 时生效。 |
 
 **保存策略说明**：
-- `save 900 1`：900 秒内至少有 1 个键被修改，执行 RDB 保存
-- `save 300 10`：300 秒内至少有 10 个键被修改，执行 RDB 保存
-- `save 60 10000`：60 秒内至少有 10000 个键被修改，执行 RDB 保存
+- `rdb-save-interval 900 1`：900 秒内至少有 1 个键被修改，执行 RDB 保存
+- `rdb-save-interval 300 10`：300 秒内至少有 10 个键被修改，执行 RDB 保存
+- `rdb-save-interval 60 10000`：60 秒内至少有 10000 个键被修改，执行 RDB 保存
 
 ### 3.2 AOF 配置
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| aof-enabled | 布尔值 | false | 是否启用 AOF 持久化 |
-| aof-filename | 字符串 | "appendonly.aof" | AOF 文件名 |
-| aof-sync | 字符串 | "everysec" | AOF 同步策略，可选值：always、everysec、no |
-| aof-rewrite-percentage | 整数 | 100 | AOF 重写触发百分比 |
-| aof-rewrite-min-size | 字符串 | "64mb" | AOF 重写最小文件大小 |
+| persist-mode | 字符串 | "rdb" | 设为 `aof` 启用 AOF；设为 `mixed` 同时启用 RDB 与 AOF。 |
+| appendfilename | 字符串 | "appendonly.aof" | AOF 文件名 |
+| appendfsync | 字符串 | "everysec" | AOF 同步策略，可选值：always、everysec、no |
+| aof-rewrite-percentage | 整数 | 100 | AOF 重写触发百分比（规划中） |
+| aof-rewrite-min-size | 字符串 | "64mb" | AOF 重写最小文件大小（规划中） |
 
 **同步策略说明**：
 - `always`：每次写命令都同步到磁盘，最安全但性能最差
@@ -281,7 +277,7 @@ expired_keys:50
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| lua-timeout | 整数 | 10000 | Lua 脚本执行超时时间（毫秒）。脚本执行超过此时间将被终止。0 表示无限制。 |
+| lua-timeout | 整数 | 5000 | Lua 脚本执行超时时间（毫秒）。脚本执行超过此时间将被终止。0 表示无限制。 |
 | lua-sandbox-enabled | 布尔值 | true | 是否启用 Lua 沙箱模式。启用后将限制危险函数和模块的访问。 |
 | lua-allowed-modules | 字符串 | "" | 允许使用的 Lua 模块（逗号分隔）。为空表示使用默认安全模块。 |
 | lua-blocked-functions | 字符串 | "" | 禁止使用的 Lua 函数（逗号分隔）。如 `os.execute,io.open`。 |
@@ -293,7 +289,7 @@ expired_keys:50
 **配置文件示例**：
 ```conf
 # Lua 脚本配置
-lua-timeout 10000
+lua-timeout 5000
 lua-sandbox-enabled yes
 lua-max-script-bytes 65536
 lua-max-return-bytes 1048576
@@ -346,19 +342,8 @@ CONFIG SET lua-timeout 5000
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | requirepass | 字符串 | "" | 认证密码，为空表示不需要认证 |
-| rename-command | 字符串 | - | 重命名或禁用危险命令 |
 
-**命令重命名示例**：
-```conf
-# 禁用危险命令
-rename-command FLUSHALL ""
-rename-command FLUSHDB ""
-rename-command CONFIG ""
-
-# 重命名命令
-rename-command DEL "DELETE"
-rename-command CONFIG "CFG"
-```
+> 注：`rename-command` 在 Luban-RDS 中暂未实现。基于 Java 的命令注册中心当前不支持运行时重命名命令，如需限制危险命令请通过网络层与 ACL 配合。
 
 ### 7.2 网络安全
 
@@ -387,38 +372,44 @@ rename-command CONFIG "CFG"
 
 ## 9. 高级配置
 
-### 9.1 执行器配置
+### 9.1 执行器配置（规划中）
+
+> 以下执行器配置项在 RdsConfig.java 中尚未暴露，请关注后续版本。当前线程模型见 §2.3。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| executor-type | 字符串 | "cached" | 执行器类型，可选值：cached、fixed |
-| executor-core-pool-size | 整数 | CPU 核心数 | 核心线程池大小 |
-| executor-max-pool-size | 整数 | CPU 核心数 * 2 | 最大线程池大小 |
-| executor-queue-capacity | 整数 | 10000 | 任务队列容量 |
-| executor-keep-alive-time | 整数 | 60 | 线程保持活动时间（秒） |
+| executor-type | 字符串 | "cached" | 执行器类型，可选值：cached、fixed（规划中） |
+| executor-core-pool-size | 整数 | CPU 核心数 | 核心线程池大小（规划中） |
+| executor-max-pool-size | 整数 | CPU 核心数 * 2 | 最大线程池大小（规划中） |
+| executor-queue-capacity | 整数 | 10000 | 任务队列容量（规划中） |
+| executor-keep-alive-time | 整数 | 60 | 线程保持活动时间（秒）（规划中） |
 
-### 9.2 Netty 配置
+### 9.2 Netty 配置（规划中）
 
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| netty.buffer-high-water-mark | 整数 | 65536 | 高水位线缓冲区大小（字节） |
-| netty.buffer-low-water-mark | 整数 | 32768 | 低水位线缓冲区大小（字节） |
-| netty.reuse-address | 布尔值 | true | 是否启用地址重用 |
-| netty.tcp-no-delay | 布尔值 | true | 是否禁用 Nagle 算法 |
-| netty.so-backlog | 整数 | 1024 | TCP 连接队列大小 |
-
-### 9.3 性能优化
+> Netty 内部参数由代码内置（参见 `luban-rds-server`），暂未对外开放配置文件项。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| activerehashing | 布尔值 | true | 是否启用主动重哈希 |
-| hash-max-ziplist-entries | 整数 | 512 | Hash 类型使用 ziplist 编码的最大条目数 |
-| hash-max-ziplist-value | 整数 | 64 | Hash 类型使用 ziplist 编码的最大值大小（字节） |
-| list-max-ziplist-size | 字符串 | "-2" | List 类型使用 ziplist 编码的最大大小 |
-| list-compress-depth | 整数 | 0 | List 类型压缩深度 |
-| set-max-intset-entries | 整数 | 512 | Set 类型使用 intset 编码的最大条目数 |
-| zset-max-ziplist-entries | 整数 | 128 | ZSet 类型使用 ziplist 编码的最大条目数 |
-| zset-max-ziplist-value | 整数 | 64 | ZSet 类型使用 ziplist 编码的最大值大小（字节） |
+| netty.buffer-high-water-mark | 整数 | 65536 | 高水位线缓冲区大小（字节）（规划中） |
+| netty.buffer-low-water-mark | 整数 | 32768 | 低水位线缓冲区大小（字节）（规划中） |
+| netty.reuse-address | 布尔值 | true | 是否启用地址重用（规划中） |
+| netty.tcp-no-delay | 布尔值 | true | 是否禁用 Nagle 算法（规划中） |
+| netty.so-backlog | 整数 | 1024 | TCP 连接队列大小（规划中） |
+
+### 9.3 性能优化（规划中）
+
+> 以下键当前未在 `RdsConfig.java` 暴露，请通过 JVM 参数与代码内置调优。
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| activerehashing | 布尔值 | true | 是否启用主动重哈希（规划中） |
+| hash-max-ziplist-entries | 整数 | 512 | Hash 类型使用 ziplist 编码的最大条目数（规划中） |
+| hash-max-ziplist-value | 整数 | 64 | Hash 类型使用 ziplist 编码的最大值大小（字节）（规划中） |
+| list-max-ziplist-size | 字符串 | "-2" | List 类型使用 ziplist 编码的最大大小（规划中） |
+| list-compress-depth | 整数 | 0 | List 类型压缩深度（规划中） |
+| set-max-intset-entries | 整数 | 512 | Set 类型使用 intset 编码的最大条目数（规划中） |
+| zset-max-ziplist-entries | 整数 | 128 | ZSet 类型使用 ziplist 编码的最大条目数（规划中） |
+| zset-max-ziplist-value | 整数 | 64 | ZSet 类型使用 ziplist 编码的最大值大小（字节）（规划中） |
 
 ### 9.4 监控配置
 
@@ -448,7 +439,7 @@ Luban-RDS 完整实现 Redis Cluster 协议（16384 槽位、Gossip 通信、MOV
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| cluster-announce-ip | 字符串 | "" | 对外公告的 IP 地址。空表示使用 `host` 配置。 |
+| cluster-announce-ip | 字符串 | "" | 对外公告的 IP 地址。空表示使用 `bind` 配置。 |
 | cluster-announce-port | 字符串 | "" | 对外公告的服务端口。空表示使用 `port` 配置。 |
 | cluster-announce-bus-port | 字符串 | "" | 对外公告的总线端口。空表示使用默认（服务端口 + 10000）。 |
 | cluster-announce-hostname | 字符串 | "" | 对外公告的主机名（与 IP 二选一）。 |
@@ -466,9 +457,7 @@ Luban-RDS 完整实现 Redis Cluster 协议（16384 槽位、Gossip 通信、MOV
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| cluster-replica-validity-factor | 整数 | 10 | 从节点数据有效性因子，乘以 `cluster-node-timeout` 后判定从节点是否过期。 |
-| cluster-replica-serve-stale-data | 布尔值 | yes | 主从失联时从节点是否继续提供（可能过期的）读服务。 |
-| cluster-replication-factor | 整数 | 1 | 每个主节点的从节点数量上限（仅文档规划用，实际由运维配置）。 |
+| cluster-slave-validity-factor | 整数 | 10 | 从节点数据有效性因子，乘以 `cluster-node-timeout` 后判定从节点是否过期（对应 `RdsConfig.clusterSlaveValidityFactor`）。 |
 
 **配置文件示例**：
 ```conf
@@ -478,7 +467,7 @@ cluster-config-file nodes.conf
 cluster-node-timeout 15000
 
 # 网络公告（NAT/容器环境）
-cluster-announce-ip 192.168.1.10
+cluster-announce-ip 192.168.8.161
 cluster-announce-port 9736
 cluster-announce-bus-port 19736
 ```
@@ -495,7 +484,7 @@ cluster-announce-bus-port 19736
 - 启用 `lazyfree-lazy-eviction` 和 `lazyfree-lazy-expire` 提高性能
 
 **2. 持久化配置**
-- 对于数据安全性要求高的场景，启用 AOF 并设置 `aof-sync everysec`
+- 对于数据安全性要求高的场景，启用 AOF 并设置 `appendfsync everysec`
 - 对于性能要求高的场景，只使用 RDB 并调整保存策略
 - 合理设置 `aof-rewrite-percentage` 和 `aof-rewrite-min-size`
 
@@ -602,8 +591,8 @@ cluster-announce-bus-port 19736
 
 ```conf
 # 服务器配置
+bind 0.0.0.0
 port 9736
-host 0.0.0.0
 
 databases 16
 
@@ -611,25 +600,23 @@ databases 16
 requirepass YourStrongPassword123!
 
 # 持久化配置
-save 900 1
-save 300 10
-save 60 10000
-rdbfilename dump.rdb
+persist-mode rdb
+rdb-save-interval 900 1
+dbfilename dump.rdb
 dir /data
 
-aof-enabled yes
-aof-filename appendonly.aof
-aof-sync everysec
+appendfilename appendonly.aof
+appendfsync everysec
 
 # 内存配置
-maxmemory 16gb
+maxmemory 17179869184
 maxmemory-policy allkeys-lru
 maxmemory-samples 5
 
-# 线程配置
-netty.boss-threads 4
-netty.worker-threads 16
-business-threads 8
+# 线程配置（规划中，请通过代码内置参数调整）
+# netty.boss-threads 4
+# netty.worker-threads 16
+# business-threads 8
 
 # 网络配置
 timeout 600
@@ -638,11 +625,6 @@ tcp-backlog 1024
 
 # 客户端配置
 maxclients 5000
-
-# 安全配置
-rename-command FLUSHALL ""
-rename-command FLUSHDB ""
-rename-command CONFIG ""
 
 # 日志配置
 loglevel notice
@@ -653,26 +635,25 @@ logfile "/var/log/luban-rds.log"
 
 ```conf
 # 服务器配置
+bind 127.0.0.1
 port 9736
-host 127.0.0.1
 
 databases 16
 
 # 禁用认证
-# requirepass 
+# requirepass
 
 # 禁用持久化以提高性能
-rdb-enabled no
-aof-enabled no
+persist-mode none
 
 # 内存配置
-maxmemory 1gb
+maxmemory 1073741824
 maxmemory-policy noeviction
 
-# 线程配置
-netty.boss-threads 2
-netty.worker-threads 4
-business-threads 2
+# 线程配置（规划中）
+# netty.boss-threads 2
+# netty.worker-threads 4
+# business-threads 2
 
 # 网络配置
 timeout 0
@@ -689,8 +670,8 @@ logfile ""
 
 ```conf
 # 服务器配置
+bind 0.0.0.0
 port 9736
-host 0.0.0.0
 
 databases 16
 
@@ -698,27 +679,25 @@ databases 16
 requirepass YourStrongPassword123!
 
 # 持久化配置
-save 3600 1
-save 600 10
-save 300 100
-rdbfilename dump.rdb
+persist-mode mixed
+rdb-save-interval 3600 1
+dbfilename dump.rdb
 dir /data
 
-aof-enabled yes
-aof-filename appendonly.aof
-aof-sync everysec
-aof-rewrite-percentage 100
-aof-rewrite-min-size 64mb
+appendfilename appendonly.aof
+appendfsync everysec
+# aof-rewrite-percentage 100
+# aof-rewrite-min-size 64mb
 
 # 内存配置
-maxmemory 32gb
+maxmemory 34359738368
 maxmemory-policy allkeys-lru
 maxmemory-samples 5
 
-# 线程配置
-netty.boss-threads 8
-netty.worker-threads 32
-business-threads 16
+# 线程配置（规划中）
+# netty.boss-threads 8
+# netty.worker-threads 32
+# business-threads 16
 
 # 网络配置
 timeout 600
@@ -728,21 +707,16 @@ tcp-backlog 2048
 # 客户端配置
 maxclients 10000
 
-# 安全配置
-rename-command FLUSHALL ""
-rename-command FLUSHDB ""
-rename-command CONFIG ""
-
 # 日志配置
 loglevel notice
-    logfile "/var/log/luban-rds.log"
+logfile "/var/log/luban-rds.log"
 ```
 
 ### 12.4 集群环境配置示例
 
 最小 3 主节点集群，每个节点使用相同配置模板（仅 `port`、`cluster-announce-ip`、`dir` 不同）：
 
-**node-1.conf（192.168.1.10）**
+**node-1.conf（192.168.8.161）**
 ```conf
 # 服务端口与总线端口（总线 = 服务端口 + 10000）
 port 9736
@@ -753,19 +727,19 @@ dir /data/node-1
 cluster-enabled yes
 cluster-config-file nodes-1.conf
 cluster-node-timeout 15000
-cluster-announce-ip 192.168.1.10
+cluster-announce-ip 192.168.8.161
 cluster-announce-port 9736
 cluster-announce-bus-port 19736
 
-# 持久化（生产建议 RDB + AOF）
-appendonly yes
-aof-filename "appendonly-1.aof"
+# 持久化（生产建议 RDB + AOF：persist-mode mixed）
+persist-mode mixed
+appendfilename "appendonly-1.aof"
 appendfsync everysec
 ```
 
-**node-2.conf（192.168.1.11）**：`port 9737`、`dir /data/node-2`、`cluster-announce-port 9737`、`cluster-announce-bus-port 19737`、`aof-filename "appendonly-2.aof"`。
+**node-2.conf（192.168.8.161:9737 节点）**：`port 9737`、`dir /data/node-2`、`cluster-announce-port 9737`、`cluster-announce-bus-port 19737`、`appendfilename "appendonly-2.aof"`。
 
-**node-3.conf（192.168.1.12）**：同上，`port 9738`、总线端口 `19738`。
+**node-3.conf（192.168.8.161:9738 节点）**：同上，`port 9738`、总线端口 `19738`。
 
 启动后使用 `CLUSTER MEET` 互连、分配槽位即可组成集群，详见 [集群部署指南](./cluster-setup.md)。
 
@@ -782,13 +756,14 @@ redis-cli -h localhost -p 9736 CONFIG GET *
 ```bash
 redis-cli -h localhost -p 9736 CONFIG GET maxmemory
 redis-cli -h localhost -p 9736 CONFIG GET maxmemory-policy
-redis-cli -h localhost -p 9736 CONFIG GET save
+redis-cli -h localhost -p 9736 CONFIG GET persist-mode
+redis-cli -h localhost -p 9736 CONFIG GET rdb-save-interval
 ```
 
 **修改配置**
 ```bash
 # 临时修改（重启后失效）
-redis-cli -h localhost -p 9736 CONFIG SET maxmemory 1gb
+redis-cli -h localhost -p 9736 CONFIG SET maxmemory 1073741824
 redis-cli -h localhost -p 9736 CONFIG SET maxmemory-policy allkeys-lru
 
 # 永久修改需要编辑配置文件并重启服务
@@ -796,13 +771,7 @@ redis-cli -h localhost -p 9736 CONFIG SET maxmemory-policy allkeys-lru
 
 ### 13.2 检查配置文件语法
 
-**使用 --test-config 参数**
-```bash
-java -jar luban-rds-bin-1.0.0.jar --test-config --config /path/to/luban-rds.conf
-
-# 输出示例
-Config file /path/to/luban-rds.conf parsed successfully
-```
+> 注：Luban-RDS 当前未提供 `--test-config` 开关。推荐做法：先用配置文件启动一次，观察启动日志中是否有解析错误；若有问题修正后再重启。
 
 ### 13.3 监控配置效果
 
@@ -902,14 +871,9 @@ redis-cli -h localhost -p 9736 INFO persistence | grep -E "rdb_|aof_"
 | `LUBAN_RDS_SLOWLOG_SLOWER_THAN` | slowlog-log-slower-than | 10000 | 慢查询阈值（微秒） |
 | `LUBAN_RDS_SLOWLOG_MAX_LEN` | slowlog-max-len | 128 | 慢查询日志最大长度 |
 
-### 15.5 主从复制环境变量
+### 15.5 主从复制环境变量（未在 entrypoint.sh 实现）
 
-| 变量名 | 配置项 | 默认值 | 描述 |
-|--------|--------|--------|------|
-| `LUBAN_RDS_REPLICAOF` | replicaof | "" | 主节点地址（host:port） |
-| `LUBAN_RDS_MASTERAUTH` | masterauth | "" | 主节点认证密码 |
-| `LUBAN_RDS_REPL_TIMEOUT` | repl-timeout | 60 | 复制超时时间（秒） |
-| `LUBAN_RDS_REPL_BACKLOG_SIZE` | repl-backlog-size | 1mb | 复制积压缓冲区大小 |
+> 以下 `LUBAN_RDS_REPLICAOF`、`LUBAN_RDS_MASTERAUTH`、`LUBAN_RDS_REPL_TIMEOUT`、`LUBAN_RDS_REPL_BACKLOG_SIZE` 等环境变量当前 entrypoint.sh 未支持。如需配置主从复制，请通过 `luban-rds.conf` 中的对应键或后续版本的环境变量扩展。
 
 ### 15.6 集群环境变量
 
@@ -933,7 +897,6 @@ redis-cli -h localhost -p 9736 INFO persistence | grep -E "rdb_|aof_"
 | `LUBAN_RDS_CLUSTER_ANNOUNCE_IP` | cluster-announce-ip | "" | 对外公告 IP |
 | `LUBAN_RDS_CLUSTER_ANNOUNCE_PORT` | cluster-announce-port | "" | 对外公告服务端口 |
 | `LUBAN_RDS_CLUSTER_ANNOUNCE_BUS_PORT` | cluster-announce-bus-port | "" | 对外公告总线端口（空表示使用默认值 = 服务端口 + 10000） |
-| `LUBAN_RDS_CLUSTER_BUS_PORT` | cluster-bus-port | (port + 10000) | 直接设置总线端口（等价于 cluster-announce-bus-port 别名） |
 
 #### Gossip
 
@@ -941,6 +904,7 @@ redis-cli -h localhost -p 9736 INFO persistence | grep -E "rdb_|aof_"
 |--------|--------|--------|------|
 | `LUBAN_RDS_CLUSTER_GOSSIP_INTERVAL` | cluster-gossip-interval | 1000 | Gossip 心跳间隔（毫秒） |
 | `LUBAN_RDS_CLUSTER_GOSSIP_TIMEOUT` | cluster-gossip-timeout | 5000 | Gossip 消息超时（毫秒） |
+| `LUBAN_RDS_CLUSTER_REPLICATION_FACTOR` | cluster-slave-validity-factor | 10 | 从节点数据有效性因子（与 `cluster-slave-validity-factor` 同义；请优先使用后者） |
 
 ### 15.7 JVM 配置
 
@@ -948,14 +912,14 @@ redis-cli -h localhost -p 9736 INFO persistence | grep -E "rdb_|aof_"
 |--------|--------|------|
 | `JAVA_OPTS` | -Xms256m -Xmx512m -XX:+UseG1GC | JVM 参数 |
 
-### 15.6 Docker Compose 配置示例
+### 15.8 Docker Compose 配置示例
 
 ```yaml
 version: '3.8'
 
 services:
   luban-rds:
-    image: luban-rds:1.0.0
+    image: luban-rds:1.0.8
     environment:
       - LUBAN_RDS_PORT=9736
       - LUBAN_RDS_PERSIST_MODE=rdb
@@ -967,7 +931,7 @@ services:
       - luban-rds-data:/data
 ```
 
-### 15.7 Kubernetes ConfigMap 配置示例
+### 15.9 Kubernetes ConfigMap 配置示例
 
 ```yaml
 apiVersion: v1

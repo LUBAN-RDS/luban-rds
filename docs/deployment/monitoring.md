@@ -94,9 +94,9 @@ redis-cli -h localhost -p 9736 CONFIG GET maxmemory
 redis-cli -h localhost -p 9736 CONFIG GET maxmemory-policy
 ```
 
-**STATS 命令**：查看统计信息
+**INFO 命令（统计段）**：查看统计信息
 ```bash
-redis-cli -h localhost -p 9736 STATS
+redis-cli -h localhost -p 9736 INFO stats
 ```
 
 ### 2.2 外部监控工具

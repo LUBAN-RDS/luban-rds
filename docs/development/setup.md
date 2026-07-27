@@ -6,7 +6,7 @@
 
 - **操作系统**：Windows、macOS 或 Linux
 - **Java**：JDK 17 或更高版本
-- **Maven**：Maven 3.8 或更高版本
+- **Maven**：Maven 3.6 或更高版本（仓库根目录提供 `mvn-java17.bat` 包装脚本，自动使用本地 JDK 17 + Maven 3.6.3）
 - **Git**：Git 2.0 或更高版本
 - **IDE**：推荐 IntelliJ IDEA 或 Eclipse
 
@@ -29,7 +29,7 @@
 
 ### 2. 安装 Maven
 
-1. 下载并安装 Maven 3.6 或更高版本：
+1. 下载并安装 Maven 3.6.3 或更高版本（推荐直接使用根目录 `mvn-java17.bat`）：
    - [Maven 下载](https://maven.apache.org/download.cgi)
 
 2. 配置环境变量：

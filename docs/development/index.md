@@ -22,7 +22,7 @@ title: 开发指南
 | 工具 | 版本要求 | 说明 |
 |------|---------|------|
 | **JDK** | 17+ | 推荐 OpenJDK 17 或 Oracle JDK 17 |
-| **Maven** | 3.8+ | 项目构建管理工具 |
+| **Maven** | 3.6.3+ | 项目构建管理工具；仓库根目录提供 `mvn-java17.bat` 自动指向本地 JDK 17 + Maven 3.6.3 |
 | **Git** | 任意版本 | 版本控制工具 |
 | **IDE** | - | 推荐 IntelliJ IDEA 或 Eclipse |
 
@@ -30,17 +30,17 @@ title: 开发指南
 
 ```bash
 # 1. 克隆代码库
-git clone https://github.com/LUBAN-RDS/luban-rds.git
+git clone https://github.com/janeluo/luban-rds.git
 cd luban-rds
 
-# 2. 构建项目
-mvn clean install
+# 2. 构建项目（生成 bin fat JAR：luban-rds-bin/target/luban-rds-jar-with-dependencies.jar）
+mvn clean install -DskipTests
 
 # 3. 运行测试
 mvn test
 
-# 4. 启动服务器（开发模式）
-mvn -pl luban-rds-server exec:java -Dexec.mainClass="com.janeluo.luban.rds.server.NettyRedisServer"
+# 4. 启动服务器（推荐使用 bin 模块 fat JAR）
+java -jar luban-rds-bin/target/luban-rds-jar-with-dependencies.jar
 ```
 
 ## 开发流程
