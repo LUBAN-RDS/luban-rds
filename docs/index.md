@@ -86,7 +86,6 @@ version: 1.0.8
 - ✅ **C9 手动故障转移广播**: `CLUSTER FAILOVER` 完成后通过 `FAILOVER_RESULT` 消息向全集群广播结果
 - ✅ **C11 AOF 重写按类型**: AOF rewrite 改为按数据类型分别重写，二进制安全；AOF 加载同样二进制安全
 - ✅ **C12 ZSet 同分数排序**: ZSet 相同分数成员的排序改为字典序（与 Redis 官方一致）
-- 📝 **参考验证报告**: `superpowers/reports/2026-07-27-fix-p0-data-safety-redis7-verify.md`
 
 ### v1.0.7 (已发布)
 
