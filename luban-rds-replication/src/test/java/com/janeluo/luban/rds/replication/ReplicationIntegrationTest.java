@@ -4,16 +4,16 @@ import com.janeluo.luban.rds.common.config.RdsConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Disabled;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * 主从复制集成测试
- * 
- * 注意：此测试需要完整的 Netty 环境，建议在集成测试环境中运行
+ *
+ * 重新启用（C2 修复后）：PSYNC 响应路由、REPLCONF 逐条等待 + timeout、
+ * onOnline/sendAck 回调链已修复，本测试集中的用例为纯逻辑断言，
+ * 不依赖真实 Netty 服务器环境，可在单测阶段运行。
  */
-@Disabled("需要完整的服务器环境，在集成测试中运行")
 class ReplicationIntegrationTest {
     
     private RdsConfig masterConfig;
@@ -56,7 +56,13 @@ class ReplicationIntegrationTest {
     @DisplayName("测试主节点管理器")
     void testMasterReplicationManager() {
         MasterReplicationManager manager = MasterReplicationManager.getInstance();
-        
+
+        // 清除其他测试类（如 MasterReplicationManagerTest）残留的 slave 状态，
+        // 避免单例在测试间共享导致的隔离问题。
+        for (SlaveInfo slave : manager.getSlaves()) {
+            manager.removeSlave(slave.getChannel());
+        }
+
         // 验证初始状态
         assertEquals(0, manager.getConnectedSlaves());
         assertNotNull(manager.getBacklog());

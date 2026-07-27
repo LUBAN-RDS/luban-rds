@@ -238,10 +238,11 @@ public class DefaultMemoryStore implements MemoryStore {
                 ZSetStore zset = (ZSetStore) value;
                 // ZSetStore has two maps: memberScores and scoreMembers
                 // memberScores: ConcurrentHashMap<String, Double>
-                // scoreMembers: ConcurrentSkipListMap<Double, KeySetView>
+                // scoreMembers: ConcurrentSkipListMap<Double, ConcurrentSkipListSet<String>>
                 size += CONCURRENTHASHMAP_OVERHEAD + (long) zset.size() * 64L;
-                // ScoreMembers overhead (ConcurrentSkipListMap + nested KeySetViews)
-                size += 96 + (long) zset.size() * 64L;
+                // ScoreMembers overhead (ConcurrentSkipListMap + nested ConcurrentSkipListSets)
+                // 跳表节点比 CHM 桶节点重，单成员估算 72L
+                size += 96 + (long) zset.size() * 72L;
                 for (String member : zset.memberScores.keySet()) {
                     size += STRING_OVERHEAD + member.length() * 2L;
                 }
@@ -2523,7 +2524,8 @@ public class DefaultMemoryStore implements MemoryStore {
         final java.util.concurrent.ConcurrentHashMap<String, Double> memberScores = 
                 new java.util.concurrent.ConcurrentHashMap<>();
         // score -> members 映射，用于按分数排序
-        final java.util.concurrent.ConcurrentSkipListMap<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> scoreMembers = 
+        // 同分成员使用 ConcurrentSkipListSet 按字典序迭代（Redis 7 语义）
+        final java.util.concurrent.ConcurrentSkipListMap<Double, java.util.concurrent.ConcurrentSkipListSet<String>> scoreMembers = 
                 new java.util.concurrent.ConcurrentSkipListMap<>();
         
         int add(String member, double score) {
@@ -2531,7 +2533,7 @@ public class DefaultMemoryStore implements MemoryStore {
             
             // 如果是更新，先从旧分数中移除
             if (oldScore != null) {
-                java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> oldSet = scoreMembers.get(oldScore);
+                java.util.concurrent.ConcurrentSkipListSet<String> oldSet = scoreMembers.get(oldScore);
                 if (oldSet != null) {
                     oldSet.remove(member);
                     if (oldSet.isEmpty()) {
@@ -2541,7 +2543,7 @@ public class DefaultMemoryStore implements MemoryStore {
             }
             
             // 添加到新分数
-            scoreMembers.computeIfAbsent(score, k -> java.util.concurrent.ConcurrentHashMap.newKeySet()).add(member);
+            scoreMembers.computeIfAbsent(score, k -> new java.util.concurrent.ConcurrentSkipListSet<>()).add(member);
             
             return oldScore == null ? 1 : 0;
         }
@@ -2552,7 +2554,7 @@ public class DefaultMemoryStore implements MemoryStore {
             for (String member : members) {
                 Double score = memberScores.remove(member);
                 if (score != null) {
-                    java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> set = scoreMembers.get(score);
+                    java.util.concurrent.ConcurrentSkipListSet<String> set = scoreMembers.get(score);
                     if (set != null) {
                         set.remove(member);
                         if (set.isEmpty()) {
@@ -2584,7 +2586,7 @@ public class DefaultMemoryStore implements MemoryStore {
             
             java.util.List<String> result = new java.util.ArrayList<>(stopIdx - startIdx);
             int idx = 0;
-            for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : scoreMembers.entrySet()) {
+            for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>> entry : scoreMembers.entrySet()) {
                 for (String member : entry.getValue()) {
                     if (idx >= startIdx && idx < stopIdx) {
                         result.add(member);
@@ -2598,13 +2600,13 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         java.util.List<String> rangeByScore(double min, double max, int offset, int count) {
-            java.util.NavigableMap<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> subMap = 
+            java.util.NavigableMap<Double, java.util.concurrent.ConcurrentSkipListSet<String>> subMap = 
                     scoreMembers.subMap(min, true, max, true);
             
             java.util.List<String> result = new java.util.ArrayList<>();
             int skipped = 0;
             
-            for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : subMap.entrySet()) {
+            for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>> entry : subMap.entrySet()) {
                 for (String member : entry.getValue()) {
                     if (skipped < offset) {
                         skipped++;
@@ -2823,7 +2825,7 @@ public class DefaultMemoryStore implements MemoryStore {
         int added = 0;
         long newCursor = 0;
         
-        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : zset.scoreMembers.entrySet()) {
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>> entry : zset.scoreMembers.entrySet()) {
             for (String member : entry.getValue()) {
                 // 如果有游标，跳过之前的元素
                 if (cursor > 0 && processed < cursor) {
@@ -2876,11 +2878,11 @@ public class DefaultMemoryStore implements MemoryStore {
         ZSetStore zset = (ZSetStore) val;
         
         // 获取分数范围内的所有成员
-        java.util.NavigableMap<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> subMap = 
+        java.util.NavigableMap<Double, java.util.concurrent.ConcurrentSkipListSet<String>> subMap = 
                 zset.scoreMembers.subMap(min, true, max, true);
         
         java.util.List<String> membersToRemove = new java.util.ArrayList<>();
-        for (java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> members : subMap.values()) {
+        for (java.util.concurrent.ConcurrentSkipListSet<String> members : subMap.values()) {
             membersToRemove.addAll(members);
         }
         
@@ -2932,7 +2934,7 @@ public class DefaultMemoryStore implements MemoryStore {
         // 收集要删除的成员
         java.util.List<String> membersToRemove = new java.util.ArrayList<>();
         int idx = 0;
-        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : zset.scoreMembers.entrySet()) {
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>> entry : zset.scoreMembers.entrySet()) {
             for (String member : entry.getValue()) {
                 if (idx >= startIdx && idx < stopIdx) {
                     membersToRemove.add(member);
@@ -2986,14 +2988,14 @@ public class DefaultMemoryStore implements MemoryStore {
         
         // 计算排名：遍历所有分数小于该成员分数的成员数量
         long rank = 0;
-        java.util.NavigableMap<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> headMap = 
+        java.util.NavigableMap<Double, java.util.concurrent.ConcurrentSkipListSet<String>> headMap = 
                 zset.scoreMembers.headMap(score, false);
-        for (java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> members : headMap.values()) {
+        for (java.util.concurrent.ConcurrentSkipListSet<String> members : headMap.values()) {
             rank += members.size();
         }
         
         // 在相同分数的成员中找到该成员的位置
-        java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> sameScoreMembers = zset.scoreMembers.get(score);
+        java.util.concurrent.ConcurrentSkipListSet<String> sameScoreMembers = zset.scoreMembers.get(score);
         if (sameScoreMembers != null) {
             for (String m : sameScoreMembers) {
                 if (m.equals(member)) {
@@ -3087,11 +3089,11 @@ public class DefaultMemoryStore implements MemoryStore {
         ZSetStore zset = (ZSetStore) val;
         RuntimeConfig.incKeyspaceHits();
         
-        java.util.NavigableMap<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> subMap = 
+        java.util.NavigableMap<Double, java.util.concurrent.ConcurrentSkipListSet<String>> subMap = 
                 zset.scoreMembers.subMap(min, true, max, true);
         
         int count = 0;
-        for (java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> members : subMap.values()) {
+        for (java.util.concurrent.ConcurrentSkipListSet<String> members : subMap.values()) {
             count += members.size();
         }
         
@@ -3120,10 +3122,10 @@ public class DefaultMemoryStore implements MemoryStore {
         java.util.List<String> result = new java.util.ArrayList<>();
         int removed = 0;
         
-        // 从最高分数开始遍历（降序）
-        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : 
+        // 从最高分数开始遍历（降序）；同分按字典序降序（Redis 7 语义）
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>> entry : 
                 zset.scoreMembers.descendingMap().entrySet()) {
-            for (String member : entry.getValue()) {
+            for (String member : entry.getValue().descendingSet()) {
                 if (removed >= count) break;
                 result.add(member);
                 result.add(entry.getKey().toString());
@@ -3172,8 +3174,8 @@ public class DefaultMemoryStore implements MemoryStore {
         java.util.List<String> result = new java.util.ArrayList<>();
         int removed = 0;
         
-        // 从最低分数开始遍历（升序）
-        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : 
+        // 从最低分数开始遍历（升序）；同分按字典序升序（Redis 7 语义）
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>> entry : 
                 zset.scoreMembers.entrySet()) {
             for (String member : entry.getValue()) {
                 if (removed >= count) break;
@@ -3235,10 +3237,10 @@ public class DefaultMemoryStore implements MemoryStore {
         java.util.List<String> result = new java.util.ArrayList<>(stopIdx - startIdx);
         int idx = 0;
         
-        // 降序遍历
-        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>> entry : 
+        // 降序遍历；同分按字典序降序（Redis 7 语义）
+        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>> entry : 
                 zset.scoreMembers.descendingMap().entrySet()) {
-            for (String member : entry.getValue()) {
+            for (String member : entry.getValue().descendingSet()) {
                 if (idx >= startIdx && idx < stopIdx) {
                     result.add(member);
                 }

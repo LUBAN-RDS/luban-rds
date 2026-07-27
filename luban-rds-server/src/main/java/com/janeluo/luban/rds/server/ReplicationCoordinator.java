@@ -7,6 +7,7 @@ import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.persistence.impl.RdbPersistService;
 import com.janeluo.luban.rds.replication.MasterReplicationManager;
+import com.janeluo.luban.rds.replication.ReplicationController;
 import com.janeluo.luban.rds.replication.SlaveReplicationService;
 import com.janeluo.luban.rds.replication.handler.ReplicationCommandHandler;
 import org.slf4j.Logger;
@@ -33,7 +34,7 @@ import org.slf4j.LoggerFactory;
  * {@code startSlave} / {@code stopSlave} 用 synchronized 保护，避免并发启停同一从节点服务。
  * </p>
  */
-public class ReplicationCoordinator implements ReplicationLifecycleListener {
+public class ReplicationCoordinator implements ReplicationLifecycleListener, ReplicationController {
 
     private static final Logger logger = LoggerFactory.getLogger(ReplicationCoordinator.class);
 
@@ -103,6 +104,8 @@ public class ReplicationCoordinator implements ReplicationLifecycleListener {
 
         // 2. 创建复制命令处理器
         this.replicationCommandHandler = new ReplicationCommandHandler(config);
+        // 注入自身，使 SLAVEOF 命令能真正触发复制启停（server 依赖 replication，无循环依赖）
+        this.replicationCommandHandler.setReplicationCoordinator(this);
         logger.info("ReplicationCommandHandler 已创建");
 
         // 3. 若配置了 replicaof，启动从节点复制服务
@@ -235,6 +238,46 @@ public class ReplicationCoordinator implements ReplicationLifecycleListener {
         String address = master.getIp() + ":" + master.getPort();
         logger.info("集群生命周期 demoteToSlave: master={}, address={}", master.getNodeId(), address);
         startSlave(address);
+    }
+
+    /**
+     * 本节点当前的复制偏移量（master_repl_offset）。
+     * <p>
+     * failover 选举时由 {@code FailoverManager} 读取，填入 AUTH_REQUEST 携带，
+     * 供投票 master 比较候选 slave 的数据新鲜度择优。
+     * </p>
+     * <p>
+     * 优先级：
+     * <ol>
+     *   <li>slave 模式（slaveService != null）：返回已从上游同步到的偏移量
+     *       {@code slaveService.getReplOffset()}，反映本 slave 数据新鲜度。</li>
+     *   <li>master 模式（masterManager != null）：返回本地 backlog 的
+     *       {@code masterReplOffset}。master 不参与 failover 候选，此值仅供查询/调试。</li>
+     *   <li>两者皆不可用：返回 0（保守值）。</li>
+     * </ol>
+     * </p>
+     *
+     * @return 当前复制偏移量，不可用时返回 0
+     */
+    @Override
+    public long getReplicationOffset() {
+        SlaveReplicationService slave = this.slaveService;
+        if (slave != null) {
+            try {
+                return slave.getReplOffset();
+            } catch (Exception e) {
+                logger.warn("读取 slave 复制偏移量失败，回退到 master backlog", e);
+            }
+        }
+        MasterReplicationManager manager = this.masterManager;
+        if (manager != null && manager.getBacklog() != null) {
+            try {
+                return manager.getBacklog().getMasterReplOffset();
+            } catch (Exception e) {
+                logger.warn("读取 master backlog 偏移量失败", e);
+            }
+        }
+        return 0L;
     }
 
     // ==================== Getter ====================

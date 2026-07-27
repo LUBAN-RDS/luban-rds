@@ -21,23 +21,27 @@ class ReplicationCommandHandlerTest {
     @Mock
     private Channel channel;
 
+    @Mock
+    private ReplicationController coordinator;
+
     private ReplicationCommandHandler handler;
     private RdsConfig config;
 
     @BeforeEach
     void setUp() {
         MockitoAnnotations.openMocks(this);
-        
+
         when(channel.remoteAddress()).thenReturn(new InetSocketAddress("192.168.1.100", 6379));
         when(channel.isActive()).thenReturn(true);
         when(channel.writeAndFlush(any())).thenReturn(new DefaultChannelPromise(channel));
-        
+
         config = new RdsConfig();
         config.setPort(9736);
-        
+
         MasterReplicationManager.initialize(1024 * 1024);
-        
+
         handler = new ReplicationCommandHandler(config);
+        handler.setReplicationCoordinator(coordinator);
     }
 
     @Test
@@ -56,10 +60,14 @@ class ReplicationCommandHandlerTest {
     @Test
     @DisplayName("测试处理SLAVEOF NO ONE")
     void testHandleSlaveofNoOne() {
-        String result = handler.handleWithChannel(mock(io.netty.channel.ChannelHandlerContext.class), 
+        String result = handler.handleWithChannel(mock(io.netty.channel.ChannelHandlerContext.class),
                 new String[]{"SLAVEOF", "NO", "ONE"});
-        
+
         assertEquals("+OK\r\n", result);
+        // NO ONE 应触发停止复制并清除只读标志
+        verify(coordinator, times(1)).stopSlave();
+        assertFalse(handler.getReadOnlyModeManager().isSlave());
+        assertFalse(handler.getReadOnlyModeManager().isReadOnly());
     }
 
     @Test
@@ -67,8 +75,9 @@ class ReplicationCommandHandlerTest {
     void testHandleReplicaofNoOne() {
         String result = handler.handleWithChannel(mock(io.netty.channel.ChannelHandlerContext.class),
                 new String[]{"REPLICAOF", "NO", "ONE"});
-        
+
         assertEquals("+OK\r\n", result);
+        verify(coordinator, times(1)).stopSlave();
     }
 
     @Test
@@ -76,11 +85,15 @@ class ReplicationCommandHandlerTest {
     void testHandleSlaveofClusterMode() {
         config.setClusterEnabled(true);
         ReplicationCommandHandler clusterHandler = new ReplicationCommandHandler(config);
-        
+        clusterHandler.setReplicationCoordinator(coordinator);
+
         String result = clusterHandler.handleWithChannel(mock(io.netty.channel.ChannelHandlerContext.class),
                 new String[]{"SLAVEOF", "127.0.0.1", "6379"});
-        
+
         assertEquals("-ERR can't set master in cluster mode, use CLUSTER REPLICATE instead\r\n", result);
+        // 集群模式下不应触发 startSlave / stopSlave
+        verify(coordinator, never()).startSlave(anyString());
+        verify(coordinator, never()).stopSlave();
     }
 
     @Test
@@ -214,11 +227,50 @@ class ReplicationCommandHandlerTest {
     }
 
     @Test
-    @DisplayName("测试处理SLAVEOF设置主节点")
+    @DisplayName("测试处理SLAVEOF设置主节点 - 触发startSlave")
     void testHandleSlaveofSetMaster() {
         String result = handler.handleWithChannel(mock(io.netty.channel.ChannelHandlerContext.class),
                 new String[]{"SLAVEOF", "127.0.0.1", "6379"});
-        
+
         assertEquals("+OK\r\n", result);
+        // 应将 host port 传给 coordinator.startSlave
+        verify(coordinator, times(1)).startSlave("127.0.0.1 6379");
+        // 应同时设置只读从节点标志
+        assertTrue(handler.getReadOnlyModeManager().isSlave());
+        assertTrue(handler.getReadOnlyModeManager().isReadOnly());
+    }
+
+    @Test
+    @DisplayName("测试处理REPLICAOF设置主节点 - 触发startSlave")
+    void testHandleReplicaofSetMaster() {
+        String result = handler.handleWithChannel(mock(io.netty.channel.ChannelHandlerContext.class),
+                new String[]{"REPLICAOF", "127.0.0.1", "6379"});
+
+        assertEquals("+OK\r\n", result);
+        verify(coordinator, times(1)).startSlave("127.0.0.1 6379");
+    }
+
+    @Test
+    @DisplayName("测试处理SLAVEOF - 未注入coordinator时仍返回OK且不抛异常")
+    void testHandleSlaveofWithoutCoordinator() {
+        ReplicationCommandHandler bareHandler = new ReplicationCommandHandler(config);
+
+        String result = bareHandler.handleWithChannel(mock(io.netty.channel.ChannelHandlerContext.class),
+                new String[]{"SLAVEOF", "127.0.0.1", "6379"});
+
+        assertEquals("+OK\r\n", result);
+        assertTrue(bareHandler.getReadOnlyModeManager().isSlave());
+    }
+
+    @Test
+    @DisplayName("测试处理SLAVEOF NO ONE - 未注入coordinator时不抛异常")
+    void testHandleSlaveofNoOneWithoutCoordinator() {
+        ReplicationCommandHandler bareHandler = new ReplicationCommandHandler(config);
+
+        String result = bareHandler.handleWithChannel(mock(io.netty.channel.ChannelHandlerContext.class),
+                new String[]{"SLAVEOF", "NO", "ONE"});
+
+        assertEquals("+OK\r\n", result);
+        assertFalse(bareHandler.getReadOnlyModeManager().isSlave());
     }
 }

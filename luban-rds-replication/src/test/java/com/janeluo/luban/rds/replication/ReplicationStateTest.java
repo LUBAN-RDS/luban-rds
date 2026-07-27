@@ -15,6 +15,7 @@ class ReplicationStateTest {
         assertEquals("handshake_ping", ReplicationState.HANDSHAKE_PING.getName());
         assertEquals("handshake_auth", ReplicationState.HANDSHAKE_AUTH.getName());
         assertEquals("handshake_replconf_port", ReplicationState.HANDSHAKE_REPLCONF_PORT.getName());
+        assertEquals("handshake_psync", ReplicationState.HANDSHAKE_PSYNC.getName());
         assertEquals("full_sync", ReplicationState.FULL_SYNC.getName());
         assertEquals("loading_rdb", ReplicationState.LOADING_RDB.getName());
         assertEquals("partial_sync", ReplicationState.PARTIAL_SYNC.getName());
@@ -31,7 +32,8 @@ class ReplicationStateTest {
         assertTrue(ReplicationState.HANDSHAKE_REPLCONF_IP.isHandshake());
         assertTrue(ReplicationState.HANDSHAKE_REPLCONF_CAPA.isHandshake());
         assertTrue(ReplicationState.HANDSHAKE_REPLCONF_ACK.isHandshake());
-        
+        assertTrue(ReplicationState.HANDSHAKE_PSYNC.isHandshake());
+
         assertFalse(ReplicationState.DISCONNECTED.isHandshake());
         assertFalse(ReplicationState.CONNECTING.isHandshake());
         assertFalse(ReplicationState.FULL_SYNC.isHandshake());
@@ -88,6 +90,6 @@ class ReplicationStateTest {
     @DisplayName("测试枚举值数量")
     void testEnumCount() {
         ReplicationState[] states = ReplicationState.values();
-        assertEquals(13, states.length);
+        assertEquals(14, states.length);
     }
 }

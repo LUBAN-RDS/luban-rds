@@ -219,61 +219,117 @@ public class MigrateCommandHandler {
     private String migrateMultipleKeys(String host, int port, String[] keys,
                                         int destDb, long timeout,
                                         boolean copy, boolean replace) {
-        int successCount = 0;
-        int failedCount = 0;
-        List<String> failedKeys = new ArrayList<>();
+        // 两阶段原子批量迁移：
+        //   阶段 1（dump + transfer）：先 dump 所有键并累加大小校验，超限直接拒绝；
+        //                            随后逐键发送并收集每个键的 ACK 结果，此阶段不删除任何源键。
+        //   阶段 2（decide + del）：   仅当全部键 ACK 成功且非 COPY 模式时，统一删除所有源键；
+        //                            任一键失败则源端不删，避免半迁移导致数据丢失。
+        // 这样修复了原先“每键立即 del”的非原子行为，符合 Redis 7 多键 MIGRATE 的全有/全无语义。
 
+        List<KeyDump> dumped = new ArrayList<>();
+        List<String> dumpFailedKeys = new ArrayList<>();
+        long totalSize = 0L;
+        boolean sizeExceeded = false;
+
+        // 阶段 1a：dump 所有键并校验累计大小
         for (String key : keys) {
             try {
-                // 检查键是否存在
                 if (!memoryStore.exists(DEFAULT_DATABASE, key)) {
-                    failedCount++;
-                    failedKeys.add(key);
+                    dumpFailedKeys.add(key);
                     continue;
                 }
-
-                // 直接导出键值（不依赖 SETSLOT MIGRATING 状态）
                 byte[] valueBytes = dumpKey(key);
                 if (valueBytes == null) {
-                    failedCount++;
-                    failedKeys.add(key);
+                    dumpFailedKeys.add(key);
                     continue;
                 }
                 long ttl = memoryStore.pttl(DEFAULT_DATABASE, key);
                 if (ttl < 0) {
                     ttl = 0;
                 }
+                totalSize += valueBytes.length;
+                dumped.add(new KeyDump(key, valueBytes, ttl));
 
-                // 发送键到目标节点
-                boolean success = sendKeyToTarget(host, port, key, valueBytes, ttl, timeout, replace);
-
-                if (success) {
-                    // 如果不是 COPY 模式，删除源键
-                    if (!copy) {
-                        memoryStore.del(DEFAULT_DATABASE, key);
-                    }
-                    successCount++;
-                } else {
-                    failedCount++;
-                    failedKeys.add(key);
+                // 累计超过单批上限立即中止，尚未发起传输
+                if (totalSize > getMaxBatchSize()) {
+                    sizeExceeded = true;
+                    break;
                 }
-
             } catch (Exception e) {
-                logger.error("迁移键 {} 失败", key, e);
-                failedCount++;
-                failedKeys.add(key);
+                logger.error("dump 键 {} 失败", key, e);
+                dumpFailedKeys.add(key);
             }
         }
 
-        logger.info("批量迁移完成: 成功 {}, 失败 {}", successCount, failedCount);
+        if (sizeExceeded) {
+            logger.warn("批量迁移中止：单批总大小超过 {} 字节（当前累计 {}）", getMaxBatchSize(), totalSize);
+            return "-ERR command keys batch too large\r\n";
+        }
 
+        // 阶段 1b：逐键发送到目标节点，记录每个键的 ACK 结果（此阶段不删除源键）
+        int successCount = 0;
+        List<String> sendFailedKeys = new ArrayList<>();
+
+        for (KeyDump kd : dumped) {
+            try {
+                boolean success = sendKeyToTarget(host, port, kd.key, kd.value, kd.ttl, timeout, replace);
+                if (success) {
+                    successCount++;
+                } else {
+                    sendFailedKeys.add(kd.key);
+                }
+            } catch (Exception e) {
+                logger.error("迁移键 {} 失败", kd.key, e);
+                sendFailedKeys.add(kd.key);
+            }
+        }
+
+        int failedCount = dumpFailedKeys.size() + sendFailedKeys.size();
+
+        // 阶段 2：决策。全部成功且非 COPY 模式才统一删除源键；任一失败源端不删
         if (failedCount == 0) {
+            if (!copy) {
+                for (KeyDump kd : dumped) {
+                    memoryStore.del(DEFAULT_DATABASE, kd.key);
+                }
+            }
+            logger.info("批量迁移完成: 成功 {}", successCount);
             return "+OK\r\n";
         } else if (successCount == 0) {
+            logger.info("批量迁移完成: 全部失败 {}", failedCount);
             return "-ERR all keys failed to migrate\r\n";
         } else {
-            return "-ERR partial migration: " + successCount + " succeeded, " 
+            logger.info("批量迁移部分失败: 成功 {}, 失败 {}（源端不删除）", successCount, failedCount);
+            return "-ERR partial migration: " + successCount + " succeeded, "
                     + failedCount + " failed\r\n";
+        }
+    }
+
+    /**
+     * 单批 MIGRATE 最大允许传输的字节总量（64MB）。
+     * <p>
+     * 可由测试覆写为更小阈值以便触发超限分支。
+     * </p>
+     *
+     * @return 最大字节数
+     */
+    protected long getMaxBatchSize() {
+        return 64L * 1024 * 1024;
+    }
+
+    /**
+     * 已 dump 的键数据载体（键名 + 序列化字节数组 + TTL）。
+     * 仅在批量迁移内部使用。
+     */
+    private static class KeyDump {
+        final String key;
+        final byte[] value;
+        final long ttl;
+
+        KeyDump(String key, byte[] value, long ttl) {
+            this.key = key;
+            this.value = value;
+            this.ttl = ttl;
         }
     }
 

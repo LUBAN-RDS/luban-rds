@@ -70,6 +70,15 @@ public class RdbPersistService implements PersistService {
     private static final byte RDB_TYPE_ZSET = 0x03;
     private static final byte RDB_TYPE_HASH = 0x04;
     private static final byte RDB_TYPE_STREAM = 0x05;
+
+    // RDB 操作码常量（与 Redis RDB 格式一致）
+    private static final byte RDB_OPCODE_SELECTDB = (byte) 0xFE;
+    private static final byte RDB_OPCODE_EOF = (byte) 0xFF;
+    // 过期时间操作码：0xFC 毫秒级，0xFD 秒级
+    private static final byte RDB_OPCODE_EXPIRETIME_MS = (byte) 0xFC;
+    private static final byte RDB_OPCODE_EXPIRETIME = (byte) 0xFD;
+    // 秒级 TTL 阈值：剩余 TTL < 1 小时且为整秒时使用 0xFD（秒级），否则使用 0xFC（毫秒级）
+    private static final long SEC_TTL_THRESHOLD_MS = 3600000L;
     
     public RdbPersistService(String dataDir) {
         this.dataDir = dataDir;
@@ -285,6 +294,9 @@ public class RdbPersistService implements PersistService {
             
             // 读取数据库数据
             int currentDb = 0;
+            // 暂存从 0xFC/0xFD opcode 读取到的绝对过期时间戳（毫秒），
+            // 用于下一个 type+key+value 的 TTL 恢复；-1 表示无过期时间（永久键）
+            long pendingExpireAtMs = -1L;
             try {
                 while (true) {
                     if (dis.available() == 0) {
@@ -294,19 +306,27 @@ public class RdbPersistService implements PersistService {
                     byte opcode = dis.readByte();
                     
                     switch (opcode) {
-                        case (byte) 0xFE: // 数据库选择指令
+                        case RDB_OPCODE_SELECTDB: // 数据库选择指令 0xFE
                             currentDb = readSelectDb(dis);
                             break;
-                        case (byte) 0x00: // 字符串类型
-                        case (byte) 0x01: // 列表类型
-                        case (byte) 0x02: // 集合类型
-                        case (byte) 0x03: // 有序集合类型
-                        case (byte) 0x04: // 哈希类型
-                        case (byte) 0x05: // Stream 类型
-                            readKeyValue(dis, opcode, currentDb, memoryStore);
+                        case RDB_OPCODE_EXPIRETIME_MS: // 0xFC 毫秒级过期时间
+                            pendingExpireAtMs = readExpireTimeMs(dis);
+                            break;
+                        case RDB_OPCODE_EXPIRETIME: // 0xFD 秒级过期时间
+                            pendingExpireAtMs = readExpireTimeSec(dis);
+                            break;
+                        case RDB_TYPE_STRING: // 字符串类型
+                        case RDB_TYPE_LIST: // 列表类型
+                        case RDB_TYPE_SET: // 集合类型
+                        case RDB_TYPE_ZSET: // 有序集合类型
+                        case RDB_TYPE_HASH: // 哈希类型
+                        case RDB_TYPE_STREAM: // Stream 类型
+                            readKeyValue(dis, opcode, currentDb, memoryStore, pendingExpireAtMs);
+                            // TTL 已被消费，重置为永久（直到再次遇到 expire opcode）
+                            pendingExpireAtMs = -1L;
                             keyCount++;
                             break;
-                        case (byte) 0xFF: // RDB文件尾
+                        case RDB_OPCODE_EOF: // RDB文件尾 0xFF
                             logger.debug("RDB file footer found");
                             // 跳过校验和数据
                             if (dis.available() >= 8) {
@@ -314,7 +334,7 @@ public class RdbPersistService implements PersistService {
                             }
                             break;
                         default:
-                            logger.warn("Unknown opcode: 0x{}", Integer.toHexString(opcode));
+                            logger.warn("Unknown opcode: 0x{}", Integer.toHexString(opcode & 0xFF));
                             break;
                     }
                 }
@@ -390,7 +410,7 @@ public class RdbPersistService implements PersistService {
     }
     
     private void writeSelectDb(DataOutputStream dos, int db) throws IOException {
-        dos.writeByte(0xFE); // 数据库选择指令
+        dos.writeByte(RDB_OPCODE_SELECTDB); // 数据库选择指令 0xFE
         writeLength(dos, db);
     }
     
@@ -400,6 +420,22 @@ public class RdbPersistService implements PersistService {
     
     private void writeKeyValue(DataOutputStream dos, int db, String key, Object value, MemoryStore memoryStore) throws IOException {
         String type = memoryStore.type(db, key);
+        // 键可能在 scan 与 writeKeyValue 之间过期/被删（type 返回 none）。
+        // 此时跳过整个写入，避免写出孤立的 expire opcode 后没有 type+key+value 跟随，
+        // 导致加载侧错位。这是“宁可丢一条也不破坏文件”的安全策略。
+        if ("none".equals(type) || value == null) {
+            logger.debug("Skip writing key {} (type={}, valueIsNull={})", key, type, value == null);
+            return;
+        }
+        
+        // 先写过期时间 opcode（若键有 TTL）。
+        // 遵循 Redis RDB 格式：expire opcode 出现在 type byte 之前，
+        // 加载侧主循环读取 opcode 后暂存 expireAt，再读取下一个 type opcode。
+        long pttl = memoryStore.pttl(db, key);
+        if (pttl > 0) {
+            writeExpireTime(dos, pttl);
+        }
+        
         switch (type) {
             case "string":
                 dos.writeByte(RDB_TYPE_STRING);
@@ -433,12 +469,94 @@ public class RdbPersistService implements PersistService {
                 writeStream(dos, (Stream) value, memoryStore, db, key);
                 break;
             default:
-                logger.warn("Unknown type: {}", type);
+                logger.warn("Unknown type: {} (key={})", type, key);
                 break;
         }
     }
     
-    private void readKeyValue(DataInputStream dis, byte opcode, int db, MemoryStore memoryStore) throws IOException {
+    /**
+     * 写入过期时间 opcode 与时间戳（小端序，与 Redis RDB 一致）。
+     *
+     * <p>选择规则：
+     * <ul>
+     *   <li>剩余 TTL &lt; 3600000ms（1小时）且为整秒 -> 0xFD + 4 字节秒级时间戳</li>
+     *   <li>否则 -> 0xFC + 8 字节毫秒级时间戳</li>
+     * </ul>
+     *
+     * @param dos  数据输出流
+     * @param pttl 剩余生存时间（毫秒）
+     * @throws IOException 写入失败
+     */
+    private void writeExpireTime(DataOutputStream dos, long pttl) throws IOException {
+        long expireAt = System.currentTimeMillis() + pttl;
+        boolean isWholeSeconds = (pttl % 1000L) == 0L;
+        if (pttl < SEC_TTL_THRESHOLD_MS && isWholeSeconds) {
+            // 秒级：0xFD + 4 字节小端秒级时间戳
+            dos.writeByte(RDB_OPCODE_EXPIRETIME);
+            int expireSec = (int) (expireAt / 1000L);
+            writeLittleEndianInt(dos, expireSec);
+        } else {
+            // 毫秒级：0xFC + 8 字节小端毫秒级时间戳
+            dos.writeByte(RDB_OPCODE_EXPIRETIME_MS);
+            writeLittleEndianLong(dos, expireAt);
+        }
+    }
+    
+    /**
+     * 以小端序写入 4 字节 int。
+     * Java DataOutputStream.writeInt 为大端序，故逐字节写入。
+     */
+    private void writeLittleEndianInt(DataOutputStream dos, int v) throws IOException {
+        dos.writeByte((byte) (v & 0xFF));
+        dos.writeByte((byte) ((v >> 8) & 0xFF));
+        dos.writeByte((byte) ((v >> 16) & 0xFF));
+        dos.writeByte((byte) ((v >> 24) & 0xFF));
+    }
+    
+    /**
+     * 以小端序写入 8 字节 long。
+     * Java DataOutputStream.writeLong 为大端序，故逐字节写入。
+     */
+    private void writeLittleEndianLong(DataOutputStream dos, long v) throws IOException {
+        dos.writeByte((byte) (v & 0xFF));
+        dos.writeByte((byte) ((v >> 8) & 0xFF));
+        dos.writeByte((byte) ((v >> 16) & 0xFF));
+        dos.writeByte((byte) ((v >> 24) & 0xFF));
+        dos.writeByte((byte) ((v >> 32) & 0xFF));
+        dos.writeByte((byte) ((v >> 40) & 0xFF));
+        dos.writeByte((byte) ((v >> 48) & 0xFF));
+        dos.writeByte((byte) ((v >> 56) & 0xFF));
+    }
+    
+    /**
+     * 读取 0xFC 后的 8 字节小端毫秒级过期时间戳。
+     */
+    private long readExpireTimeMs(DataInputStream dis) throws IOException {
+        long b0 = dis.readByte() & 0xFFL;
+        long b1 = dis.readByte() & 0xFFL;
+        long b2 = dis.readByte() & 0xFFL;
+        long b3 = dis.readByte() & 0xFFL;
+        long b4 = dis.readByte() & 0xFFL;
+        long b5 = dis.readByte() & 0xFFL;
+        long b6 = dis.readByte() & 0xFFL;
+        long b7 = dis.readByte() & 0xFFL;
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+                | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+    }
+    
+    /**
+     * 读取 0xFD 后的 4 字节小端秒级过期时间戳，换算为毫秒。
+     */
+    private long readExpireTimeSec(DataInputStream dis) throws IOException {
+        int b0 = dis.readByte() & 0xFF;
+        int b1 = dis.readByte() & 0xFF;
+        int b2 = dis.readByte() & 0xFF;
+        int b3 = dis.readByte() & 0xFF;
+        int expireSec = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        return ((long) expireSec) * 1000L;
+    }
+    
+    private void readKeyValue(DataInputStream dis, byte opcode, int db, MemoryStore memoryStore, long expireAtMs) throws IOException {
         try {
             String key = readString(dis);
             
@@ -455,26 +573,54 @@ public class RdbPersistService implements PersistService {
                     break;
                 case RDB_TYPE_ZSET:
                     readZSetWithScores(dis, memoryStore, db, key);
+                    applyExpireIfAny(memoryStore, db, key, expireAtMs);
                     return;
                 case RDB_TYPE_HASH:
                     value = readHash(dis);
                     break;
                 case RDB_TYPE_STREAM:
                     readStream(dis, memoryStore, db, key);
+                    applyExpireIfAny(memoryStore, db, key, expireAtMs);
                     return;
                 default:
-                    logger.warn("Unknown opcode: 0x{}", Integer.toHexString(opcode));
+                    logger.warn("Unknown opcode: 0x{}", Integer.toHexString(opcode & 0xFF));
                     break;
             }
             
             if (value != null) {
                 memoryStore.set(db, key, value);
-                logger.debug("Loaded data from RDB: DB={}, Key={}, Type=0x{}", db, key, Integer.toHexString(opcode));
+                applyExpireIfAny(memoryStore, db, key, expireAtMs);
+                logger.debug("Loaded data from RDB: DB={}, Key={}, Type=0x{}, expireAtMs={}",
+                        db, key, Integer.toHexString(opcode & 0xFF), expireAtMs);
             }
         } catch (EOFException e) {
             logger.debug("End of file reached while reading key-value pair");
             throw e;
         }
+    }
+    
+    /**
+     * 若加载侧读到了 expire opcode（expireAtMs > 0），则恢复 TTL：
+     * remaining = expireAtMs - now；<=0 表示已过期，删除已加载的键（不复活）；
+     * 否则 pexpire(db, key, remaining)。
+     *
+     * <p>expireAtMs <= 0 表示无 expire opcode（旧格式），按永久键处理，不做任何操作。
+     */
+    private void applyExpireIfAny(MemoryStore memoryStore, int db, String key, long expireAtMs) {
+        if (expireAtMs <= 0) {
+            // 无过期时间（旧格式或永久键），保持永久
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long remaining = expireAtMs - now;
+        if (remaining <= 0) {
+            // 已过期：删除已加载的键，避免复活
+            memoryStore.del(db, key);
+            logger.debug("Skip expired key on load: DB={}, Key={}, expireAtMs={}, now={}",
+                    db, key, expireAtMs, now);
+            return;
+        }
+        memoryStore.pexpire(db, key, remaining);
     }
     
     private void writeString(DataOutputStream dos, String str) throws IOException {
@@ -867,7 +1013,7 @@ public class RdbPersistService implements PersistService {
     }
     
     private void writeRdbFooter(DataOutputStream dos) throws IOException {
-        dos.writeByte(0xFF); // 文件尾标识
+        dos.writeByte(RDB_OPCODE_EOF); // 文件尾标识 0xFF
         // 写入校验和（简单实现，使用时间戳）
         dos.writeLong(System.currentTimeMillis());
     }

@@ -85,6 +85,13 @@ public class PersistServiceFactory {
             rdbService.persist(memoryStore);
             aofService.persist(memoryStore);
         }
+
+        @Override
+        public void recordCommand(byte[] respFrame) {
+            if (aofService != null) {
+                aofService.recordCommand(respFrame);
+            }
+        }
         
         @Override
         public java.util.Map<String, Object> getInfo() {
