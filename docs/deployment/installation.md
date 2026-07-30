@@ -98,7 +98,7 @@ chmod +x start.sh
 **步骤 1：下载预编译包**
 从 GitHub Releases 页面下载最新的预编译包：
 ```bash
-wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.8/luban-rds-jar-with-dependencies.jar
+wget https://github.com/LUBAN-RDS/luban-rds/releases/download/v1.0.10/luban-rds-jar-with-dependencies.jar
 ```
 
 **步骤 2：启动服务**
@@ -150,33 +150,33 @@ redis-cli -h localhost -p 9736 PING
 **步骤 1：构建镜像**
 ```bash
 # 在项目根目录执行
-docker build -t luban-rds:1.0.8 .
+docker build -t luban-rds:1.0.10 .
 ```
 
 **步骤 2：运行容器**
 ```bash
 # 基本运行
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.8
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.10
 
 # 带持久化存储
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v luban-rds-data:/data \
-  luban-rds:1.0.8
+  luban-rds:1.0.10
 
 # 带自定义配置
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v /path/to/luban-rds.conf:/app/config/luban-rds.conf:ro \
   -v luban-rds-data:/data \
-  luban-rds:1.0.8
+  luban-rds:1.0.10
 
 # 带密码认证
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v luban-rds-data:/data \
   -e LUBAN_RDS_REQUIREPASS=your-secure-password \
-  luban-rds:1.0.8
+  luban-rds:1.0.10
 
 # 带资源限制
 docker run -d --name luban-rds \
@@ -184,7 +184,7 @@ docker run -d --name luban-rds \
   -v luban-rds-data:/data \
   --memory="1g" \
   --cpus="2" \
-  luban-rds:1.0.8
+  luban-rds:1.0.10
 ```
 
 **步骤 3：管理容器**
@@ -230,7 +230,7 @@ version: '3.8'
 
 services:
   luban-rds:
-    image: luban-rds:1.0.8
+    image: luban-rds:1.0.10
     container_name: luban-rds
     restart: unless-stopped
     ports:
@@ -375,7 +375,7 @@ spec:
     spec:
       containers:
         - name: luban-rds
-          image: luban-rds:1.0.8
+          image: luban-rds:1.0.10
           ports:
             - containerPort: 9736
           volumeMounts:
@@ -421,7 +421,7 @@ kubectl get events -n luban-rds --sort-by='.lastTimestamp'
 <dependency>
     <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.8</version>
+    <version>1.0.10</version>
 </dependency>
 ```
 
@@ -487,7 +487,7 @@ Luban-RDS 支持嵌入到应用中使用，无需单独部署服务：
 <dependency>
     <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-server</artifactId>
-    <version>1.0.8</version>
+    <version>1.0.10</version>
 </dependency>
 ```
 
@@ -671,7 +671,7 @@ redis-cli -h localhost -p 9736 INFO
 
 # 输出示例
 # Server
-redis_version:1.0.8
+redis_version:1.0.10
 redis_git_sha1:00000000
 redis_git_dirty:0
 redis_build_id:abcdef123456

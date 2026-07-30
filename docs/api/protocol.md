@@ -274,7 +274,7 @@ public class Command {
 ### 5.4 QUIT 响应与连接关闭
 - QUIT 的响应为 `+OK\r\n`（Simple String）
 - 响应写回后服务器主动关闭连接
-- 参考实现：`RedisServerHandler#handleQuitCommand` 方法（2026-07-27 / 1.0.8 版本核对）。
+- 参考实现：`RedisServerHandler#handleQuitCommand` 方法（2026-07-30 / 1.0.10 版本核对）。
 
 ## 6. 客户端实现
 

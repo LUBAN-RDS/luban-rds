@@ -1,7 +1,7 @@
 ---
 title: Luban-RDS 文档
-last_updated: 2026-07-27
-version: 1.0.8
+last_updated: 2026-07-30
+version: 1.0.10
 ---
 
 <div align="center">
@@ -74,6 +74,21 @@ version: 1.0.8
 ---
 
 ## ✨ 版本特性
+
+### v1.0.10 (已发布 · 2026-07-30)
+
+#### 🛡️ 集群持久化并发安全
+- ✅ **修复并发保存 `nodes.conf` 的竞态条件**: `ClusterConfigPersister` 对拓扑变更与周期 `clusterSaveConfigIfNeeded` 共路径场景下的并发刷盘加锁与串行化，避免半写文件与状态丢失
+
+### v1.0.9 (已发布 · 2026-07-30)
+
+#### 🛡️ P0 数据安全补遗
+- ✅ **C2 PSYNC / REPLCONF 链路**: 激活 PSYNC 响应路由，REPLCONF 顺序等待 + 超时，重新启用 `ReplicationIntegrationTest`
+- ✅ **C3 AOF `recordCommand` 接口 + SELECT db 标记**: 补齐 AOF 落盘链路，`CompositePersistService` 委托实现
+- ✅ **C4 SLAVEOF 启动复制**: `SLAVEOF` 命令实际触发复制链路
+- ✅ **C5 全量同步窗口回放**: 全量同步期间的增量写入在同步窗口完成后正确回放
+- ✅ **C6 从节点 offset + WAIT**: 校验从节点 replication offset，`WAIT N` 行为对齐 Redis
+- ✅ **C10 RDB TTL 持久化**: 补齐 RDB TTL 编码（`0xFD`）
 
 ### v1.0.8 (已发布 · 2026-07-27)
 

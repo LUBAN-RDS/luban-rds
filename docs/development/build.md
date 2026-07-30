@@ -172,14 +172,14 @@ git branch -a
 
 构建完成后，各模块的输出文件位于：
 
-- **luban-rds-core**：`luban-rds-core/target/luban-rds-core-1.0.8.jar`
-- **luban-rds-protocol**：`luban-rds-protocol/target/luban-rds-protocol-1.0.8.jar`
-- **luban-rds-server**：`luban-rds-server/target/luban-rds-server-1.0.8.jar`
-- **luban-rds-persistence**：`luban-rds-persistence/target/luban-rds-persistence-1.0.8.jar`
-- **luban-rds-client**：`luban-rds-client/target/luban-rds-client-1.0.8.jar`
-- **luban-rds-common**：`luban-rds-common/target/luban-rds-common-1.0.8.jar`
+- **luban-rds-core**：`luban-rds-core/target/luban-rds-core-1.0.10.jar`
+- **luban-rds-protocol**：`luban-rds-protocol/target/luban-rds-protocol-1.0.10.jar`
+- **luban-rds-server**：`luban-rds-server/target/luban-rds-server-1.0.10.jar`
+- **luban-rds-persistence**：`luban-rds-persistence/target/luban-rds-persistence-1.0.10.jar`
+- **luban-rds-client**：`luban-rds-client/target/luban-rds-client-1.0.10.jar`
+- **luban-rds-common**：`luban-rds-common/target/luban-rds-common-1.0.10.jar`
 - **luban-rds-bin**：`luban-rds-bin/target/luban-rds-jar-with-dependencies.jar`（含所有依赖的可执行 fat JAR，启动入口 `com.janeluo.luban.rds.bin.RedisServerMain`）
-- **luban-rds-spring-boot-starter**：`luban-rds-spring-boot-starter/target/luban-rds-spring-boot-starter-1.0.8.jar`
+- **luban-rds-spring-boot-starter**：`luban-rds-spring-boot-starter/target/luban-rds-spring-boot-starter-1.0.10.jar`
 
 ## 3. 测试流程
 
@@ -320,10 +320,10 @@ Luban-RDS 项目当前仅配置了 GitHub Pages 发布流水线（`.github/workf
 
 ```bash
 # 构建 Docker 镜像
-docker build -t luban-rds:1.0.8 .
+docker build -t luban-rds:1.0.10 .
 
 # 在容器中运行并验证
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.8
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.10
 ```
 
 ## 6. 开发工具集成
@@ -563,25 +563,25 @@ Luban-RDS 提供了完整的 Docker 支持，使用多阶段构建优化镜像�
 
 ```bash
 # 在项目根目录执行
-docker build -t luban-rds:1.0.8 .
+docker build -t luban-rds:1.0.10 .
 
 # 带构建参数
 docker build \
   --build-arg JAVA_VERSION=17 \
-  -t luban-rds:1.0.8 .
+  -t luban-rds:1.0.10 .
 ```
 
 #### 运行 Docker 容器
 
 ```bash
 # 基本运行
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.8
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.10
 
 # 带持久化存储
 docker run -d --name luban-rds \
   -p 9736:9736 \
   -v luban-rds-data:/data \
-  luban-rds:1.0.8
+  luban-rds:1.0.10
 
 # 带环境变量配置
 docker run -d --name luban-rds \
@@ -589,7 +589,7 @@ docker run -d --name luban-rds \
   -v luban-rds-data:/data \
   -e LUBAN_RDS_MAXMEMORY=1073741824 \
   -e JAVA_OPTS="-Xms512m -Xmx1g" \
-  luban-rds:1.0.8
+  luban-rds:1.0.10
 ```
 
 #### 使用 Docker Compose
@@ -628,10 +628,10 @@ Luban-RDS 的 Dockerfile 遵循行业最佳实践：
 docker login registry.example.com
 
 # 标记镜像
-docker tag luban-rds:1.0.8 registry.example.com/luban-rds:1.0.8
+docker tag luban-rds:1.0.10 registry.example.com/luban-rds:1.0.10
 
 # 推送镜像
-docker push registry.example.com/luban-rds:1.0.8
+docker push registry.example.com/luban-rds:1.0.10
 ```
 
 ## 11. 常见构建命令

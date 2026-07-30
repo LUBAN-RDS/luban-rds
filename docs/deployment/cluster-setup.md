@@ -1,7 +1,7 @@
 ---
 title: 集群部署
-last_updated: 2026-07-27
-version: 1.0.8
+last_updated: 2026-07-30
+version: 1.0.10
 ---
 
 # 集群部署

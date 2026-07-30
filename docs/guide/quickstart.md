@@ -35,10 +35,10 @@ redis-cli -h localhost -p 9736 PING
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.8 .
+docker build -t luban-rds:1.0.10 .
 
 # 运行容器
-docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.8
+docker run -d --name luban-rds -p 9736:9736 luban-rds:1.0.10
 
 # 验证服务
 redis-cli -h localhost -p 9736 PING
@@ -108,7 +108,7 @@ PONG
 <dependency>
     <groupId>com.janeluo</groupId>
     <artifactId>luban-rds-client</artifactId>
-    <version>1.0.8</version>
+    <version>1.0.10</version>
 </dependency>
 ```
 

@@ -582,7 +582,7 @@ Luban-RDS 完整支持 Redis Cluster 协议，提供完整的集群管理命令�
 | **READONLY** | `READONLY` | 启用从节点只读模式 |
 | **READWRITE** | `READWRITE` | 禁用从节点只读模式 |
 
-> 备注：`CLUSTER RESET [HARD\|SOFT]` 在 1.0.8 版本中尚未实现，调用将返回 `-ERR unsupported command` 类型的错误，不在本表列出。
+> 备注：`CLUSTER RESET [HARD\|SOFT]` 在 1.0.10 版本中尚未实现，调用将返回 `-ERR unsupported command` 类型的错误，不在本表列出。
 
 **示例**：
 ```bash

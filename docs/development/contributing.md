@@ -74,7 +74,7 @@ mvn test -Dtest=LuaCommandHandlerTest
 
 ```bash
 # 启动嵌入式服务器（适用于单元测试 / IDE 内嵌运行）
-java -cp luban-rds-server/target/luban-rds-server-1.0.8.jar com.janeluo.luban.rds.server.EmbeddedRedisServer
+java -cp luban-rds-server/target/luban-rds-server-1.0.10.jar com.janeluo.luban.rds.server.EmbeddedRedisServer
 
 # 启动独立服务器（推荐：使用 bin 模块 fat JAR，启动入口 com.janeluo.luban.rds.bin.RedisServerMain）
 java -jar luban-rds-bin/target/luban-rds-jar-with-dependencies.jar

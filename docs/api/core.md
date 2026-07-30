@@ -511,7 +511,7 @@ public interface RedisClient {
 
 ## 6. 版本信息
 
-- **当前版本**：1.0.8
+- **当前版本**：1.0.10
 - **核心模块**（共 12 个 Maven 模块）：
   - `luban-rds-common`：公共工具类
   - `luban-rds-core`：核心命令处理器和内存存储
@@ -543,7 +543,7 @@ public interface RedisClient {
 Luban-RDS 使用 `DefaultCommandHandler` 根据命令名将请求分发到具体的命令处理器。服务器会将客户端发送的参数“完整原样”传递到处理器，包括命令名及其后续所有参数，从而保持与原始请求一致（二进制安全、无截断）。
 
 - 分发入口参考：`DefaultCommandHandler#dispatch(...)`（参见 `DefaultCommandHandler#registerHandlers()` 注册逻辑）。
-- 参数传递参考：`RedisServerHandler` 入站命令循环中向处理器传入完整 `String[] args`，位置以方法名 `handleCommand` / `channelRead0` 为准，1.0.8 版本未变动语义。
+- 参数传递参考：`RedisServerHandler` 入站命令循环中向处理器传入完整 `String[] args`，位置以方法名 `handleCommand` / `channelRead0` 为准，1.0.10 版本未变动语义。
 
 ## 9. 事务内 SELECT 的状态更新
 

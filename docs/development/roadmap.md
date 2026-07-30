@@ -19,10 +19,26 @@ v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P
 - [x] **C11 AOF rewrite 期间数据一致性**: 修复 AOF rewrite 与主写入并发时的子进程快照可能丢失最新写入的问题，引入追加双写与重写完成校验。
 - [x] **C12 ZSet 字典序比较修复**: 修正 `ZRANGEBYLEX` / `ZRANGEBYSCORE` 中对同分数成员的字典序比较逻辑，使其与 Redis 7.x 行为一致。
 
-### 2.1 v1.0.8 已发布功能（当前最新）
+### 2.1 v1.0.10 已发布功能（当前最新）
+
+#### 分布式特性 - 集群持久化并发安全
+- [x] **修复并发保存 `nodes.conf` 的竞态条件 (v1.0.10)**: `ClusterConfigPersister` 对拓扑变更与周期 `clusterSaveConfigIfNeeded` 共路径场景下的并发刷盘加锁与串行化，避免半写文件与状态丢失
+
+### 2.2 v1.0.9 已发布功能
+
+#### 分布式特性 - 复制 / 持久化补遗
+- [x] **C2 PSYNC / REPLCONF 链路 (v1.0.9)**: 激活 PSYNC 响应路由，REPLCONF 顺序等待 + 超时，握手失败原因日志输出，重新启用 `ReplicationIntegrationTest`
+- [x] **C3 AOF `recordCommand` + SELECT db 标记 (v1.0.9)**: 补齐 AOF `recordCommand` 接口与 `SELECT db` 落盘标记，`CompositePersistService` 委托实现 `recordCommand`
+- [x] **C4 SLAVEOF 启动复制 (v1.0.9)**: `SLAVEOF` 命令实际触发复制链路
+- [x] **C5 全量同步窗口回放 (v1.0.9)**: 全量同步期间的增量写入在同步窗口完成后回放，避免漏写
+- [x] **C6 从节点 offset 与 WAIT 校验 (v1.0.9)**: 校验从节点 replication offset，`WAIT N` 行为对齐 Redis
+- [x] **C10 RDB TTL 持久化 (v1.0.9)**: 补齐 RDB TTL 编码（`0xFD`）
+- [x] **持久化代码清理 (v1.0.9)**: 移除 `parseAndExecuteCommand` / `parseRespArray` 等死代码
+
+### 2.3 v1.0.8 已发布功能
 
 #### 分布式特性 - 集群高可用与运维友好
-- [x] **集群配置持久化与节点状态恢复 (v1.0.4 起，沿用至 v1.0.8)**:
+- [x] **集群配置持久化与节点状态恢复 (v1.0.4 起，沿用至 v1.0.10)**:
   - `ClusterConfigPersister` 在拓扑变更时自动同步 `nodes.conf`（`cluster-config-file`）
   - 脏标记（dirty flag）机制避免每次操作都同步刷盘；类 Redis 7 `clusterSaveConfigIfNeeded` 周期任务兜底刷新
   - 启动时从 `nodes.conf` 加载节点列表、槽位分配与 config epoch，复用已有节点 ID
@@ -31,7 +47,7 @@ v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P
   - 兼容旧版含 `fail` 标志的 `nodes.conf`，平滑升级
 - [x] **移除 FAIL/PFAIL 状态持久化 (v1.0.4 起)**: 运行时瞬时状态不应写入 `nodes.conf`，避免重启后误判节点状态
 
-### 2.2 v1.0.3 已发布功能
+### 2.4 v1.0.3 已发布功能
 
 #### 分布式特性 - 集群兼容性与可靠性
 - [x] **集群一键搭建 CLI (v1.0.3)**: `RedisCliMain` 对齐 `redis-cli --cluster create`，支持 `--cluster-replicas N`、`verbose` 静默模式与 Java 程序化调用 (`ClusterSetupCommand.createCluster(...)`)
@@ -49,14 +65,14 @@ v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P
 - [x] **非集群模式跳过 CLUSTER 拦截 (v1.0.2)**: 行为更明确，便于排查
 - [x] **集群调试日志降级 (v1.0.2)**: Gossip 调试日志调整为 `TRACE` 级，降低生产环境开销
 
-### 2.3 v1.0.1 已发布功能
+### 2.5 v1.0.1 已发布功能
 
 #### 分布式特性
 - [x] **Redis Cluster 集群**: 完整实现 Redis Cluster 协议，支持 16384 槽位、MOVED/ASK 重定向、Gossip 心跳。
 - [x] **主从复制**: 完整支持全量同步和增量同步，复制积压缓冲区。
 - [x] **哨兵模式**: 实现哨兵模式核心功能。
 
-### 2.4 v1.0.0 已发布功能
+### 2.6 v1.0.0 已发布功能
 
 #### 核心功能
 - [x] **Redis 协议 (RESP) 支持**: 完整的请求解析与响应编码，支持 RESP2 和 RESP3 协议协商。

@@ -48,7 +48,7 @@ mvn clean package -DskipTests
 
 ```bash
 # 下载最新版本（fat JAR）
-wget https://github.com/janeluo/luban-rds/releases/download/v1.0.8/luban-rds-jar-with-dependencies.jar
+wget https://github.com/janeluo/luban-rds/releases/download/v1.0.10/luban-rds-jar-with-dependencies.jar
 
 # 启动服务器
 java -jar luban-rds-jar-with-dependencies.jar

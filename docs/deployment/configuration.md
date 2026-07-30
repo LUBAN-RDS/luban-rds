@@ -919,7 +919,7 @@ version: '3.8'
 
 services:
   luban-rds:
-    image: luban-rds:1.0.8
+    image: luban-rds:1.0.10
     environment:
       - LUBAN_RDS_PORT=9736
       - LUBAN_RDS_PERSIST_MODE=rdb

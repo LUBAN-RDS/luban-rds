@@ -1,11 +1,40 @@
 ---
 title: 更新日志
-last_updated: 2026-07-27
-version: 1.0.8
+last_updated: 2026-07-30
+version: 1.0.10
 ---
 # 更新日志
 
 Luban-RDS 是一款轻量级、高性能、完全兼容 RESP 协议的 Java 内存数据库，易于嵌入和扩展。
+
+## [1.0.10] - 2026-07-30
+
+### 修复
+
+- **修复并发保存 `nodes.conf` 的竞态条件**（`ca3db8c`）：`ClusterConfigPersister` 对拓扑变更与周期 `clusterSaveConfigIfNeeded` 共路径场景下的并发刷盘进行加锁与串行化，避免半写文件与状态丢失
+
+### 兼容性
+
+- 与 v1.0.4 ~ v1.0.9 完全兼容，`nodes.conf` 文件结构与节点恢复行为不变
+- 与 Jedis / Lettuce / Redisson / `redis-cli --cluster create` 回归验证通过
+
+## [1.0.9] - 2026-07-30
+
+### 修复
+
+- **P0 数据安全 / Redis 7 兼容性修复补遗（审计 C2/C3/C4/C5/C6/C10 等）**
+  - **C2 PSYNC / REPLCONF 链路**（`a529d46` / `39d9a3a` / `1a5288a` / `ec14154`）：激活 PSYNC 响应路由，REPLCONF 顺序等待 + 超时，握手失败原因日志输出，重新启用 `ReplicationIntegrationTest`
+  - **C3 AOF 记录接口与 SELECT db 标记**（`ec07bd0` / `bc0ef7f` / `d9a3858`）：补齐 AOF `recordCommand` 接口与 `SELECT db` 落盘标记，`CompositePersistService` 委托实现 `recordCommand`
+  - **C4 SLAVEOF 启动复制**（`3acaa07`）：`SLAVEOF` 命令实际触发复制链路
+  - **C5 全量同步窗口回放**（`e852780`）：全量同步期间增量写入在同步窗口完成后回放，避免漏写
+  - **C6 从节点 offset 与 WAIT 校验**（`3c0604a`）：校验从节点 replication offset，`WAIT N` 行为对齐 Redis
+  - **C10 RDB TTL 持久化**（`29d99e5` / `31a604e`）：补齐 RDB TTL 持久化编码（`0xFD`），补充测试用例
+- **持久化代码清理**（`c3f3208`）：移除 `parseAndExecuteCommand` / `parseRespArray` 等死代码
+
+### 兼容性
+
+- 与 v1.0.4 ~ v1.0.8 完全兼容，AOF/RDB 文件结构与 Redis 7 协议行为一致
+- 与 Jedis / Lettuce / Redisson / `redis-cli` 回归验证通过
 
 ## [1.0.8] - 2026-07-27
 
@@ -21,7 +50,7 @@ Luban-RDS 是一款轻量级、高性能、完全兼容 RESP 协议的 Java 内�
 
 ### 修复
 
-- 配套修复 P0 审计报告中其余条目（C2/C3/C4/C5/C6/C10 等）已随上述 P0 批次合并，详见 `openspec/changes/archive/2026-07-27-fix-p0-data-safety-redis7/`
+- 配套修复 P0 审计报告中其余条目（C2/C3/C4/C5/C6/C10 等）已随上述 P0 批次合并
 
 ### 兼容性
 
