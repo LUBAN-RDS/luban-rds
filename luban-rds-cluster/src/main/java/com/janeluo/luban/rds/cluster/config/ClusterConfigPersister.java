@@ -75,9 +75,14 @@ public class ClusterConfigPersister {
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+        // 使用唯一的临时文件名（含线程ID），避免多线程并发保存同一 nodes.conf 时
+        // 共享固定 .tmp 文件名导致的竞态：一个线程 move 走 tmp 后，另一线程抛
+        // NoSuchFileException，且两线程交替写同一 tmp 会互相覆盖内容。
+        Path tmp = target.resolveSibling(
+                target.getFileName().toString() + ".tmp." + Thread.currentThread().getId());
 
         try {
+            int savedCount;
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(tmp.toFile()))) {
             // 写入文件头注释
             writer.write("# Luban-RDS Cluster Configuration");
@@ -100,7 +105,7 @@ public class ClusterConfigPersister {
             writer.newLine();
 
             // 写入每个节点（跳过 HANDSHAKE 和 NOADDR 状态的临时节点）
-            int savedCount = 0;
+            savedCount = 0;
             for (ClusterNode node : config.getAllNodes()) {
                 if (node.hasState(ClusterNodeState.HANDSHAKE) || node.hasState(ClusterNodeState.NOADDR)) {
                     continue;
@@ -110,8 +115,6 @@ public class ClusterConfigPersister {
                 writer.newLine();
                 savedCount++;
             }
-
-            logger.info("集群配置保存成功，节点数: {}", savedCount);
             }
 
             // 原子替换：tmp -> target
@@ -124,6 +127,8 @@ public class ClusterConfigPersister {
                 logger.warn("文件系统不支持原子移动，降级为普通替换: {}", target);
                 Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
             }
+
+            logger.info("集群配置保存成功，节点数: {}", savedCount);
         } catch (IOException | RuntimeException e) {
             try {
                 Files.deleteIfExists(tmp);

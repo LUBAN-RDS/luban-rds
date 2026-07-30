@@ -637,7 +637,7 @@ public class NettyRedisServer implements RedisServer {
      * 以及优雅关闭时写入。保存成功后自动清除 ClusterConfig 的脏标记。
      * </p>
      */
-    private void saveClusterConfig() {
+    private synchronized void saveClusterConfig() {
         if (clusterConfig != null && config.getClusterConfigFile() != null) {
             try {
                 ClusterConfigPersister persister = new ClusterConfigPersister();
