@@ -32,7 +32,7 @@ import java.util.StringTokenizer;
  * <pre>
  * 格式说明：
  * &lt;nodeid&gt; &lt;ip:port@cport&gt; &lt;flags&gt; &lt;master&gt; &lt;ping-sent&gt; &lt;pong-recv&gt; &lt;config-epoch&gt; &lt;link-state&gt; &lt;slot&gt;
- * 
+ *
  * 字段说明：
  * - nodeid: 40字符的节点ID（十六进制）
  * - ip:port@cport: IP地址:端口@集群总线端口
@@ -84,37 +84,37 @@ public class ClusterConfigPersister {
         try {
             int savedCount;
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(tmp.toFile()))) {
-            // 写入文件头注释
-            writer.write("# Luban-RDS Cluster Configuration");
-            writer.newLine();
-            writer.write("# Generated at: " + System.currentTimeMillis());
-            writer.newLine();
-            writer.write("# Format: <nodeid> <ip:port@cport> <flags> <master> <ping-sent> <pong-recv> <config-epoch> <link-state> <slot>");
-            writer.newLine();
-            writer.newLine();
-
-            // 写入当前配置纪元
-            writer.write("# Current Epoch: " + config.getCurrentEpoch());
-            writer.newLine();
-            // 使用 MYSELF 节点的实际 configEpoch，而非 ClusterConfig 级别的独立字段
-            //（后者仅在 restoreClusterFromConfig 时从 header 恢复，永远为 0，造成误导）。
-            ClusterNode myNode = config.getMyNode();
-            long myConfigEpoch = myNode != null ? myNode.getConfigEpoch() : config.getConfigEpoch();
-            writer.write("# My Config Epoch: " + myConfigEpoch);
-            writer.newLine();
-            writer.newLine();
-
-            // 写入每个节点（跳过 HANDSHAKE 和 NOADDR 状态的临时节点）
-            savedCount = 0;
-            for (ClusterNode node : config.getAllNodes()) {
-                if (node.hasState(ClusterNodeState.HANDSHAKE) || node.hasState(ClusterNodeState.NOADDR)) {
-                    continue;
-                }
-                String line = formatNodeLine(node, config.getMyNodeId());
-                writer.write(line);
+                // 写入文件头注释
+                writer.write("# Luban-RDS Cluster Configuration");
                 writer.newLine();
-                savedCount++;
-            }
+                writer.write("# Generated at: " + System.currentTimeMillis());
+                writer.newLine();
+                writer.write("# Format: <nodeid> <ip:port@cport> <flags> <master> <ping-sent> <pong-recv> <config-epoch> <link-state> <slot>");
+                writer.newLine();
+                writer.newLine();
+
+                // 写入当前配置纪元
+                writer.write("# Current Epoch: " + config.getCurrentEpoch());
+                writer.newLine();
+                // 使用 MYSELF 节点的实际 configEpoch，而非 ClusterConfig 级别的独立字段
+                //（后者仅在 restoreClusterFromConfig 时从 header 恢复，永远为 0，造成误导）。
+                ClusterNode myNode = config.getMyNode();
+                long myConfigEpoch = myNode != null ? myNode.getConfigEpoch() : config.getConfigEpoch();
+                writer.write("# My Config Epoch: " + myConfigEpoch);
+                writer.newLine();
+                writer.newLine();
+
+                // 写入每个节点（跳过 HANDSHAKE 和 NOADDR 状态的临时节点）
+                savedCount = 0;
+                for (ClusterNode node : config.getAllNodes()) {
+                    if (node.hasState(ClusterNodeState.HANDSHAKE) || node.hasState(ClusterNodeState.NOADDR)) {
+                        continue;
+                    }
+                    String line = formatNodeLine(node, config.getMyNodeId());
+                    writer.write(line);
+                    writer.newLine();
+                    savedCount++;
+                }
             }
 
             // 原子替换：tmp -> target
@@ -163,7 +163,7 @@ public class ClusterConfigPersister {
             String line;
             while ((line = reader.readLine()) != null) {
                 line = line.trim();
-                
+
                 // 跳过空行和注释
                 if (line.isEmpty() || line.startsWith("#")) {
                     // 解析配置纪元注释
@@ -208,12 +208,12 @@ public class ClusterConfigPersister {
                         }
 
                         config.addNode(node);
-                        
+
                         // 如果是 myself 节点，设置 myNodeId
                         if (node.isMyself()) {
                             config.setMyNodeId(node.getNodeId());
                         }
-                        
+
                         // 设置槽位分配
                         BitSet slots = node.getSlots();
                         for (int i = slots.nextSetBit(0); i >= 0; i = slots.nextSetBit(i + 1)) {
@@ -431,7 +431,7 @@ public class ClusterConfigPersister {
      */
     private ClusterNode parseNodeLine(String line) {
         StringTokenizer st = new StringTokenizer(line);
-        
+
         // 至少需要8个字段
         if (st.countTokens() < 8) {
             logger.warn("节点行字段不足: {}", line);
