@@ -1,0 +1,14 @@
+workflow: hotfix
+phase: archive
+build_mode: direct
+isolation: branch
+verify_mode: full
+base_ref: 08f54606b064fa53cc8c8d366ba52e209601dfb6
+design_doc: null
+plan: null
+verify_result: pass
+verification_report: docs/superpowers/reports/2026-08-03-fix-fail-state-cleared-prematurely-verify.md
+branch_status: handled
+created_at: 2026-08-03
+verified_at: 2026-08-03
+archived: true
