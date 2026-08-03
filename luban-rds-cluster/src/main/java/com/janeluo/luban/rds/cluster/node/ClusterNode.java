@@ -78,6 +78,17 @@ public class ClusterNode implements Serializable {
     private volatile long lastPongTime;
 
     /**
+     * 节点被标记为 FAIL 状态的时刻（毫秒时间戳，0 表示未标记 FAIL）。
+     * <p>
+     * 由 {@link #addState(ClusterNodeState)} 在添加 FAIL 时自动记录，
+     * 由 {@link #removeState(ClusterNodeState)} 在移除 FAIL 时清零。
+     * 用于 {@link com.janeluo.luban.rds.cluster.gossip.FailureDetector} 的 FAIL 保护期判断
+     * （对齐 Redis Cluster：FAIL 状态至少保持 NODE_TIMEOUT*2，防止短暂恢复导致 failover 抖动）。
+     * </p>
+     */
+    private volatile long failTime;
+
+    /**
      * 连接信息
      */
     private volatile ClusterLink link;
@@ -241,6 +252,28 @@ public class ClusterNode implements Serializable {
         this.lastPongTime = lastPongTime;
     }
 
+    /**
+     * 获取节点被标记为 FAIL 的时刻。
+     *
+     * @return FAIL 标记时刻（毫秒时间戳），0 表示当前未处于 FAIL 状态
+     */
+    public long getFailTime() {
+        return failTime;
+    }
+
+    /**
+     * 设置节点被标记为 FAIL 的时刻。
+     * <p>
+     * 供测试与恢复场景手动操作 FAIL 标记时间（如模拟保护期已过）。
+     * 正常路径由 {@link #addState(ClusterNodeState)}/{@link #removeState(ClusterNodeState)} 自动维护。
+     * </p>
+     *
+     * @param failTime FAIL 标记时刻（毫秒时间戳），0 表示未标记
+     */
+    public void setFailTime(long failTime) {
+        this.failTime = failTime;
+    }
+
     public ClusterLink getLink() {
         return link;
     }
@@ -253,20 +286,33 @@ public class ClusterNode implements Serializable {
 
     /**
      * 添加节点状态
+     * <p>
+     * 当添加 FAIL 状态时，自动记录 {@link #failTime} 为当前时刻，
+     * 供 {@link com.janeluo.luban.rds.cluster.gossip.FailureDetector} 的 FAIL 保护期判断使用。
+     * </p>
      *
      * @param state 要添加的状态
      */
     public synchronized void addState(ClusterNodeState state) {
         this.state.add(state);
+        if (state == ClusterNodeState.FAIL) {
+            this.failTime = System.currentTimeMillis();
+        }
     }
 
     /**
      * 移除节点状态
+     * <p>
+     * 当移除 FAIL 状态时，自动清零 {@link #failTime}。
+     * </p>
      *
      * @param state 要移除的状态
      */
     public synchronized void removeState(ClusterNodeState state) {
         this.state.remove(state);
+        if (state == ClusterNodeState.FAIL) {
+            this.failTime = 0L;
+        }
     }
 
     /**

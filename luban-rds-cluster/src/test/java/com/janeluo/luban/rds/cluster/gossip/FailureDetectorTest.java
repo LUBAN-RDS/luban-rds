@@ -151,17 +151,91 @@ class FailureDetectorTest {
     }
 
     @Test
-    @DisplayName("测试清除节点 FAIL 状态")
+    @DisplayName("测试清除节点 FAIL 状态 - 保护期过后清除")
     void testClearNodeFailState() {
         ClusterNode node = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
         node.addState(ClusterNodeState.MASTER);
         node.addState(ClusterNodeState.FAIL);
+        // 模拟 FAIL 已超过保护期（nodeTimeout=5000ms，保护期=10000ms）
+        node.setFailTime(System.currentTimeMillis() - 15000);
         clusterConfig.addNode(node);
 
         failureDetector.clearNodeFailState(node.getNodeId());
 
         assertFalse(node.isFail());
         assertFalse(node.isPfail());
+    }
+
+    @Test
+    @DisplayName("测试 FAIL 保护期内 PONG 不清除 FAIL")
+    void testFailProtectionPeriodPreventsClear() {
+        ClusterNode node = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        node.addState(ClusterNodeState.MASTER);
+        node.addState(ClusterNodeState.FAIL);
+        // failTime 刚被 addState 设置为当前时刻，处于保护期内（nodeTimeout=5000，保护期=10000ms）
+        clusterConfig.addNode(node);
+
+        failureDetector.clearNodeFailState(node.getNodeId());
+
+        // 保护期内 FAIL 必须保持
+        assertTrue(node.isFail(), "FAIL 保护期内不应被清除");
+    }
+
+    @Test
+    @DisplayName("测试 FAIL 保护期内 PFAIL 仍可清除")
+    void testFailProtectionPeriodAllowsPfailClear() {
+        ClusterNode node = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        node.addState(ClusterNodeState.MASTER);
+        node.addState(ClusterNodeState.PFAIL);
+        node.addState(ClusterNodeState.FAIL);
+        // 处于 FAIL 保护期内
+        clusterConfig.addNode(node);
+
+        failureDetector.clearNodeFailState(node.getNodeId());
+
+        // PFAIL 应被清除
+        assertFalse(node.isPfail(), "PFAIL 不受保护期约束，应被清除");
+        // FAIL 必须保持
+        assertTrue(node.isFail(), "FAIL 保护期内不应被清除");
+    }
+
+    @Test
+    @DisplayName("测试 FAIL 保护期过后 PONG 清除 FAIL")
+    void testFailProtectionPeriodExpiredClearsFail() {
+        ClusterNode node = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        node.addState(ClusterNodeState.MASTER);
+        node.addState(ClusterNodeState.FAIL);
+        // 模拟 FAIL 已超过保护期（nodeTimeout=5000ms，保护期=10000ms）
+        node.setFailTime(System.currentTimeMillis() - 15000);
+        clusterConfig.addNode(node);
+
+        failureDetector.clearNodeFailState(node.getNodeId());
+
+        assertFalse(node.isFail(), "保护期过后 FAIL 应被清除");
+    }
+
+    @Test
+    @DisplayName("测试 addState(FAIL) 记录 failTime")
+    void testAddFailStateRecordsFailTime() {
+        ClusterNode node = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        long before = System.currentTimeMillis();
+        node.addState(ClusterNodeState.FAIL);
+        long after = System.currentTimeMillis();
+
+        assertTrue(node.getFailTime() >= before && node.getFailTime() <= after,
+                "addState(FAIL) 应记录当前时刻到 failTime");
+    }
+
+    @Test
+    @DisplayName("测试 removeState(FAIL) 清零 failTime")
+    void testRemoveFailStateClearsFailTime() {
+        ClusterNode node = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        node.addState(ClusterNodeState.FAIL);
+        assertTrue(node.getFailTime() > 0);
+
+        node.removeState(ClusterNodeState.FAIL);
+
+        assertEquals(0L, node.getFailTime(), "removeState(FAIL) 应清零 failTime");
     }
 
     @Test

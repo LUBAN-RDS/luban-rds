@@ -414,6 +414,8 @@ class ClusterFailoverTest {
 
         // 设置节点为 FAIL 状态
         node2.addState(ClusterNodeState.FAIL);
+        // 模拟 FAIL 已超过保护期（NODE_TIMEOUT*2 = 30000ms），否则保护期内拒绝清除
+        node2.setFailTime(System.currentTimeMillis() - NODE_TIMEOUT * 2 - 1000);
         failureDetector.recordPfailVote(NODE_ID_2, NODE_ID_1);
 
         // 清除故障状态

@@ -177,7 +177,20 @@ public class FailureDetector {
 
     /**
      * 清除节点的 FAIL/PFAIL 状态
-     * 当节点恢复时调用
+     * <p>
+     * 当节点恢复时由 {@code GossipProtocol.handlePing/handlePong} 调用。
+     * </p>
+     * <p>
+     * <b>FAIL 保护期</b>（对齐 Redis Cluster）：节点被标记 FAIL 后，MUST 在至少
+     * {@code NODE_TIMEOUT * 2} 时间内保持 FAIL 状态。保护期内收到 PING/PONG
+     * 不清除 FAIL（仅清除 PFAIL），防止 master 短暂抖动导致 slave failover 被取消。
+     * 保护期过后，若节点确实恢复，方可清除 FAIL。
+     * </p>
+     * <p>
+     * 注意：failover 提升路径（{@code FailoverManager.performFailover} /
+     * {@code onFailoverResult} 中角色变更导致的 {@code removeState(FAIL)}）直接调用
+     * {@code ClusterNode.removeState}，不经过本方法，因此不受保护期约束。
+     * </p>
      *
      * @param nodeId 节点ID
      */
@@ -187,24 +200,26 @@ public class FailureDetector {
             return;
         }
 
-        boolean changed = false;
-
-        if (node.isFail()) {
-            node.removeState(ClusterNodeState.FAIL);
-            confirmedFailNodes.remove(nodeId);
-            changed = true;
-            logger.info("节点恢复，清除 FAIL 状态: nodeId={}", nodeId);
-        }
-
+        // PFAIL 清除不受保护期影响（PFAIL 是本节点主观判断，收到 PONG 即可清除）
         if (node.isPfail()) {
             node.removeState(ClusterNodeState.PFAIL);
-            changed = true;
             logger.info("节点恢复，清除 PFAIL 状态: nodeId={}", nodeId);
         }
 
-        if (changed) {
-            // 清除投票记录
+        // FAIL 清除受保护期约束
+        if (node.isFail()) {
+            long failDuration = System.currentTimeMillis() - node.getFailTime();
+            if (failDuration < 2L * nodeTimeout) {
+                // 保护期内，拒绝清除 FAIL（对齐 Redis：FAIL 至少保持 NODE_TIMEOUT*2）
+                logger.debug("FAIL 保护期内，拒绝清除 FAIL 状态: nodeId={}, failDuration={}ms, 保护期={}ms",
+                        nodeId, failDuration, 2L * nodeTimeout);
+                return;
+            }
+            node.removeState(ClusterNodeState.FAIL);
+            confirmedFailNodes.remove(nodeId);
             pfailVotes.remove(nodeId);
+            logger.info("FAIL 保护期已过，节点恢复清除 FAIL 状态: nodeId={}, failDuration={}ms",
+                    nodeId, failDuration);
         }
     }
 
