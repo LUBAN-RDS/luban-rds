@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.BitSet;
 import java.util.EnumSet;
 import java.util.Set;
 
@@ -249,6 +250,90 @@ class GossipRoleSyncTest {
                 "第三方节点 D 的 masterNodeId 应指向 gossip 携带的主节点ID");
         assertEquals(7L, nodeD.getConfigEpoch(),
                 "第三方节点 D 的 configEpoch 应被同步提升");
+    }
+
+    @Test
+    @DisplayName("Gossip 第三方节点被强升为 MASTER 后其 slots 立即按 epoch 仲裁对齐")
+    void testGossipThirdPartyMasterSlotsAlignedOnPromotion() {
+        // 发送方 B（master, epoch 0）
+        ClusterNode senderNode = createTestNode(SENDER_ID, "127.0.0.1", 6380, 16380);
+        senderNode.addState(ClusterNodeState.MASTER);
+        senderNode.setConfigEpoch(0L);
+        clusterConfig.addNode(senderNode);
+
+        // 第三方节点 D，本地初始为 SLAVE（epoch 0），将被强升为 MASTER
+        String nodeDId = "dddddddddddddddddddddddddddddddddddddddd";
+        ClusterNode nodeD = createTestNode(nodeDId, "127.0.0.1", 6382, 16382);
+        nodeD.addState(ClusterNodeState.SLAVE);
+        nodeD.setMasterNodeId(MASTER_ID);
+        nodeD.setConfigEpoch(0L);
+        clusterConfig.addNode(nodeD);
+
+        // gossip 声明 D 为 MASTER（epoch 8），持有 slot 5462
+        BitSet dSlots = new BitSet();
+        dSlots.set(5462);
+
+        PingMessage ping = new PingMessage(SENDER_ID, System.currentTimeMillis());
+        ping.setSenderConfigEpoch(0L);
+        ping.setSenderFlags(EnumSet.of(ClusterNodeState.MASTER));
+        ping.setSenderSlots(new BitSet());
+
+        GossipNodeInfo gossipD = new GossipNodeInfo(nodeDId);
+        gossipD.setIp("127.0.0.1");
+        gossipD.setPort(6382);
+        gossipD.setBusPort(16382);
+        gossipD.setConfigEpoch(8L);
+        gossipD.setFlags(EnumSet.of(ClusterNodeState.MASTER));
+        gossipD.setSlots(dSlots);
+        ping.addGossipNode(gossipD);
+
+        gossipProtocol.handlePing(ping);
+
+        assertTrue(nodeD.isMaster(), "D 应被强升为 MASTER");
+        assertEquals(8L, nodeD.getConfigEpoch());
+        // 修复前：D 升 MASTER 但 slot 5462 仍无 owner（syncSlotsFromNode 在角色切换后才调用且 epoch 相等不抢占）
+        // 修复后：角色切换为 MASTER 后立即 syncSlotsFromNode，slot 5462 归属 D
+        assertEquals(nodeDId, clusterConfig.getSlotOwner(5462),
+                "D 声明的 slot 5462 应归属 D（角色切换后 slot 对齐）");
+        assertTrue(nodeD.hasSlot(5462));
+    }
+
+    @Test
+    @DisplayName("Gossip 第三方节点被切为 SLAVE 后 slots 被清空（slave 不持 slot）")
+    void testGossipThirdPartySlaveSlotsClearedOnDemotion() {
+        // 第三方节点 D，本地初始为 MASTER（epoch 0）且持 slot 100
+        String nodeDId = "dddddddddddddddddddddddddddddddddddddddd";
+        ClusterNode nodeD = createTestNode(nodeDId, "127.0.0.1", 6382, 16382);
+        nodeD.addState(ClusterNodeState.MASTER);
+        nodeD.setConfigEpoch(0L);
+        clusterConfig.addNode(nodeD);
+        clusterConfig.setSlotOwner(100, nodeDId);  // D 持 slot 100
+        assertTrue(nodeD.getSlotCount() > 0);
+
+        ClusterNode senderNode = createTestNode(SENDER_ID, "127.0.0.1", 6380, 16380);
+        senderNode.addState(ClusterNodeState.MASTER);
+        senderNode.setConfigEpoch(0L);
+        clusterConfig.addNode(senderNode);
+
+        PingMessage ping = new PingMessage(SENDER_ID, System.currentTimeMillis());
+        ping.setSenderConfigEpoch(0L);
+        ping.setSenderFlags(EnumSet.of(ClusterNodeState.MASTER));
+        ping.setSenderSlots(new BitSet());
+
+        // gossip 声明 D 为 SLAVE（epoch 7），master=MASTER_ID
+        GossipNodeInfo gossipD = new GossipNodeInfo(nodeDId);
+        gossipD.setIp("127.0.0.1");
+        gossipD.setPort(6382);
+        gossipD.setBusPort(16382);
+        gossipD.setConfigEpoch(7L);
+        gossipD.setFlags(EnumSet.of(ClusterNodeState.SLAVE));
+        gossipD.setMasterNodeId(MASTER_ID);
+        ping.addGossipNode(gossipD);
+
+        gossipProtocol.handlePing(ping);
+
+        assertTrue(nodeD.isSlave(), "D 应被切为 SLAVE");
+        assertEquals(0, nodeD.getSlotCount(), "D 切为 SLAVE 后 slots 应清空（不变式 D）");
     }
 
     // ==================== 测试辅助方法 ====================
