@@ -567,23 +567,27 @@ public class FailoverManager {
             }
         }
 
-        // winner 提权
+        // 槽位转移在前：清 winner 历史 slot 残留，逐 slot 赋给 winner（单一来源）。
+        // 移除原 winner.setSlots(inherited.clone()) 整体覆写，消除 setSlots 与逐 slot setSlotOwner
+        // 的双写路径——当 winner 已持部分 slot 时两路径结果可能短暂不一致。
+        // clusterConfig.setSlotOwner 内部已清理 oldOwner.removeSlot + slotAssignment[slot]=winner + winner.addSlot。
+        BitSet inherited = msg.getInheritedSlots();
+        if (inherited != null) {
+            winner.clearSlots();
+            for (int i = inherited.nextSetBit(0); i >= 0; i = inherited.nextSetBit(i + 1)) {
+                slotManager.setSlotOwner(i, winner.getNodeId());
+                clusterConfig.setSlotOwner(i, winner.getNodeId());
+            }
+        }
+
+        // winner 提权在后（slot 已就位，满足不变式：MASTER 时其声明的每个 slot 均归属自身）。
+        // 对齐 Redis last-failover-wins：winner 以更高 configEpoch 接管旧 master 的 slots。
         winner.removeState(ClusterNodeState.SLAVE);
         winner.addState(ClusterNodeState.MASTER);
         winner.removeState(ClusterNodeState.FAIL);
         winner.removeState(ClusterNodeState.PFAIL);
         winner.setMasterNodeId(null);
         winner.setConfigEpoch(msg.getNewConfigEpoch());
-
-        // 槽位转移
-        BitSet inherited = msg.getInheritedSlots();
-        if (inherited != null) {
-            winner.setSlots((BitSet) inherited.clone());
-            for (int i = inherited.nextSetBit(0); i >= 0; i = inherited.nextSetBit(i + 1)) {
-                slotManager.setSlotOwner(i, winner.getNodeId());
-                clusterConfig.setSlotOwner(i, winner.getNodeId());
-            }
-        }
 
         // 原 master（持有这些槽位且非 winner 的旧 master）降级为 winner 的 slave。
         // 双路径覆盖：
