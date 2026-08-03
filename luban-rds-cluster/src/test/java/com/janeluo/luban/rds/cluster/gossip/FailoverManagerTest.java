@@ -356,6 +356,86 @@ class FailoverManagerTest {
         Mockito.verify(busClient).broadcast(Mockito.any(FailoverResultMessage.class));
     }
 
+    // ==================== slot 收敛：winner slots 单一来源 ====================
+
+    @Test
+    @DisplayName("onFailoverResult: winner 已持 inherited 子集时 winner.slots 精确等于 inherited（消除双写抖动）")
+    void testOnFailoverResultWinnerSlotsExactMatchWhenPartiallyHeld() {
+        ClusterNode winner = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
+        ClusterNode oldMaster = createMasterNode(NODE_ID_1, 7000);
+        // oldMaster 持 0-99
+        for (int i = 0; i <= 99; i++) oldMaster.addSlot(i);
+        config.addNode(winner);
+        config.addNode(oldMaster);
+
+        BitSet inherited = new BitSet();
+        inherited.set(0, 100);
+
+        FailoverResultMessage msg = new FailoverResultMessage(
+                NODE_ID_2, NODE_ID_2, 5L, inherited);
+        failoverManager.onFailoverResult(msg);
+
+        // winner.slots 精确等于 inherited（0-99）
+        BitSet winnerSlots = winner.getSlots();
+        assertEquals(inherited, winnerSlots, "winner.slots 应精确等于 inherited");
+        assertEquals(100, winner.getSlotCount());
+        // slotAssignment 全部指向 winner
+        for (int i = 0; i <= 99; i++) {
+            assertEquals(NODE_ID_2, config.getSlotOwner(i),
+                    "slot " + i + " 的 owner 应为 winner");
+        }
+        // oldMaster 已被降级且 slots 清空
+        assertFalse(oldMaster.isMaster());
+        assertEquals(0, oldMaster.getSlotCount());
+    }
+
+    @Test
+    @DisplayName("onFailoverResult: winner 提权为 MASTER 时 slotAssignment 均指向 winner 且 configEpoch=newConfigEpoch")
+    void testOnFailoverResultWinnerPromotionAfterSlotsAssigned() {
+        ClusterNode winner = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
+        ClusterNode oldMaster = createMasterNode(NODE_ID_1, 7000);
+        for (int i = 5462; i <= 10922; i++) oldMaster.addSlot(i);
+        config.addNode(winner);
+        config.addNode(oldMaster);
+
+        BitSet inherited = new BitSet();
+        inherited.set(5462, 10923);
+
+        failoverManager.onFailoverResult(new FailoverResultMessage(
+                NODE_ID_2, NODE_ID_2, 8L, inherited));
+
+        assertTrue(winner.isMaster(), "winner 应为 MASTER");
+        assertEquals(8L, winner.getConfigEpoch(), "winner.configEpoch 应等于 newConfigEpoch");
+        // winner 声明的每个 slot 都指向 winner（不变式 D：MASTER 时 slots 归属自身）
+        BitSet winnerSlots = winner.getSlots();
+        for (int i = winnerSlots.nextSetBit(0); i >= 0; i = winnerSlots.nextSetBit(i + 1)) {
+            assertEquals(NODE_ID_2, config.getSlotOwner(i),
+                    "winner 声明的 slot " + i + " 应归属 winner");
+        }
+    }
+
+    @Test
+    @DisplayName("onFailoverResult: oldMaster 降级为 SLAVE、slots 清空、masterNodeId 指向 winner")
+    void testOnFailoverResultOldMasterDemotedSlotsCleared() {
+        ClusterNode winner = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
+        ClusterNode oldMaster = createMasterNode(NODE_ID_1, 7000);
+        for (int i = 0; i <= 49; i++) oldMaster.addSlot(i);
+        config.addNode(winner);
+        config.addNode(oldMaster);
+
+        BitSet inherited = new BitSet();
+        inherited.set(0, 50);
+
+        failoverManager.onFailoverResult(new FailoverResultMessage(
+                NODE_ID_2, NODE_ID_2, 6L, inherited));
+
+        assertTrue(oldMaster.isSlave(), "oldMaster 应降级为 SLAVE");
+        assertFalse(oldMaster.isMaster());
+        assertEquals(0, oldMaster.getSlotCount(), "oldMaster slots 应清空");
+        assertEquals(NODE_ID_2, oldMaster.getMasterNodeId(), "oldMaster.masterNodeId 应指向 winner");
+        assertEquals(6L, oldMaster.getConfigEpoch(), "oldMaster.configEpoch 应提升到 winner epoch");
+    }
+
     // ==================== 辅助方法 ====================
 
     private ClusterNode createMasterNode(String id, int port) {

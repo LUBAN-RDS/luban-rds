@@ -1120,11 +1120,17 @@ public class GossipProtocol {
                         node.removeState(ClusterNodeState.SLAVE);
                         node.addState(ClusterNodeState.MASTER);
                         node.setMasterNodeId(null);
+                        // 角色切换为 MASTER 后立即按 epoch 仲裁对齐其声明的 slots，
+                        // 消除"已是 MASTER 但 slots 仍归属旧 owner"的中间视图（双 master 观感根源）。
+                        // 对齐 Redis Rule 2：仅当声明方 configEpoch 严格大于当前 owner 的 configEpoch 时才抢占。
+                        clusterConfig.syncSlotsFromNode(nodeId, nodeInfo.getSlots(), nodeInfo.getConfigEpoch());
                     }
                     if (flags.contains(ClusterNodeState.SLAVE) && node.isMaster()) {
                         node.removeState(ClusterNodeState.MASTER);
                         node.addState(ClusterNodeState.SLAVE);
                         node.setMasterNodeId(nodeInfo.getMasterNodeId());
+                        // slave 不得持有 slots（对齐 Redis：replica 广播其 master 的 slots bitmap，自身不持 slot）。
+                        node.clearSlots();
                     }
                 }
 
