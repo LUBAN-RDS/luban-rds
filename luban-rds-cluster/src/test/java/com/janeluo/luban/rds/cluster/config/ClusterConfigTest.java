@@ -341,6 +341,49 @@ public class ClusterConfigTest {
         assertEquals(0, config.getAssignedSlotCount());
     }
 
+    @Test
+    public void testSyncSlotsFromNodeEqualEpochSameOwnerPatchesBitSet() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        node1.setConfigEpoch(5L);
+        config.addNode(node1);
+        // slot 100 已归属 node1，但 node1.slots BitSet 故意不含 100（模拟 gossip 先到的残留不一致）
+        config.setSlotOwner(100, nodeId1);
+        // 清掉 node1 的 BitSet 但保留 slotAssignment，制造不一致
+        node1.clearSlots();
+        assertEquals(nodeId1, config.getSlotOwner(100));
+        assertFalse(node1.hasSlot(100));
+
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(100);
+
+        // 相等 epoch（5==5），owner 已是 node1：应幂等补齐 node1 的 BitSet
+        config.syncSlotsFromNode(nodeId1, slots, 5L);
+
+        assertEquals("slot owner 不应变", nodeId1, config.getSlotOwner(100));
+        assertTrue("owner 的 BitSet 应被幂等补齐", node1.hasSlot(100));
+    }
+
+    @Test
+    public void testSyncSlotsFromNodeEqualEpochDifferentOwnerDoesNotSteal() {
+        // 相等 epoch 且 curOwner != 提供方时，提供方的 BitSet 也不应被错误填充
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        node1.setConfigEpoch(5L);
+        config.addNode(node1);
+        config.setSlotOwner(100, nodeId1);
+
+        ClusterNode node2 = new ClusterNode(nodeId2);
+        node2.setConfigEpoch(5L);
+        config.addNode(node2);
+
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(100);
+
+        config.syncSlotsFromNode(nodeId2, slots, 5L);
+
+        assertEquals("相等 epoch 不应抢占", nodeId1, config.getSlotOwner(100));
+        assertFalse("非 owner 的 BitSet 不应被填充", node2.hasSlot(100));
+    }
+
     // ==================== 脏标记测试（Redis 7 clusterSaveConfigIfNeeded 机制） ====================
 
     @Test
