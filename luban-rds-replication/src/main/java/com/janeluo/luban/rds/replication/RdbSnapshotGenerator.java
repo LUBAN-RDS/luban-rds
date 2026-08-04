@@ -134,9 +134,24 @@ public class RdbSnapshotGenerator {
     }
     
     /**
-     * 生成临时 RDB 文件
+     * 生成临时 RDB 文件。
+     *
+     * <p>实现：调 {@link RdbPersistService#persistSync(MemoryStore)} 把 {@code memoryStore}
+     * 落盘到 {@code dump.rdb}，再复制为带时间戳的临时副本并返回。原始 {@code dump.rdb} 保持不变
+     * （复制而非移动），避免影响既有复制传输路径。</p>
+     *
+     * <p><b>阶段 10 可见性提升（DESIGN §5.4 / IMPLEMENTATION_PLAN 阶段 10.2）</b>：
+     * 本方法原为 {@code private}（仅供 {@link #generateAndTransfer} 内部使用）。
+     * chunked INSTALL_SNAPSHOT 需要"先把快照落盘为文件、再按 4MB 切片读取字节"，
+     * 故把可见性提为 {@code public}，供 {@code SnapshotManager} 复用既有落盘路径，
+     * 避免新增并行的 generate-to-bytes API（DESIGN Open Question 选定方案 A：复用现有落盘）。</p>
+     *
+     * <p>调用方职责：使用完毕后自行删除返回的临时文件（如 {@code SnapshotManager} 发完所有 chunk 后删除）。</p>
+     *
+     * @param memoryStore 内存存储
+     * @return 临时 RDB 文件（已落盘）；生成失败或 dump.rdb 不存在时返回 {@code null}
      */
-    private File generateTempRdbFile(MemoryStore memoryStore) {
+    public File generateTempRdbFile(MemoryStore memoryStore) {
         try {
             // 使用 RdbPersistService 的同步持久化方法
             rdbPersistService.persistSync(memoryStore);

@@ -271,27 +271,45 @@ public class RdbPersistService implements PersistService {
 
     @Override
     public void load(MemoryStore memoryStore) {
+        loadWithKeyCount(memoryStore);
+    }
+
+    /**
+     * 加载 RDB 数据并返回实际加载的键数量。
+     *
+     * <p>语义与 {@link #load(MemoryStore)} 完全一致，区别仅在于把内部统计的 {@code keyCount}
+     * 返回给调用方。修复 {@code RdbDataLoader.keysLoaded} 恒为 0 的 bug：
+     * 原 {@code load} 不返回 keyCount，调用方（{@code RdbDataLoader.finishLoading}）无法得知
+     * 实际加载的键数；改用本方法后，{@code RdbDataLoader} 可正确反映加载计数。</p>
+     *
+     * <p>实现说明：把原 {@code load} 的方法体整体迁入此方法并返回 {@code keyCount}；
+     * {@code load} 现仅作委托（丢弃返回值），保持 {@link PersistService#load} 契约与既有调用方不变。</p>
+     *
+     * @param memoryStore 内存存储
+     * @return 实际加载的键数量（读取异常或文件不存在时返回已加载的部分计数，可能为 0）
+     */
+    public long loadWithKeyCount(MemoryStore memoryStore) {
         logger.info("Loading RDB data...");
         long startTime = System.currentTimeMillis();
         long keyCount = 0;
-        
+
         File rdbFile = new File(rdbFilePath);
         if (!rdbFile.exists()) {
             logger.info("No RDB file found, skipping load");
-            return;
+            return 0;
         }
-        
+
         // 使用 BufferedInputStream 提高读取性能
         try (FileInputStream fis = new FileInputStream(rdbFile);
              BufferedInputStream bis = new BufferedInputStream(fis, WRITE_BUFFER_SIZE);
              DataInputStream dis = new DataInputStream(bis)) {
-            
+
             // 读取RDB文件头
             if (!readRdbHeader(dis)) {
                 logger.error("Invalid RDB file header");
-                return;
+                return 0;
             }
-            
+
             // 读取数据库数据
             int currentDb = 0;
             // 暂存从 0xFC/0xFD opcode 读取到的绝对过期时间戳（毫秒），
@@ -302,9 +320,9 @@ public class RdbPersistService implements PersistService {
                     if (dis.available() == 0) {
                         break;
                     }
-                    
+
                     byte opcode = dis.readByte();
-                    
+
                     switch (opcode) {
                         case RDB_OPCODE_SELECTDB: // 数据库选择指令 0xFE
                             currentDb = readSelectDb(dis);
@@ -342,13 +360,14 @@ public class RdbPersistService implements PersistService {
                 // 文件读取完毕，正常退出循环
                 logger.debug("RDB file read completed");
             }
-            
+
             long endTime = System.currentTimeMillis();
             logger.info("RDB load completed: {} keys loaded in {} ms", keyCount, endTime - startTime);
-            
+
         } catch (Exception e) {
             logger.error("Error loading RDB data", e);
         }
+        return keyCount;
     }
     
     @Override

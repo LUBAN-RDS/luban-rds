@@ -170,10 +170,12 @@ public class RdbDataLoader {
             // 复制到标准位置并加载
             File rdbFile = new File(dataDir, "dump.rdb");
             copyFile(tempRdbFile, rdbFile);
-            
-            // 加载数据
-            rdbPersistService.load(memoryStore);
-            
+
+            // 加载数据：用 loadWithKeyCount 取回实际加载的键数量，
+            // 修复 keysLoaded 恒为 0 的 bug（原 load 不返回 keyCount）。
+            long loadedKeys = rdbPersistService.loadWithKeyCount(memoryStore);
+            keysLoaded.set(loadedKeys);
+
             long loadDuration = System.currentTimeMillis() - loadStartTime;
             long totalDuration = System.currentTimeMillis() - startTime.get();
             
