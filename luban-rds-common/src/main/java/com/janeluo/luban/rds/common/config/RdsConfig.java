@@ -267,6 +267,16 @@ public class RdsConfig {
      */
     private boolean clusterRequireFullCoverage = true;
 
+    /**
+     * 集群 state=fail 时是否仍允许本节点处理读命令。
+     * <p>
+     * 对齐 Redis {@code cluster-allow-reads-when-down}（默认 false）：
+     * 关闭时集群 fail 下所有键命令返回 {@code -CLUSTERDOWN}；
+     * 开启时只读命令照常服务（写命令仍拒绝），用于在多数主节点不可达时保留只读能力。
+     * </p>
+     */
+    private boolean clusterAllowReadsWhenDown = false;
+
     // ==================== 主从复制配置 ====================
 
     /**
@@ -748,6 +758,17 @@ public class RdsConfig {
 
     public void setClusterRequireFullCoverage(boolean clusterRequireFullCoverage) {
         this.clusterRequireFullCoverage = clusterRequireFullCoverage;
+    }
+
+    /**
+     * 集群 state=fail 时是否允许处理只读命令（对应 Redis cluster-allow-reads-when-down）。
+     */
+    public boolean isClusterAllowReadsWhenDown() {
+        return clusterAllowReadsWhenDown;
+    }
+
+    public void setClusterAllowReadsWhenDown(boolean clusterAllowReadsWhenDown) {
+        this.clusterAllowReadsWhenDown = clusterAllowReadsWhenDown;
     }
 
     public String getReplicaof() {

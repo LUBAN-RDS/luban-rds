@@ -185,6 +185,13 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     private final boolean clusterEnabled;
     private final ClusterConfig clusterConfig;
     private final SlotManager slotManager;
+
+    /**
+     * 集群 state=fail 时是否允许处理只读命令（对应 Redis cluster-allow-reads-when-down）。
+     * 在构造时从 {@link com.janeluo.luban.rds.common.context.ServerContext#getConfig()} 一次性读取，
+     * 避免每条命令热路径上重复读取配置。
+     */
+    private final boolean clusterAllowReadsWhenDown;
     
     // 复制模式相关字段
     private com.janeluo.luban.rds.replication.handler.ReplicationCommandHandler replicationCommandHandler;
@@ -206,6 +213,10 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
 
     // MIGRATE 命令处理器（集群模式下节点间键迁移）
     private MigrateCommandHandler migrateCommandHandler;
+
+    // 写暂停门控（P1-12，手动 failover 普通模式期间拒绝写）。volatile 保证写路径零开销读
+    private volatile com.janeluo.luban.rds.cluster.lifecycle.WritePauseGate writePauseGate =
+            new com.janeluo.luban.rds.cluster.lifecycle.NoOpWritePauseGate();
     
     public RedisServerHandler(MemoryStore memoryStore, DefaultCommandHandler commandHandler, RedisProtocolParser protocolParser) {
         this(memoryStore, commandHandler, protocolParser, 0, false, null, null);
@@ -236,13 +247,16 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
         this.clusterEnabled = clusterEnabled;
         this.clusterConfig = clusterConfig;
         this.slotManager = slotManager;
-        
+
         // 初始化复制管理器（主节点模式）
-        com.janeluo.luban.rds.common.config.RdsConfig config = 
+        com.janeluo.luban.rds.common.config.RdsConfig config =
             com.janeluo.luban.rds.common.context.ServerContext.getConfig();
         if (config != null) {
             MasterReplicationManager.initialize(
                 (int) config.getReplBacklogSize());
+            this.clusterAllowReadsWhenDown = config.isClusterAllowReadsWhenDown();
+        } else {
+            this.clusterAllowReadsWhenDown = false;
         }
     }
     
@@ -293,6 +307,20 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
      */
     public void setMigrateCommandHandler(MigrateCommandHandler handler) {
         this.migrateCommandHandler = handler;
+    }
+
+    /**
+     * 设置写暂停门控（P1-12）。
+     * <p>
+     * 注入后，写路径在执行写命令前查询 {@code gate.isPaused()}，暂停时拒绝写
+     * （手动 failover 普通模式期间 master 已暂停写，避免接管时丢数据）。
+     * </p>
+     *
+     * @param gate 写暂停门控，null 时保持默认 NoOp（永不暂停）
+     */
+    public void setWritePauseGate(com.janeluo.luban.rds.cluster.lifecycle.WritePauseGate gate) {
+        this.writePauseGate = gate != null ? gate
+                : new com.janeluo.luban.rds.cluster.lifecycle.NoOpWritePauseGate();
     }
     
     @Override
@@ -745,6 +773,29 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             if (clusterEnabled && commandRequiresKey(commandName)) {
                 List<String> keys = extractKeysFromCommand(commandName, args);
                 if (keys != null && !keys.isEmpty()) {
+                    // ---- P1-13：cluster_state 门控 ----
+                    // state=fail 时拒绝所有键命令（-CLUSTERDOWN）；仅在开启
+                    // cluster-allow-reads-when-down 时放行只读命令。对齐 Redis 7
+                    // getNodeByQuery：cluster in FAIL state 时默认 CLUSTERDOWN，
+                    // unless (allow reads when down && read command)。
+                    String stateGate = checkClusterStateGate(commandName);
+                    if (stateGate != null) {
+                        writeRedirect(ctx, stateGate);
+                        return;
+                    }
+
+                    // ---- P1-14：slave 角色路由 ----
+                    // 对齐 Redis getNodeByQuery：
+                    //   ① slave + 读命令 + 未声明 READONLY → MOVED 到 master（slave 不擅自服务读）
+                    //   ② slave + 写命令 → -READONLY（无论 READONLY 标志，slave 永不可写）
+                    // 仅当键首槽属于本 slave 的 master 关联槽位时才进入此分支，否则
+                    // 留给后续 checkSlotAndRedirect 处理 MOVED。
+                    String slaveGate = checkSlaveRedirect(commandName, keys.get(0), clientInfo);
+                    if (slaveGate != null) {
+                        writeRedirect(ctx, slaveGate);
+                        return;
+                    }
+
                     // EVAL/EVALSHA 的 CROSSSLOT 校验仍由 checkCrossSlotForScript 处理
                     // （向后兼容，task 3.6）；其余命令在此处统一做 CROSSSLOT 校验。
                     if ("EVAL".equalsIgnoreCase(commandName) || "EVALSHA".equalsIgnoreCase(commandName)) {
@@ -775,6 +826,15 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                         return;
                     }
                 }
+            }
+
+            // P1-12：写暂停门控。手动 failover 普通模式期间 master 已暂停写，
+            // 此期间拒绝写命令（非只读），避免接管时丢失未暂停的写入。
+            // 无暂停时 writePauseGate.isPaused() 为单次 volatile 读，零开销。
+            if (writePauseGate.isPaused() && !isReadOnlyCommand(commandName != null
+                    ? commandName.toUpperCase() : "")) {
+                writeRedirect(ctx, "-LOADING cluster failover in progress, writes temporarily paused\r\n");
+                return;
             }
 
             long startTime = System.nanoTime();
@@ -2715,6 +2775,95 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     }
 
     /**
+     * P1-13：集群状态门控。
+     * <p>
+     * 对齐 Redis 7 {@code getNodeByQuery}：当 {@code cluster_state == fail} 时，
+     * 所有键命令默认返回 {@code -CLUSTERDOWN The cluster is down}；仅在开启
+     * {@code cluster-allow-reads-when-down}（{@link #clusterAllowReadsWhenDown}）
+     * 且命令为只读时放行。无键命令（PING/INFO/CLUSTER 等）不受此门控约束。
+     * </p>
+     *
+     * @param commandName 命令名称
+     * @return null 表示放行，否则返回 {@code -CLUSTERDOWN} 响应字符串
+     */
+    private String checkClusterStateGate(String commandName) {
+        if (!clusterEnabled || clusterConfig == null) {
+            return null;
+        }
+        if (clusterConfig.isClusterOk()) {
+            return null;
+        }
+        // state=fail：默认拒绝；仅当允许"宕机读"且命令只读时放行。
+        if (clusterAllowReadsWhenDown && isReadOnlyCommand(commandName.toUpperCase())) {
+            return null;
+        }
+        return "-CLUSTERDOWN The cluster is down\r\n";
+    }
+
+    /**
+     * P1-14：从节点角色路由门控。
+     * <p>
+     * 对齐 Redis 7 {@code getNodeByQuery} 中 slave 的处理：
+     * <ul>
+     *   <li>本节点是 slave，且命令涉及的槽位属于其 master：
+     *     <ul>
+     *       <li>写命令 → {@code -READONLY You can't write against a read only replica.}
+     *           （slave 永不接受写，无论 READONLY 标志）</li>
+     *       <li>读命令 + 客户端未声明 READONLY → MOVED 到 master
+     *           （slave 不擅自服务读，除非客户端显式允许）</li>
+     *       <li>读命令 + 已声明 READONLY → 放行，本 slave 服务读</li>
+     *     </ul>
+     *   </li>
+     *   <li>本节点非 slave、或槽位不属于本 slave 的 master → 返回 null，
+     *       交由 {@link #checkSlotAndRedirect} 统一裁决 MOVED。</li>
+     * </ul>
+     * 判定仅当槽位 owner 是本 slave 的 master 时才介入，避免误拦远程 master 槽位
+     * （那应由后续 checkSlotAndRedirect 返回 MOVED 到正确远程节点）。
+     * </p>
+     *
+     * @param commandName 命令名称（用于判定读/写）
+     * @param key         首键
+     * @param clientInfo  客户端信息
+     * @return null 表示放行，否则返回 -READONLY 或 -MOVED 响应字符串
+     */
+    private String checkSlaveRedirect(String commandName, String key, ClientInfo clientInfo) {
+        if (!clusterEnabled || clusterConfig == null) {
+            return null;
+        }
+        ClusterNode me = clusterConfig.getMyNode();
+        if (me == null || !me.isSlave()) {
+            return null;
+        }
+        String masterId = me.getMasterNodeId();
+        if (masterId == null) {
+            return null;
+        }
+
+        int slot = SlotUtils.keyHashSlot(key);
+        String ownerNodeId = clusterConfig.getSlotOwner(slot);
+        // 仅当槽位 owner 是本 slave 的 master 才介入；否则交由后续 checkSlotAndRedirect 处理。
+        if (ownerNodeId == null || !masterId.equals(ownerNodeId)) {
+            return null;
+        }
+
+        boolean isWrite = !isReadOnlyCommand(commandName != null ? commandName.toUpperCase() : "");
+        if (isWrite) {
+            // slave 永不接受写命令（即使客户端声明了 READONLY）。
+            return "-READONLY You can't write against a read only replica.\r\n";
+        }
+
+        // 读命令：仅当客户端声明 READONLY 时本 slave 服务读；否则 MOVED 到 master。
+        if (clientInfo != null && clientInfo.isReadonly()) {
+            return null;
+        }
+        ClusterNode master = clusterConfig.getNode(masterId);
+        if (master == null) {
+            return null;
+        }
+        return "-MOVED " + slot + " " + master.getIp() + ":" + master.getPort() + "\r\n";
+    }
+
+    /**
      * 检查键所属槽位是否在本节点（MOVED 重定向检查）
      *
      * @param key 键名
@@ -2726,7 +2875,15 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         }
         
         int slot = SlotUtils.keyHashSlot(key);
-        
+
+        // IMPORTING 槽位（本节点是迁移目标）：跳过 MOVED 判定，放行交由 checkAskRedirect
+        // 裁决（带 ASKING 放行 / 无 ASKING 返回 ASK 到源节点）。对齐 Redis getNodeByQuery：
+        // importing 槽位虽不归属本节点，但允许 ASKING 客户端访问；否则与源节点的 ASK
+        // 重定向形成 A↔B 无限循环。
+        if (slotManager.isSlotImporting(slot)) {
+            return null;
+        }
+
         // 检查槽位是否已分配。
         // ⚠ 优先从 clusterConfig（Gossip 维护的权威槽位表）读取，因为 slotManager
         // (DefaultSlotManager) 的 slotOwners[] 数组仅在启动时从 clusterConfig 同步一次，
@@ -2742,28 +2899,65 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         if (ownerNodeId == null) {
             return "-CLUSTERDOWN Hash slot not served\r\n";
         }
-        
-        // 检查槽位是否在本节点
-        if (!slotManager.isSlotLocal(slot)) {
+
+        // 检查槽位是否在本节点。
+        // ⚠ 本地性判定必须与 owner 来源一致：owner 已从 clusterConfig（权威表）读取，
+        // 本地性也应由 clusterConfig 推导——ownerNodeId == 本节点 id。
+        // 原实现读 slotManager.isSlotLocal（mySlots BitSet），但该 BitSet 仅在启动时
+        // 从 clusterConfig 同步一次，Gossip 学到的远程 failover/reshard 槽位变更不会回写它，
+        // 导致槽位已被远程接管后本节点仍"越权服务"（P1-1 双表分叉根因）。
+        // 仅当 clusterConfig 不可用时才回退到 slotManager.isSlotLocal。
+        boolean slotLocal;
+        if (clusterConfig != null) {
+            String myNodeId = clusterConfig.getMyNodeId();
+            slotLocal = myNodeId != null && myNodeId.equals(ownerNodeId);
+            // P1-14：slave 在 READONLY 下可服务其 master 的槽位读。checkSlaveRedirect
+            // 已对写/非 READONLY 读做了拒绝或 MOVED；此处为放行的 READONLY 读，
+            // 把 master 的槽位视为"本地"以避免重复 MOVED。slave 角色且 owner == master
+            // 即视为本地可达。
+            if (!slotLocal) {
+                ClusterNode me = clusterConfig.getMyNode();
+                if (me != null && me.isSlave() && ownerNodeId.equals(me.getMasterNodeId())) {
+                    slotLocal = true;
+                }
+            }
+        } else {
+            slotLocal = slotManager.isSlotLocal(slot);
+        }
+
+        if (!slotLocal) {
             if (clusterConfig == null) {
                 return "-CLUSTERDOWN No cluster config\r\n";
             }
-            
+
             ClusterNode owner = clusterConfig.getNode(ownerNodeId);
-            
+
             if (owner == null) {
                 return "-CLUSTERDOWN Slot owner not found\r\n";
             }
-            
+
             return "-MOVED " + slot + " " + owner.getIp() + ":" + owner.getPort() + "\r\n";
         }
-        
+
         return null;
     }
     
     /**
      * 检查 ASK 重定向
      * 用于槽位迁移过程中
+     * <p>
+     * 判定顺序对齐 Redis 7 getNodeByQuery：
+     * <ol>
+     *   <li>IMPORTING 槽位：带 ASKING → 放行并消费一次性标志；不带 ASKING → ASK
+     *       重定向回源节点（客户端应回源取键）。</li>
+     *   <li>MIGRATING 槽位：键存在 → 放行（消费 ASKING 模拟 Redis 命令执行后的标志
+     *       清除）；键已迁走 → 无条件 ASK 到目标节点。注意 MIGRATING 状态下 ASKING
+     *       无效（ASKING 仅对 IMPORTING 槽位生效），修复旧实现"带 ASKING 即放行"
+     *       导致已迁移键返回 nil、写命令产生孤儿键的缺陷。</li>
+     *   <li>普通槽位（归属本节点）：ASKING 无路由效果，按"命令执行后清除一次性标志"
+     *       语义消费，防止残留污染后续命令。</li>
+     * </ol>
+     * </p>
      *
      * @param key        键名
      * @param clientInfo 客户端信息
@@ -2773,38 +2967,53 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         if (!clusterEnabled || slotManager == null) {
             return null;
         }
-        
+
         int slot = SlotUtils.keyHashSlot(key);
-        
-        // 检查客户端是否设置了 ASKING 状态
-        if (clientInfo != null && clientInfo.isAsking()) {
-            // 客户端已发送 ASKING 命令，允许访问导入中的槽位
-            // 清除 ASKING 状态（一次性使用）
-            clientInfo.setAsking(false);
-            return null;
+
+        // (1) IMPORTING 槽位
+        if (slotManager.isSlotImporting(slot)) {
+            if (clientInfo != null && clientInfo.isAsking()) {
+                clientInfo.setAsking(false);
+                return null;
+            }
+            String sourceNodeId = slotManager.getImportingSource(slot);
+            if (sourceNodeId == null || clusterConfig == null) {
+                return null;
+            }
+            ClusterNode source = clusterConfig.getNode(sourceNodeId);
+            if (source == null) {
+                return null;
+            }
+            return "-ASK " + slot + " " + source.getIp() + ":" + source.getPort() + "\r\n";
         }
-        
-        // 检查槽位是否在 MIGRATING 状态
+
+        // (2) MIGRATING 槽位
         if (slotManager.isSlotMigrating(slot)) {
-            // 检查键是否还存在
             if (memoryStore.exists(clientInfo != null ? clientInfo.getCurrentDatabase() : 0, key)) {
+                if (clientInfo != null && clientInfo.isAsking()) {
+                    clientInfo.setAsking(false);
+                }
                 return null; // 键还在本节点，正常处理
             }
-            
-            // 键已迁移，返回 ASK 重定向
+
+            // 键已迁移，返回 ASK 重定向（不消费 ASKING：MIGRATING 状态下 ASKING 无效）
             String targetNodeId = slotManager.getMigratingTarget(slot);
             if (targetNodeId == null || clusterConfig == null) {
                 return null;
             }
-            
+
             ClusterNode target = clusterConfig.getNode(targetNodeId);
             if (target == null) {
                 return null;
             }
-            
+
             return "-ASK " + slot + " " + target.getIp() + ":" + target.getPort() + "\r\n";
         }
-        
+
+        // (3) 普通槽位：消费 ASKING 一次性标志（对齐 Redis 命令执行后清除）
+        if (clientInfo != null && clientInfo.isAsking()) {
+            clientInfo.setAsking(false);
+        }
         return null;
     }
     

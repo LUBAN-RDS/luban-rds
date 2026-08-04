@@ -40,6 +40,16 @@ public class ClusterConfig implements Serializable {
     private final AtomicLong configEpoch;
 
     /**
+     * 本节点最后一次投票的选举纪元（对齐 Redis 7 server.cluster->lastVoteEpoch）。
+     * <p>
+     * P0-4 修复：master 每次授权投票后更新此值，并在收到 AUTH_REQUEST 时拒绝
+     * {@code reqEpoch <= lastVoteEpoch} 的请求。此值持久化到 nodes.conf，
+     * 节点重启后不会遗忘已投过的纪元，避免同一纪元二次投票导致双 master。
+     * </p>
+     */
+    private final AtomicLong lastVoteEpoch;
+
+    /**
      * 所有节点列表（节点ID -> 节点对象）
      */
     private Map<String, ClusterNode> nodes;
@@ -82,6 +92,22 @@ public class ClusterConfig implements Serializable {
     private volatile boolean dirty;
 
     /**
+     * FORGET 黑名单：被 CLUSTER FORGET 移除的节点在 60s 内禁止经 Gossip 重新引入。
+     * <p>
+     * P1-3 修复：原黑名单仅存在于 ClusterCommandHandler 且无任何调用方，导致被 FORGET 的
+     * master 经 Gossip 立即"复活"。此处上移到共享的 ClusterConfig，使 Gossip 路径
+     * （processGossipNodes / handleMeet）能在重新引入节点前查询此表。
+     * key = 节点ID，value = 过期时间戳（System.currentTimeMillis() + 延迟）。
+     * </p>
+     */
+    private final Map<String, Long> forgetBlacklist = new ConcurrentHashMap<>();
+
+    /**
+     * FORGET 黑名单默认延迟（毫秒），对齐 Redis CLUSTER_BLACKLIST_TTL。
+     */
+    private static final long FORGET_BLACKLIST_TTL_MS = 60_000L;
+
+    /**
      * 默认构造方法
      */
     public ClusterConfig() {
@@ -92,6 +118,7 @@ public class ClusterConfig implements Serializable {
         this.state = "fail";
         this.currentEpoch = new AtomicLong(0);
         this.configEpoch = new AtomicLong(0);
+        this.lastVoteEpoch = new AtomicLong(0);
     }
 
     /**
@@ -318,6 +345,11 @@ public class ClusterConfig implements Serializable {
         if (node == null) {
             return;
         }
+        // 先捕获本节点当前记录该 owner 拥有的槽位快照（getSlots 返回防御性拷贝），
+        // 用于后续移除"本地仍记为该 owner、但 advertised 位图已不含"的槽位。
+        // 必须先捕获，否则下面的 add 循环会修改 node.slots，污染移除判定。
+        BitSet prevOwnedByNode = node.getSlots();
+
         for (int s = slots.nextSetBit(0); s >= 0; s = slots.nextSetBit(s + 1)) {
             String curOwner = slotAssignment[s];
             if (curOwner == null) {
@@ -338,6 +370,22 @@ public class ClusterConfig implements Serializable {
             }
             if (s == Integer.MAX_VALUE) {
                 break;
+            }
+        }
+
+        // P1-2B：移除"本地仍记为 nodeId 拥有、但 advertised 位图不再包含"的槽位。
+        // 原实现只增不删，节点迁出槽位后本地视图永不收敛 → 第三节点槽位归属陈旧。
+        // 仅当 advertised configEpoch >= 本节点上次记录的该 owner configEpoch 时才移除，
+        // 防止过期的 gossip 分片回放把更新的槽位变更冲掉（陈旧快照不覆盖新状态）。
+        if (configEpoch >= node.getConfigEpoch()) {
+            for (int s = prevOwnedByNode.nextSetBit(0); s >= 0; s = prevOwnedByNode.nextSetBit(s + 1)) {
+                if (!slots.get(s) && nodeId.equals(slotAssignment[s])) {
+                    setSlotOwner(s, null);
+                    node.removeSlot(s);
+                }
+                if (s == Integer.MAX_VALUE) {
+                    break;
+                }
             }
         }
     }
@@ -439,6 +487,89 @@ public class ClusterConfig implements Serializable {
      */
     public boolean setEpochIfGreater(long newEpoch) {
         return currentEpoch.getAndUpdate(e -> Math.max(e, newEpoch)) < newEpoch;
+    }
+
+    /**
+     * 获取最后一次投票的选举纪元（对齐 Redis 7 lastVoteEpoch）。
+     *
+     * @return 最后一次投票的纪元，从未投过票返回 0
+     */
+    public long getLastVoteEpoch() {
+        return lastVoteEpoch.get();
+    }
+
+    /**
+     * 设置最后一次投票的选举纪元（从 nodes.conf 恢复时使用）。
+     *
+     * @param epoch 最后一次投票的纪元
+     */
+    public void setLastVoteEpoch(long epoch) {
+        lastVoteEpoch.set(epoch);
+    }
+
+    /**
+     * 记录一次投票并返回是否更新成功。
+     * <p>
+     * 仅当 {@code epoch} 大于当前 lastVoteEpoch 时更新（防止回退），
+     * 并置脏标记触发 nodes.conf 持久化，确保重启后投票记忆不丢失。
+     * </p>
+     *
+     * @param epoch 本次投票的选举纪元
+     * @return 是否更新成功（epoch 更大时为 true）
+     */
+    public boolean recordVoteEpoch(long epoch) {
+        boolean updated = lastVoteEpoch.getAndUpdate(e -> Math.max(e, epoch)) < epoch;
+        if (updated) {
+            markDirty();
+        }
+        return updated;
+    }
+
+    // ==================== FORGET 黑名单 ====================
+
+    /**
+     * 将节点加入 FORGET 黑名单（对齐 Redis clusterBlacklistAddNode）。
+     * <p>
+     * 被 CLUSTER FORGET 移除的节点在 TTL 内禁止经 Gossip 重新引入，
+     * 否则对端的 gossip 段会立即把它"复活"，使 FORGET 失效。
+     * </p>
+     *
+     * @param nodeId 被移除的节点ID
+     */
+    public void blacklistNode(String nodeId) {
+        if (nodeId != null) {
+            forgetBlacklist.put(nodeId, System.currentTimeMillis() + FORGET_BLACKLIST_TTL_MS);
+        }
+    }
+
+    /**
+     * 查询节点是否在 FORGET 黑名单内（且未过期）。
+     *
+     * @param nodeId 节点ID
+     * @return true 表示该节点仍在黑名单有效期内，Gossip 不应重新引入
+     */
+    public boolean isBlacklisted(String nodeId) {
+        if (nodeId == null) {
+            return false;
+        }
+        Long expireAt = forgetBlacklist.get(nodeId);
+        if (expireAt == null) {
+            return false;
+        }
+        if (System.currentTimeMillis() > expireAt) {
+            forgetBlacklist.remove(nodeId, expireAt);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * 清理 FORGET 黑名单中已过期的条目（对齐 Redis clusterBlacklistCleanup）。
+     * 应由后台定时任务周期调用。
+     */
+    public void cleanupBlacklist() {
+        long now = System.currentTimeMillis();
+        forgetBlacklist.entrySet().removeIf(e -> now > e.getValue());
     }
 
     // ==================== 状态管理方法 ====================

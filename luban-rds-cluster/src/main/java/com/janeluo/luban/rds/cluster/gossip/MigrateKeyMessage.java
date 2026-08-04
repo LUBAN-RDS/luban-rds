@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
  * - 键值长度（4 字节，大端序）+ 键值（原始字节）
  * - TTL（8 字节，大端序）
  * - replace 标志（1 字节，0=false，1=true）
+ * - requestId（8 字节，大端序，P1-20；尾部追加，旧节点/旧消息忽略）
  * </p>
  */
 public class MigrateKeyMessage extends GossipMessage {
@@ -100,7 +101,8 @@ public class MigrateKeyMessage extends GossipMessage {
     protected byte[] encodeBody() {
         byte[] keyBytes = key != null ? key.getBytes(StandardCharsets.UTF_8) : new byte[0];
         byte[] valueBytes = value != null ? value : new byte[0];
-        int totalLength = 4 + keyBytes.length + 4 + valueBytes.length + 8 + 1;
+        // 末尾追加 8 字节 requestId（P1-20），向后兼容：旧节点忽略多余字节
+        int totalLength = 4 + keyBytes.length + 4 + valueBytes.length + 8 + 1 + 8;
         byte[] data = new byte[totalLength];
         int offset = 0;
 
@@ -136,6 +138,16 @@ public class MigrateKeyMessage extends GossipMessage {
 
         // 写入 replace 标志
         data[offset++] = (byte) (replace ? 1 : 0);
+
+        // 写入 requestId（8 字节大端序，P1-20 请求-响应关联）
+        data[offset++] = (byte) (requestId >> 56);
+        data[offset++] = (byte) (requestId >> 48);
+        data[offset++] = (byte) (requestId >> 40);
+        data[offset++] = (byte) (requestId >> 32);
+        data[offset++] = (byte) (requestId >> 24);
+        data[offset++] = (byte) (requestId >> 16);
+        data[offset++] = (byte) (requestId >> 8);
+        data[offset++] = (byte) requestId;
 
         return data;
     }
@@ -198,6 +210,18 @@ public class MigrateKeyMessage extends GossipMessage {
         // 读取 replace 标志
         if (offset < body.length) {
             this.replace = (body[offset++] & 0xFF) == 1;
+        }
+
+        // 读取 requestId（P1-20，尾部追加，长度守卫向后兼容旧消息）
+        if (offset + 8 <= body.length) {
+            this.requestId = ((long) (body[offset++] & 0xFF) << 56) |
+                    ((long) (body[offset++] & 0xFF) << 48) |
+                    ((long) (body[offset++] & 0xFF) << 40) |
+                    ((long) (body[offset++] & 0xFF) << 32) |
+                    ((long) (body[offset++] & 0xFF) << 24) |
+                    ((long) (body[offset++] & 0xFF) << 16) |
+                    ((long) (body[offset++] & 0xFF) << 8) |
+                    (body[offset++] & 0xFF);
         }
     }
 

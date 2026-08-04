@@ -78,6 +78,15 @@ public class GossipNodeInfo implements Serializable {
     private String masterNodeId;
 
     /**
+     * 复制偏移量（P1-6）。
+     * <p>
+     * 携带被 gossip 节点的 replication offset，使第三方 slave 的数据新鲜度也能经 gossip 传播，
+     * 供 failover rank 退避计算（offset 大者优先发起选举）。尾部追加字段，向后兼容。
+     * </p>
+     */
+    private long replicationOffset;
+
+    /**
      * 默认构造方法
      */
     public GossipNodeInfo() {
@@ -219,6 +228,24 @@ public class GossipNodeInfo implements Serializable {
         this.masterNodeId = masterNodeId;
     }
 
+    /**
+     * 获取复制偏移量（P1-6）。
+     *
+     * @return 复制偏移量
+     */
+    public long getReplicationOffset() {
+        return replicationOffset;
+    }
+
+    /**
+     * 设置复制偏移量（P1-6）。
+     *
+     * @param replicationOffset 复制偏移量
+     */
+    public void setReplicationOffset(long replicationOffset) {
+        this.replicationOffset = replicationOffset;
+    }
+
     // ==================== 状态管理方法 ====================
 
     /**
@@ -315,8 +342,9 @@ public class GossipNodeInfo implements Serializable {
         byte[] slotsBytes = slots != null ? slots.toByteArray() : EMPTY_BYTES;
         // masterNodeId：1 字节标志 + （有值时）40 字节 node-id
         int masterNodeIdLength = masterNodeId != null ? NODE_ID_LENGTH : 0;
+        // + 8：replicationOffset（P1-6，尾部追加）
         int totalLength = NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2
-                + 4 + slotsBytes.length + 1 + masterNodeIdLength;
+                + 4 + slotsBytes.length + 1 + masterNodeIdLength + 8;
 
         byte[] data = new byte[totalLength];
         int offset = 0;
@@ -387,6 +415,16 @@ public class GossipNodeInfo implements Serializable {
         } else {
             data[offset++] = 0;
         }
+
+        // 写入 replicationOffset（8字节，大端序，P1-6，尾部追加）
+        data[offset++] = (byte) (replicationOffset >> 56);
+        data[offset++] = (byte) (replicationOffset >> 48);
+        data[offset++] = (byte) (replicationOffset >> 40);
+        data[offset++] = (byte) (replicationOffset >> 32);
+        data[offset++] = (byte) (replicationOffset >> 24);
+        data[offset++] = (byte) (replicationOffset >> 16);
+        data[offset++] = (byte) (replicationOffset >> 8);
+        data[offset++] = (byte) replicationOffset;
 
         return data;
     }
@@ -522,6 +560,18 @@ public class GossipNodeInfo implements Serializable {
             }
         }
 
+        // 读取 replicationOffset（8字节，大端序，P1-6，尾部追加，向后兼容：旧消息无此字段时保留默认值 0）
+        if (offset + 8 <= data.length) {
+            this.replicationOffset = ((long) (data[offset++] & 0xFF) << 56) |
+                    ((long) (data[offset++] & 0xFF) << 48) |
+                    ((long) (data[offset++] & 0xFF) << 40) |
+                    ((long) (data[offset++] & 0xFF) << 32) |
+                    ((long) (data[offset++] & 0xFF) << 24) |
+                    ((long) (data[offset++] & 0xFF) << 16) |
+                    ((long) (data[offset++] & 0xFF) << 8) |
+                    ((long) (data[offset++] & 0xFF));
+        }
+
         return offset;
     }
 
@@ -535,8 +585,9 @@ public class GossipNodeInfo implements Serializable {
         int flagsCount = flags.size();
         int slotsBytesLength = slots != null ? slots.toByteArray().length : 0;
         int masterNodeIdLength = masterNodeId != null ? NODE_ID_LENGTH : 0;
+        // + 8：replicationOffset（P1-6，尾部追加）
         return NODE_ID_LENGTH + 1 + ipBytesLength + 4 + 4 + 8 + 1 + flagsCount * 2
-                + 4 + slotsBytesLength + 1 + masterNodeIdLength;
+                + 4 + slotsBytesLength + 1 + masterNodeIdLength + 8;
     }
 
     // ==================== 工具方法 ====================

@@ -176,8 +176,9 @@ class ManualFailoverBroadcastTest {
         failoverManager.prepareRequestedStateForTest(1L);
 
         // 投递过半授权（masterCount/2+1 = 2）
-        failoverManager.onAuthAck(new FailoverAuthAckMessage(m2.getNodeId(), 1L, 1L, 1L));
-        failoverManager.onAuthAck(new FailoverAuthAckMessage(m3.getNodeId(), 1L, 1L, 1L));
+        // candidateId 必须是 me(NODE_ID_2)，否则 onAuthAck 候选绑定校验会忽略
+        failoverManager.onAuthAck(new FailoverAuthAckMessage(m2.getNodeId(), 1L, 1L, 1L, NODE_ID_2));
+        failoverManager.onAuthAck(new FailoverAuthAckMessage(m3.getNodeId(), 1L, 1L, 1L, NODE_ID_2));
 
         // 胜选后状态回 IDLE（ELECTED 为瞬态）
         assertEquals(FailoverState.IDLE, failoverManager.getState());

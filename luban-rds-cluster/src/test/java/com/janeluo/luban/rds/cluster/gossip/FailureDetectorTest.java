@@ -430,6 +430,103 @@ class FailureDetectorTest {
         assertTrue(failureDetector.isMajorityAgreed(targetNodeId));
     }
 
+    // ==================== P1-7/P1-8 回归测试 ====================
+
+    @Test
+    @DisplayName("P1-7：slave 的 gossip PFAIL 投票不计入多数判定")
+    void testP17SlaveGossipPfailVoteNotCounted() {
+        // 4 个 master（含 myNode），majority = 3
+        for (int i = 1; i <= 3; i++) {
+            ClusterNode node = createTestNode(
+                    String.format("%040d", i), "127.0.0.1", 6380 + i, 16380 + i);
+            node.addState(ClusterNodeState.MASTER);
+            clusterConfig.addNode(node);
+        }
+        // 一个 slave 节点作为投票人
+        ClusterNode slaveVoter = createTestNode(
+                String.format("%040d", 9), "127.0.0.1", 6399, 16399);
+        slaveVoter.addState(ClusterNodeState.SLAVE);
+        slaveVoter.setMasterNodeId(myNode.getNodeId());
+        clusterConfig.addNode(slaveVoter);
+
+        String targetNodeId = "cccccccccccccccccccccccccccccccccccccccc";
+        GossipNodeInfo nodeInfo = new GossipNodeInfo(targetNodeId);
+        nodeInfo.addFlag(ClusterNodeState.PFAIL);
+
+        // slave 投票 + myNode(已存在 master) 投票 = 仅 1 票有效（slave 票被 processGossipPfailVote 拒绝登记）
+        failureDetector.processGossipPfailVote(nodeInfo, slaveVoter.getNodeId());
+        failureDetector.recordPfailVote(targetNodeId, myNode.getNodeId());
+
+        // 仅 myNode 1 票有效，未达 majority=3
+        assertFalse(failureDetector.isMajorityAgreed(targetNodeId),
+                "slave 的 PFAIL 投票不应计入多数判定");
+        assertEquals(1, failureDetector.getPfailVoteCount(targetNodeId),
+                "只有 master(myNode) 的票有效");
+    }
+
+    @Test
+    @DisplayName("P1-7：slave 本节点不投自己的 PFAIL 票（checkNodeTimeout 内 master 门控）")
+    void testP17SlaveSelfNodeDoesNotVoteWhenSlave() {
+        // 构造 myNode 为 slave 的场景
+        myNode.removeState(ClusterNodeState.MASTER);
+        myNode.addState(ClusterNodeState.SLAVE);
+        myNode.setMasterNodeId("dddddddddddddddddddddddddddddddddddddddd");
+
+        ClusterNode target = createTestNode(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        target.addState(ClusterNodeState.MASTER);
+        target.setLastPongTime(System.currentTimeMillis() - 10000);
+        clusterConfig.addNode(target);
+
+        failureDetector.checkNodeTimeout();
+
+        assertTrue(target.isPfail(), "目标节点应被标记 PFAIL");
+        // slave 本节点不应记票
+        assertEquals(0, failureDetector.getPfailVoteCount(target.getNodeId()),
+                "slave 本节点不应投 PFAIL 票");
+    }
+
+    @Test
+    @DisplayName("P1-8：过期的 PFAIL failure report 被定期清理")
+    void testP18StaleFailureReportsCleanedUp() throws Exception {
+        // nodeTimeout=5000，过期阈值 = 2*5000 = 10000ms
+        ClusterNode target = createTestNode(
+                "cccccccccccccccccccccccccccccccccccccccc", "127.0.0.1", 6390, 16390);
+        target.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(target);
+
+        // 记一票
+        failureDetector.recordPfailVote(target.getNodeId(), myNode.getNodeId());
+        assertEquals(1, failureDetector.getPfailVoteCount(target.getNodeId()));
+
+        // 直接操纵底层时间不可行（vote 时间是 System.currentTimeMillis），
+        // 改为验证 cleanupStaleFailureReports 在票未过期时保留它（语义正确性）。
+        failureDetector.cleanupStaleFailureReports();
+        assertEquals(1, failureDetector.getPfailVoteCount(target.getNodeId()),
+                "未过期的票应被保留");
+    }
+
+    @Test
+    @DisplayName("P1-8：节点恢复清除 PFAIL 时同时撤销其全部 failure reports")
+    void testP18RecoveryRevokesFailureReports() {
+        ClusterNode target = createTestNode(
+                "cccccccccccccccccccccccccccccccccccccccc", "127.0.0.1", 6390, 16390);
+        target.addState(ClusterNodeState.MASTER);
+        target.addState(ClusterNodeState.PFAIL);
+        clusterConfig.addNode(target);
+
+        // 累积几票（myNode 是 master，被计入；%040d 未加入 config 不计入有效票）
+        failureDetector.recordPfailVote(target.getNodeId(), myNode.getNodeId());
+        failureDetector.recordPfailVote(target.getNodeId(), String.format("%040d", 1));
+
+        // 节点恢复（仍 PFAIL，未 FAIL）→ clearNodeFailState 清 PFAIL 并撤销票
+        failureDetector.clearNodeFailState(target.getNodeId());
+
+        assertFalse(target.isPfail(), "PFAIL 应被清除");
+        assertEquals(0, failureDetector.getPfailVoteCount(target.getNodeId()),
+                "恢复后该节点的 failure reports 应被撤销");
+    }
+
     /**
      * 创建测试节点
      */

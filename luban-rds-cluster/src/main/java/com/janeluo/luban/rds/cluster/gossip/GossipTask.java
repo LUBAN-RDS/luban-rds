@@ -40,19 +40,37 @@ public class GossipTask implements Runnable {
     private final FailureDetector failureDetector;
 
     /**
+     * 节点超时时间（毫秒），用于心跳优先策略（P1-9）。
+     */
+    private final long nodeTimeout;
+
+    /**
      * 随机数生成器
      */
     private final Random random;
 
     /**
-     * 构造方法
+     * 构造方法（保留二参形式以向后兼容，内部按未启用优先策略处理）。
      *
      * @param gossipProtocol  Gossip 协议实例
      * @param failureDetector 故障检测器
      */
     public GossipTask(GossipProtocol gossipProtocol, FailureDetector failureDetector) {
+        this(gossipProtocol, failureDetector, 0L);
+    }
+
+    /**
+     * 完整构造方法。
+     *
+     * @param gossipProtocol  Gossip 协议实例
+     * @param failureDetector 故障检测器
+     * @param nodeTimeout     节点超时时间（毫秒），用于 P1-9 心跳优先策略；
+     *                        传 0 时退化为纯随机（向后兼容旧行为）
+     */
+    public GossipTask(GossipProtocol gossipProtocol, FailureDetector failureDetector, long nodeTimeout) {
         this.gossipProtocol = gossipProtocol;
         this.failureDetector = failureDetector;
+        this.nodeTimeout = nodeTimeout;
         this.random = new Random();
     }
 
@@ -69,6 +87,9 @@ public class GossipTask implements Runnable {
             // 2. 检测节点超时
             checkNodeTimeouts();
 
+            // 2.1 清理过期的 PFAIL failure reports（P1-8，对齐 Redis clusterNodeCleanupFailureReports）
+            failureDetector.cleanupStaleFailureReports();
+
             // 3. 检查并广播 FAIL 消息
             checkAndBroadcastFail();
 
@@ -84,16 +105,30 @@ public class GossipTask implements Runnable {
             // 6. 保存集群配置（参照 Redis 7 serverCron 中 clusterSaveConfig 的周期性检查）
             gossipProtocol.saveClusterConfigIfNeeded();
 
+            // 7. 清理 FORGET 黑名单过期条目（对齐 Redis clusterBlacklistCleanup 周期清理）
+            gossipProtocol.cleanupForgetBlacklist();
+
+            // 8. 清理超时未握手的 HANDSHAKE 节点（P1-21，对齐 Redis clusterCron 对 orphaned
+            //    HANDSHAKE 节点的 free）。阈值取 2 * nodeTimeout，nodeTimeout<=0 时跳过。
+            gossipProtocol.cleanupStaleHandshakeNodes(nodeTimeout * 2L);
+
         } catch (Exception e) {
             logger.error("Gossip 任务执行失败", e);
         }
     }
 
     /**
-     * 发送心跳到随机选择的节点
+     * 发送心跳（P1-9：优先 PING pong 最老的节点，对齐 Redis clusterCron）。
      * <p>
      * 对于处于 HANDSHAKE 状态的节点，发送 MEET 推动握手完成（对齐 Redis 行为）；
-     * 对于正常节点，随机选择一个发送 PING 心跳。
+     * 对于正常节点，采用"最老 pong 优先 + 随机兜底"策略发送 PING：
+     * <ul>
+     *   <li>第一优先：pong 时间最老且 PING 间隔已超过 nodeTimeout/2 的节点，
+     *       确保故障检测延迟有界（对齐 Redis：先 PING 那些最久未应答的节点）；</li>
+     *   <li>兜底：无优先目标时随机选 1 个，保留 gossip 传播的随机性。</li>
+     * </ul>
+     * 每轮仍只发 1 个 PING（PING_TARGET_COUNT），不增加心跳总流量。
+     * nodeTimeout=0 时退化为纯随机（向后兼容）。
      * </p>
      */
     private void sendHeartbeats() {
@@ -130,21 +165,53 @@ public class GossipTask implements Runnable {
             return;
         }
 
-        // 随机选择节点发送 PING
-        int targetCount = Math.min(PING_TARGET_COUNT, candidateNodes.size());
+        // P1-9：优先 PING pong 最老且超 nodeTimeout/2 未 ping 的节点。
+        ClusterNode target = selectPriorityPingTarget(candidateNodes);
 
-        for (int i = 0; i < targetCount; i++) {
+        // 兜底：无优先目标时随机选 1 个
+        if (target == null) {
             int index = random.nextInt(candidateNodes.size());
-            ClusterNode targetNode = candidateNodes.get(index);
-
-            if (logger.isTraceEnabled()) {
-                logger.trace("发送心跳到节点: nodeId={}", targetNode.getNodeId());
-            }
-            gossipProtocol.sendPing(targetNode);
-
-            // 移除已选择的节点，避免重复选择
-            candidateNodes.remove(index);
+            target = candidateNodes.get(index);
         }
+
+        if (logger.isTraceEnabled()) {
+            logger.trace("发送心跳到节点: nodeId={}, lastPongAgo={}ms",
+                    target.getNodeId(), target.getTimeSinceLastPong());
+        }
+        gossipProtocol.sendPing(target);
+    }
+
+    /**
+     * 选择本轮优先 PING 的目标：pong 时间最老且 PING 间隔已超 nodeTimeout/2 的节点（P1-9）。
+     * <p>
+     * 对齐 Redis clusterCron 的核心启发式：每轮优先 PING 那些最久未收到 PONG 的节点，
+     * 使故障检测延迟在大集群下有界。只选一个目标（每轮 1 个 PING）。
+     * </p>
+     *
+     * @param candidateNodes 候选节点（已排除本节点、FAIL、HANDSHAKE）
+     * @return 优先目标节点，无满足条件者返回 null（由调用方随机兜底）
+     */
+    private ClusterNode selectPriorityPingTarget(List<ClusterNode> candidateNodes) {
+        if (nodeTimeout <= 0) {
+            // 未启用优先策略（向后兼容），交由随机兜底
+            return null;
+        }
+        long stalePingThreshold = nodeTimeout / 2;
+        long oldestPong = Long.MAX_VALUE;
+        ClusterNode oldest = null;
+        for (ClusterNode node : candidateNodes) {
+            // 仅考虑 PING 间隔已超 nodeTimeout/2 的节点（近期已 PING 过的不重复打扰）
+            if (node.getTimeSinceLastPing() < stalePingThreshold) {
+                continue;
+            }
+            long pong = node.getLastPongTime();
+            // lastPongTime 越小（越老）越优先
+            if (pong < oldestPong) {
+                oldestPong = pong;
+                oldest = node;
+            }
+        }
+        return oldest;
     }
 
     /**

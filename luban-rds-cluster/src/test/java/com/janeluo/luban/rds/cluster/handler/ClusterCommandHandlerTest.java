@@ -437,6 +437,30 @@ class ClusterCommandHandlerTest {
         assertEquals(NODE_ID_2, slotManager.getSlotOwner(0));
     }
 
+    /**
+     * P1-2A：SETSLOT NODE 必须提升新 owner 的 per-node configEpoch，
+     * 否则 gossip 经 syncSlotsFromNode 的 epoch 仲裁会拒绝槽位变更，第三节点永不收敛。
+     */
+    @Test
+    @DisplayName("P1-2A：SETSLOT NODE 提升新 owner 的 configEpoch")
+    void testClusterSetslotNodeBumpsConfigEpoch() {
+        ClusterNode targetNode = new ClusterNode(NODE_ID_2);
+        targetNode.setIp("127.0.0.1");
+        targetNode.setPort(7001);
+        targetNode.addState(ClusterNodeState.MASTER);
+        targetNode.setConfigEpoch(0L);
+        clusterConfig.addNode(targetNode);
+
+        long epochBefore = clusterConfig.getCurrentEpoch();
+        String result = handler.handle(new String[]{"SETSLOT", "0", "NODE", NODE_ID_2});
+        assertEquals("+OK\r\n", result);
+
+        long epochAfter = clusterConfig.getCurrentEpoch();
+        assertTrue(epochAfter > epochBefore, "currentEpoch 应自增");
+        assertEquals(epochAfter, targetNode.getConfigEpoch(),
+                "新 owner 的 configEpoch 应被提升到当前 currentEpoch");
+    }
+
     @Test
     @DisplayName("测试 CLUSTER SLAVES 命令")
     void testClusterSlaves() {
@@ -671,6 +695,41 @@ class ClusterCommandHandlerTest {
         assertTrue(handler.isNodeInForgetList(NODE_ID_2));
     }
 
+    /**
+     * P1-3：FORGET 必须把节点加入 ClusterConfig 的共享黑名单（master 与 slave 两分支都加），
+     * 否则 gossip 的 processGossipNodes/handleMeet 会立即把它重新引入，使 FORGET 失效。
+     */
+    @Test
+    @DisplayName("P1-3：FORGET 主节点后加入 clusterConfig 黑名单")
+    void testForgetMasterAddsToBlacklist() {
+        ClusterNode otherNode = new ClusterNode(NODE_ID_2);
+        otherNode.setIp("127.0.0.1");
+        otherNode.setPort(7001);
+        otherNode.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(otherNode);
+
+        assertFalse(clusterConfig.isBlacklisted(NODE_ID_2));
+        String result = handler.handle(new String[]{"FORGET", NODE_ID_2});
+        assertEquals("+OK\r\n", result);
+        assertTrue(clusterConfig.isBlacklisted(NODE_ID_2), "FORGET 后节点应在 clusterConfig 黑名单内");
+    }
+
+    @Test
+    @DisplayName("P1-3：FORGET 从节点后也加入 clusterConfig 黑名单")
+    void testForgetSlaveAddsToBlacklist() {
+        // 设置 MYSELF 为 master，使 NODE_ID_2 可成为其 slave
+        ClusterNode slaveNode = new ClusterNode(NODE_ID_2);
+        slaveNode.setIp("127.0.0.1");
+        slaveNode.setPort(7001);
+        slaveNode.addState(ClusterNodeState.SLAVE);
+        slaveNode.setMasterNodeId(NODE_ID_1);
+        clusterConfig.addNode(slaveNode);
+
+        String result = handler.handle(new String[]{"FORGET", NODE_ID_2});
+        assertEquals("+OK\r\n", result);
+        assertTrue(clusterConfig.isBlacklisted(NODE_ID_2), "FORGET 从节点后也应在黑名单内");
+    }
+
     @Test
     @DisplayName("测试 CLUSTER SETSLOT MIGRATING 非本节点槽位")
     void testClusterSetslotMigratingNotMySlot() {
@@ -684,5 +743,31 @@ class ClusterCommandHandlerTest {
         // 尝试迁移未分配的槽位应该失败
         String result = handler.handle(new String[]{"SETSLOT", "0", "MIGRATING", NODE_ID_2});
         assertTrue(result.contains("-ERR"));
+    }
+
+    @Test
+    @DisplayName("测试 CLUSTER SETSLOT NODE 清除残留迁移状态（P0-2 收敛配套）")
+    void testClusterSetslotNodeClearsMigrationState() {
+        // 添加目标节点
+        ClusterNode targetNode = new ClusterNode(NODE_ID_2);
+        targetNode.setIp("127.0.0.1");
+        targetNode.setPort(7001);
+        targetNode.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(targetNode);
+
+        // 分配槽位并同时建立 IMPORTING/MIGRATING 状态
+        handler.handle(new String[]{"ADDSLOTS", "0", "1", "2", "3", "4", "5"});
+        handler.handle(new String[]{"SETSLOT", "3", "IMPORTING", NODE_ID_2});
+        handler.handle(new String[]{"SETSLOT", "3", "MIGRATING", NODE_ID_2});
+        assertTrue(slotManager.isSlotImporting(3));
+        assertTrue(slotManager.isSlotMigrating(3));
+
+        // 迁移完成 SETSLOT NODE：应清除残留状态，
+        // 否则目标/源节点间形成迁移完成后的永久 ASK 互指循环
+        String result = handler.handle(new String[]{"SETSLOT", "3", "NODE", NODE_ID_2});
+
+        assertEquals("+OK\r\n", result);
+        assertFalse(slotManager.isSlotImporting(3));
+        assertFalse(slotManager.isSlotMigrating(3));
     }
 }

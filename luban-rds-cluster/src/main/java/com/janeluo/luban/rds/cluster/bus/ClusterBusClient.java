@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -42,9 +43,15 @@ public class ClusterBusClient {
     private static final int CONNECT_TIMEOUT_MS = 5000;
 
     /**
-     * 断线后首次重连的延迟（毫秒）。重连失败的后续重试由下一次断开事件触发。
+     * 断线后首次重连的延迟（毫秒）。重连失败的后续重试按指数退避递增。
      */
     private static final long RECONNECT_DELAY_MS = 2000;
+
+    /**
+     * 指数退避上限（毫秒）。重连延迟 = RECONNECT_DELAY_MS * 2^min(attempts, MAX_BACKOFF_SHIFT)，
+     * 超过此次数后延迟不再翻倍（对齐 Redis orphaned_time + node-timeout 门控的量级）。
+     */
+    private static final int MAX_BACKOFF_SHIFT = 5;
 
     /**
      * EventLoop 线程组
@@ -80,12 +87,36 @@ public class ClusterBusClient {
     private final Map<String, NodeEndpoint> nodeEndpoints;
 
     /**
-     * 待响应的请求映射（目标节点ID -> 响应 Future）
+     * 待响应的请求映射（requestId -> 响应 Future，P1-20）。
      * <p>
      * 用于 sendAndWait 请求-响应匹配：发送 MIGRATE_KEY 后等待目标节点回 MIGRATE_KEY_ACK。
+     * 按 requestId（而非 nodeId）严格匹配，消除并发 MIGRATE 到同一节点时 ACK 串线
+     * （A 的 ACK 错误完成 B 的 future → B 误报成功删源键 → 数据丢失）。
      * </p>
      */
-    private final Map<String, CompletableFuture<GossipMessage>> pendingResponses;
+    private final Map<Long, CompletableFuture<GossipMessage>> pendingResponses;
+
+    /**
+     * requestId 递增序列（P1-20）。每个 sendAndWait 分配唯一 id 写入请求消息，
+     * 响应回填同一 id 用于匹配。从 1 起，0 保留为"未设置"（旧消息解码默认值，不命中任何 future）。
+     */
+    private final AtomicLong requestIdSeq = new AtomicLong(1);
+
+    /**
+     * 重连去重映射（P1-21）：nodeId → 当前已调度的重连触发时刻（ms）。
+     * <p>
+     * send()/scheduleReconnect 在 node-timeout（5s）窗口内仅允许调度一次重连，
+     * 避免每秒心跳触发 ~5 个重叠 connect 尝试形成重连风暴。
+     * 调度任务执行时清除本条目，允许下一次失败后重新调度。
+     * </p>
+     */
+    private final Map<String, Long> reconnectScheduled;
+
+    /**
+     * 重连失败计数（P1-21）：nodeId → 连续失败次数，用于指数退避。
+     * 连接成功（connect 监听器 isSuccess 分支）时清除。
+     */
+    private final Map<String, Long> reconnectAttempts;
 
     /**
      * 构造方法
@@ -100,6 +131,8 @@ public class ClusterBusClient {
         this.clusterConfig = clusterConfig;
         this.gossipProtocol = gossipProtocol;
         this.pendingResponses = new ConcurrentHashMap<>();
+        this.reconnectScheduled = new ConcurrentHashMap<>();
+        this.reconnectAttempts = new ConcurrentHashMap<>();
         this.closed = false;
     }
 
@@ -148,6 +181,10 @@ public class ClusterBusClient {
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
                 .option(ChannelOption.TCP_NODELAY, true)
+                // P1-22：开启 TCP keepalive（对齐服务端 ClusterBusServer SO_KEEPALIVE）。
+                // 半开连接（对端进程崩溃但本地 socket 未知）会由 TCP keepalive 探测最终触发
+                // close 事件，进而走现有断线重连路径；否则 isActive() 长期为 true 使节点永不重连。
+                .option(ChannelOption.SO_KEEPALIVE, true)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, CONNECT_TIMEOUT_MS)
                 .handler(new ChannelInitializer<SocketChannel>() {
                     @Override
@@ -173,6 +210,8 @@ public class ClusterBusClient {
             if (channelFuture.isSuccess()) {
                 Channel channel = channelFuture.channel();
                 nodeChannels.put(nodeId, channel);
+                // 连接成功，重置该节点的重连失败计数（指数退避归零）
+                reconnectAttempts.remove(nodeId);
                 logger.info("成功连接节点 {}，地址: {}:{}", nodeId, host, busPort);
 
                 AtomicReference<String> currentNodeId = new AtomicReference<>(nodeId);
@@ -202,10 +241,16 @@ public class ClusterBusClient {
     }
 
     /**
-     * 在 EventLoop 上调度一次延迟重连。
+     * 在 EventLoop 上调度一次延迟重连（P1-21：去重 + 指数退避）。
      * <p>
-     * 仅当节点端点未被 disconnect 移除、且当前没有活跃连接时才会真正发起重连，
-     * 避免重复重连风暴。重连失败会在下一次断开事件中再次触发。
+     * 去重：在一个延迟窗口内对同一节点仅调度一次重连。send()/断线监听器每秒都可能触发，
+     * 若不门控会在 5s CONNECT_TIMEOUT 窗口内堆叠 ~5 个重叠 connect 尝试形成重连风暴。
+     * 用 {@code reconnectScheduled} 记录已调度的触发时刻，窗口内重复调用直接返回。
+     * </p>
+     * <p>
+     * 指数退避：连续重连失败时延迟按 {@code RECONNECT_DELAY_MS * 2^min(attempts, MAX_BACKOFF_SHIFT)}
+     * 递增（上限约 64s），对齐 Redis orphaned_time + node-timeout 门控的量级，避免对不可达节点高频冲击。
+     * 连接成功时由 connect 监听器清零 attempts。
      * </p>
      *
      * @param nodeId   节点ID
@@ -215,7 +260,24 @@ public class ClusterBusClient {
         if (closed) {
             return;
         }
+        long now = System.currentTimeMillis();
+        // 去重：窗口内已调度过则不再调度（putIfAbsent + 时间窗口校验）
+        Long lastScheduled = reconnectScheduled.get(nodeId);
+        long window = RECONNECT_DELAY_MS * (1L << MAX_BACKOFF_SHIFT);
+        if (lastScheduled != null && (now - lastScheduled) < window) {
+            return;
+        }
+        reconnectScheduled.put(nodeId, now);
+
+        // 计入本次失败（原子递增，跨 EventLoop 安全）。connect 成功时由监听器清零。
+        // 用 compute 保证自增原子：返回递增后的新值。
+        long attempts = reconnectAttempts.compute(nodeId, (k, v) -> (v == null) ? 1L : v + 1L);
+        long shift = Math.min(attempts - 1L, (long) MAX_BACKOFF_SHIFT);
+        long delay = RECONNECT_DELAY_MS * (1L << shift);
+
         group.schedule(() -> {
+            // 执行时清除去重标记，允许下一次失败后重新调度
+            reconnectScheduled.remove(nodeId);
             if (closed || nodeEndpoints.get(nodeId) == null) {
                 return;
             }
@@ -223,14 +285,14 @@ public class ClusterBusClient {
             if (existing != null && existing.isActive()) {
                 return;
             }
-            logger.info("尝试重连节点 {}，地址: {}:{}", nodeId, endpoint.host,
-                    endpoint.port + ClusterBusServer.BUS_PORT_OFFSET);
+            logger.info("尝试重连节点 {}，地址: {}:{}，第 {} 次退避 {}ms", nodeId, endpoint.host,
+                    endpoint.port + ClusterBusServer.BUS_PORT_OFFSET, attempts, delay);
             try {
                 connect(nodeId, endpoint.host, endpoint.port);
             } catch (Exception e) {
                 logger.warn("重连节点 {} 失败", nodeId, e);
             }
-        }, RECONNECT_DELAY_MS, TimeUnit.MILLISECONDS);
+        }, delay, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -243,6 +305,9 @@ public class ClusterBusClient {
      */
     public void disconnect(String nodeId) {
         nodeEndpoints.remove(nodeId);
+        // 清除重连相关状态：主动断开不应残留重连调度/退避计数
+        reconnectScheduled.remove(nodeId);
+        reconnectAttempts.remove(nodeId);
         Channel channel = nodeChannels.remove(nodeId);
         if (channel != null && channel.isActive()) {
             channel.close();
@@ -349,9 +414,14 @@ public class ClusterBusClient {
             return null;
         }
 
+        // P1-20：分配唯一 requestId，先注册 future 再发送，ACK 按 requestId 严格匹配。
+        // 消除并发 MIGRATE 到同一节点时 ACK 串线（旧实现按 nodeId 单槽位，后注册覆盖前者）。
+        long reqId = requestIdSeq.getAndIncrement();
+        message.setRequestId(reqId);
+
         // 注册待响应 Future，由 ClusterBusHandler 收到 MIGRATE_KEY_ACK 时完成
         CompletableFuture<GossipMessage> future = new CompletableFuture<>();
-        pendingResponses.put(nodeId, future);
+        pendingResponses.put(reqId, future);
 
         try {
             // 发送消息
@@ -360,7 +430,7 @@ public class ClusterBusClient {
 
             if (!sendFuture.isSuccess()) {
                 logger.error("发送消息到节点 {} 失败", nodeId, sendFuture.cause());
-                pendingResponses.remove(nodeId);
+                pendingResponses.remove(reqId);
                 return null;
             }
 
@@ -368,7 +438,7 @@ public class ClusterBusClient {
             try {
                 return future.get(timeout, TimeUnit.MILLISECONDS);
             } catch (Exception e) {
-                logger.warn("等待节点 {} 的响应超时或失败", nodeId, e);
+                logger.warn("等待节点 {} 的响应超时或失败（requestId={}）", nodeId, reqId, e);
                 return null;
             }
         } catch (InterruptedException e) {
@@ -376,21 +446,30 @@ public class ClusterBusClient {
             Thread.currentThread().interrupt();
             return null;
         } finally {
-            pendingResponses.remove(nodeId);
+            pendingResponses.remove(reqId);
         }
     }
 
     /**
-     * 完成待响应的请求（由 ClusterBusHandler 在收到 MIGRATE_KEY_ACK 等响应消息时调用）
+     * 完成待响应的请求（由 ClusterBusHandler 在收到 MIGRATE_KEY_ACK 等响应消息时调用，P1-20）。
+     * <p>
+     * 按响应消息携带的 requestId 严格匹配等待中的 future。requestId=0（旧格式或未携带）
+     * 不会命中任何 future（sendAndWait 分配的 id ≥1），保证串线安全。
+     * </p>
      *
-     * @param senderNodeId 响应发送者节点ID
-     * @param response     响应消息
+     * @param requestId 响应对应的请求 ID（取自响应消息的 getRequestId()）
+     * @param response  响应消息
      */
-    public void completeResponse(String senderNodeId, GossipMessage response) {
-        CompletableFuture<GossipMessage> future = pendingResponses.get(senderNodeId);
+    public void completeResponse(long requestId, GossipMessage response) {
+        if (requestId == 0) {
+            // 旧格式 ACK 无 requestId，无法匹配；忽略避免误完成任意 future
+            logger.warn("收到无 requestId 的响应，无法匹配等待中的请求: type={}", response.getType());
+            return;
+        }
+        CompletableFuture<GossipMessage> future = pendingResponses.get(requestId);
         if (future != null) {
             future.complete(response);
-            logger.debug("完成节点 {} 的待响应请求: {}", senderNodeId, response.getType());
+            logger.debug("完成 requestId={} 的待响应请求: {}", requestId, response.getType());
         }
     }
 
@@ -465,8 +544,11 @@ public class ClusterBusClient {
         nodeChannels.clear();
         // 清除端点映射，避免已关闭客户端上残留重连信息
         nodeEndpoints.clear();
+        // 清除重连调度/退避计数
+        reconnectScheduled.clear();
+        reconnectAttempts.clear();
         // 清除待响应请求并通知等待方，避免 sendAndWait 永久阻塞
-        for (Map.Entry<String, CompletableFuture<GossipMessage>> entry : pendingResponses.entrySet()) {
+        for (Map.Entry<Long, CompletableFuture<GossipMessage>> entry : pendingResponses.entrySet()) {
             entry.getValue().cancel(false);
         }
         pendingResponses.clear();

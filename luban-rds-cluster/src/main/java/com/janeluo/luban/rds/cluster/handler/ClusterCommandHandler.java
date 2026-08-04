@@ -4,6 +4,7 @@ import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
 import com.janeluo.luban.rds.cluster.config.ClusterStats;
+import com.janeluo.luban.rds.cluster.gossip.FailoverManager;
 import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
 import com.janeluo.luban.rds.cluster.lifecycle.NoOpReplicationLifecycleListener;
 import com.janeluo.luban.rds.cluster.lifecycle.ReplicationLifecycleListener;
@@ -637,7 +638,9 @@ public class ClusterCommandHandler {
         if (node.isSlave()) {
             clusterConfig.removeNode(nodeId);
             clearSlotManagerForNode(nodeId);
-            logger.info("CLUSTER FORGET: removed slave node {}", nodeId);
+            // P1-3：从节点也必须加入黑名单，否则 gossip 会立即重新引入它。
+            clusterConfig.blacklistNode(nodeId);
+            logger.info("CLUSTER FORGET: removed slave node {} (blacklisted)", nodeId);
             notifyTopologyChanged();
             return "+OK\r\n";
         }
@@ -647,13 +650,14 @@ public class ClusterCommandHandler {
             return "-ERR Node " + nodeId + " is not empty! Reshard data away and try again.\r\n";
         }
 
-        // 立即移除节点，并加入 forget 列表（60s 内阻止其他节点通过 gossip 重新引入该节点）
-        forgetNodes.put(nodeId, System.currentTimeMillis() + FORGET_DELAY_MS);
+        // 立即移除节点，并加入黑名单（60s 内阻止其他节点通过 gossip 重新引入该节点）。
+        // P1-3：黑名单上移至 ClusterConfig（共享对象），使 Gossip 路径可查询；
+        // 原 ClusterCommandHandler.forgetNodes 表保留作兼容，但权威黑名单在 clusterConfig。
+        clusterConfig.blacklistNode(nodeId);
         clusterConfig.removeNode(nodeId);
         clearSlotManagerForNode(nodeId);
 
-        logger.info("CLUSTER FORGET: removed master node {} (forget-listed for {}ms)",
-                nodeId, FORGET_DELAY_MS);
+        logger.info("CLUSTER FORGET: removed master node {} (blacklisted for 60000ms)", nodeId);
         notifyTopologyChanged();
         return "+OK\r\n";
     }
@@ -939,10 +943,24 @@ public class ClusterCommandHandler {
                 slotMigrationState.remove(slot);
                 slotMigrationTarget.remove(slot);
 
-                // 增加配置纪元
-                clusterConfig.incrementEpoch();
+                // 清除迁移/导入状态（对齐 Redis clusterCommand SETSLOT NODE：接管槽位时
+                // 清除该槽位的 migrating/importing 状态）。否则迁移完成 SETSLOT NODE 后
+                // 状态残留：目标节点 importing 残留 → 该槽位请求无 ASKING 时 ASK 回源，
+                // 源节点 migrating 残留 → ASK 回目标，形成迁移完成后的永久互指循环。
+                slotManager.setSlotImporting(slot, null);
+                slotManager.setSlotMigrating(slot, null);
 
-                logger.info("CLUSTER SETSLOT: slot {} assigned to node {}", slot, nodeId);
+                // 增加配置纪元，并提升新 owner 的 per-node configEpoch（P1-2A）。
+                // 不提升则 Gossip 经 syncSlotsFromNode 的 epoch 仲裁会因新 owner 纪元偏低
+                // 而拒绝槽位变更，第三节点槽位归属永不收敛 → 客户端双跳 MOVED。
+                // 对齐 clusterAddslots/clusterReplicate/performFailoverLocally 的既有模式。
+                clusterConfig.incrementEpoch();
+                if (targetNode != null) {
+                    targetNode.setConfigEpoch(clusterConfig.getCurrentEpoch());
+                }
+
+                logger.info("CLUSTER SETSLOT: slot {} assigned to node {} (configEpoch={})",
+                        slot, nodeId, clusterConfig.getCurrentEpoch());
                 notifyTopologyChanged();
                 return "+OK\r\n";
 
@@ -1201,7 +1219,7 @@ public class ClusterCommandHandler {
             return "-ERR Master node not found\r\n";
         }
 
-        // 检查是否有 FORCE 或 TAKEOVER 选项
+        // 解析选项：FORCE / TAKEOVER（对齐 Redis clusterCommand failover，P1-12）
         boolean force = false;
         boolean takeover = false;
 
@@ -1211,30 +1229,56 @@ public class ClusterCommandHandler {
                 force = true;
             } else if ("TAKEOVER".equals(option)) {
                 takeover = true;
+            } else if ("TO".equals(option) && args.length > 2) {
+                // 兼容 "FAILOVER TO <nodeId> <port>"（Redis 子命令，本项目简化为忽略目标）
+                // 不在此实现完整 TO 语义，仅吞掉参数避免 syntax error
+            } else {
+                return "-ERR syntax error\r\n";
             }
         }
 
         // 执行故障转移
         try {
+            FailoverManager failoverManager =
+                    gossipProtocol != null ? gossipProtocol.getFailoverManager() : null;
+
             if (takeover) {
-                // TAKEOVER 模式：直接接管，不需要授权
+                // TAKEOVER 模式：不询问任何人、不需 master 在线、不追平 offset，直接接管。
+                // 仅自增 epoch + 广播 FailoverResult 使全网收敛（对齐 Redis CLUSTER FAILOVER TAKEOVER）。
                 performManualFailover(myNode, masterNode);
-                logger.info("CLUSTER FAILOVER TAKEOVER: slave {} promoted to master",
+                logger.info("CLUSTER FAILOVER TAKEOVER: slave {} promoted to master (no consensus)",
                         myNode.getNodeId());
-            } else if (force) {
-                // FORCE 模式：强制故障转移，不需要主节点同意
-                performManualFailover(myNode, masterNode);
-                logger.info("CLUSTER FAILOVER FORCE: slave {} promoted to master",
-                        myNode.getNodeId());
-            } else {
-                // 正常模式：需要主节点同意
-                // TODO: 实现正常的故障转移流程，需要向主节点请求授权
-                // 这里简化处理，直接执行
-                performManualFailover(myNode, masterNode);
-                logger.info("CLUSTER FAILOVER: slave {} promoted to master",
-                        myNode.getNodeId());
+                return "+OK\r\n";
             }
 
+            if (force) {
+                // FORCE 模式：跳过 master 健康检查，但 master 必须已知。
+                // 对齐 Redis CLUSTER FAILOVER FORCE：不发 MFSTART 握手，直接提升
+                // （允许 master 不可达但尚未 FAIL 时强制接管）。
+                performManualFailover(myNode, masterNode);
+                logger.info("CLUSTER FAILOVER FORCE: slave {} promoted to master (skip health check)",
+                        myNode.getNodeId());
+                return "+OK\r\n";
+            }
+
+            // 普通模式（P1-12 完整实现）：要求 master 在线且健康，
+            // 经 MFSTART 握手让 master 暂停写、回传 offset，slave 追平后提升（异步）。
+            if (masterNode.isFail() || masterNode.isPfail()) {
+                // master 已 FAIL/PFAIL 时普通模式不可用，提示用 FORCE/TAKEOVER
+                return "-MASTERDOWN Master is down, use FAILOVER FORCE or TAKEOVER to proceed\r\n";
+            }
+
+            if (failoverManager != null) {
+                // 启动异步状态机（MF_REQUESTED → WAITING_OFFSET → READY），立即返回 +OK
+                failoverManager.startManualFailover(myNode, masterNode);
+                logger.info("CLUSTER FAILOVER: slave {} initiated (normal mode, waiting offset catchup)",
+                        myNode.getNodeId());
+            } else {
+                // FailoverManager 未注入（单测降级）：直接同步提升，保持向后兼容
+                performManualFailover(myNode, masterNode);
+                logger.info("CLUSTER FAILOVER: slave {} promoted to master (degraded, no FailoverManager)",
+                        myNode.getNodeId());
+            }
             return "+OK\r\n";
         } catch (Exception e) {
             logger.error("CLUSTER FAILOVER failed", e);
@@ -1439,32 +1483,23 @@ public class ClusterCommandHandler {
     }
 
     /**
-     * 检查节点是否在延迟移除列表中
+     * 检查节点是否在 FORGET 黑名单中。
+     * <p>
+     * P1-3：黑名单已上移至 ClusterConfig（共享对象），此处委托查询以保持 API 兼容。
+     * </p>
      *
      * @param nodeId 节点ID
-     * @return 是否在延迟移除列表中
+     * @return 是否在黑名单有效期内
      */
     public boolean isNodeInForgetList(String nodeId) {
-        Long expireTime = forgetNodes.get(nodeId);
-        if (expireTime == null) {
-            return false;
-        }
-
-        // 检查是否过期
-        if (System.currentTimeMillis() > expireTime) {
-            forgetNodes.remove(nodeId);
-            return false;
-        }
-
-        return true;
+        return clusterConfig.isBlacklisted(nodeId);
     }
 
     /**
-     * 清理过期的延迟移除节点
+     * 清理 FORGET 黑名单中已过期的条目。委托 ClusterConfig。
      */
     public void cleanupForgetNodes() {
-        long now = System.currentTimeMillis();
-        forgetNodes.entrySet().removeIf(entry -> now > entry.getValue());
+        clusterConfig.cleanupBlacklist();
     }
 
     /**

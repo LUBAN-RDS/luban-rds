@@ -47,6 +47,15 @@ public class FailoverManager {
      */
     private static final long JITTER_BOUND_MS = 500L;
 
+    /**
+     * rank 退避步长（毫秒，P1-6）。
+     * <p>
+     * delay = gracePeriod + rank * RANK_DELAY_MS + jitter，
+     * rank=0 为同 master 中 replOffset 最大的 slave，对齐 Redis {@code CLUSTER_MF_RETRY_MULT} 量级。
+     * </p>
+     */
+    private static final long RANK_DELAY_MS = 500L;
+
     private final ClusterConfig clusterConfig;
     private final SlotManager slotManager;
     private final ClusterStateManager stateManager;
@@ -56,17 +65,38 @@ public class FailoverManager {
     private final long gracePeriod;
 
     /**
+     * replica 有效性因子（cluster-slave-validity-factor，P1-6）。
+     * <p>
+     * ≤0 时禁用有效性校验（向后兼容，保留旧行为）；>0 时表示允许 slave 数据落后于
+     * 同 master 最新 slave 的偏移量上限（粗略对齐 Redis data_age 阈值语义）。
+     * </p>
+     */
+    private final long slaveValidityFactor;
+
+    /**
      * 复制生命周期监听器（由 NettyRedisServer 注入，用于在 failover 提升/降级时启停复制连接）。
      * 默认 NoOp，保证未注入时不触发复制逻辑。
      */
     private volatile ReplicationLifecycleListener replicationLifecycleListener =
             new NoOpReplicationLifecycleListener();
 
+    /**
+     * 写暂停门控（P1-12，由 NettyRedisServer 注入，用于手动 failover 普通模式暂停 master 写）。
+     * 默认 NoOp，保证未注入时手动 failover 降级为直接提升（向后兼容）。
+     */
+    private volatile com.janeluo.luban.rds.cluster.lifecycle.WritePauseGate writePauseGate =
+            new com.janeluo.luban.rds.cluster.lifecycle.NoOpWritePauseGate();
+
     // ==================== 候选侧状态（slave 发起选举用） ====================
     private FailoverState state = FailoverState.IDLE;
     private long electionStartTime;
     private long requestDeadline;
     private long electionEpoch;
+    /**
+     * 最近一次计算的 failover rank（P1-6，供测试观察）。rank=0 表示本 slave 是同 master
+     * 中 replOffset 最大者（数据最新鲜）。未装配复制时所有 slave rank=0。
+     */
+    private int computedRank;
     private final Set<String> authVotes = new HashSet<>();
     private String failedMasterId;
     private boolean requestBroadcasted;
@@ -74,9 +104,12 @@ public class FailoverManager {
     // ==================== 投票侧状态（master 授权用，与本节点状态共存） ====================
     /**
      * 已投票记录：被投 slaveId -> 投票时的 currentEpoch
+     * <p>
+     * 注：lastVoteEpoch 已上移至 {@link ClusterConfig#getLastVoteEpoch()} 并持久化到 nodes.conf，
+     * 本表仅作"本纪元已投候选"的去重/幂等用途，重启后不恢复（由 lastVoteEpoch 兜底拒绝同纪元重投）。
+     * </p>
      */
     private final Map<String, Long> votesCast = new HashMap<>();
-    private long lastVoteEpoch;
     /**
      * 本纪元首投候选的复制偏移量，用于拒绝同纪元后续候选时的日志比较。
      * 设计 §2.9 "首投即定"：本纪元首个有效候选即获票，后续候选即使偏移量更大也不改票
@@ -85,8 +118,34 @@ public class FailoverManager {
      */
     private long votedReplOffset;
 
+    // ==================== 手动 failover 状态机（P1-12，独立于自动选举） ====================
     /**
-     * 构造方法
+     * 手动 failover 状态（候选 slave 侧）。
+     */
+    private volatile ManualFailoverState manualState = ManualFailoverState.NONE;
+    /**
+     * 手动 failover 发起时刻（用于超时保护）。
+     */
+    private long mfStartTime;
+    /**
+     * master 暂停写时回传的偏移量，slave 须追平到此值后才提升。
+     */
+    private volatile long mfTargetOffset;
+    /**
+     * 待接管的原 master 节点。
+     */
+    private ClusterNode pendingManualMaster;
+    /**
+     * 手动 failover 超时上限（毫秒），超时后回退 NONE 并解除 master 写暂停。
+     */
+    private static final long MANUAL_FAILOVER_TIMEOUT_MS = 30000L;
+    /**
+     * slave offset 追平判定的轮询间隔内容忍的微小落后（字节），避免精确相等才放行的死锁。
+     */
+    private static final long OFFSET_CATCHUP_TOLERANCE = 0L;
+
+    /**
+     * 构造方法（向后兼容，等价于 slaveValidityFactor=0，即禁用有效性校验）。
      *
      * @param clusterConfig      集群配置
      * @param slotManager        槽位管理器
@@ -99,6 +158,26 @@ public class FailoverManager {
     public FailoverManager(ClusterConfig clusterConfig, SlotManager slotManager,
                            ClusterStateManager stateManager, ClusterBusClient busClient,
                            Runnable onTopologyChanged, long nodeTimeout, long gracePeriod) {
+        this(clusterConfig, slotManager, stateManager, busClient, onTopologyChanged,
+                nodeTimeout, gracePeriod, 0L);
+    }
+
+    /**
+     * 完整构造方法。
+     *
+     * @param clusterConfig       集群配置
+     * @param slotManager         槽位管理器
+     * @param stateManager        集群状态管理器
+     * @param busClient           集群总线客户端
+     * @param onTopologyChanged   拓扑变更回调（持久化 nodes.conf）
+     * @param nodeTimeout         节点超时时间（毫秒）
+     * @param gracePeriod         选举退避窗口（毫秒，cluster-failover-grace-period）
+     * @param slaveValidityFactor replica 有效性因子（P1-6，≤0 禁用校验）
+     */
+    public FailoverManager(ClusterConfig clusterConfig, SlotManager slotManager,
+                           ClusterStateManager stateManager, ClusterBusClient busClient,
+                           Runnable onTopologyChanged, long nodeTimeout, long gracePeriod,
+                           long slaveValidityFactor) {
         this.clusterConfig = clusterConfig;
         this.slotManager = slotManager;
         this.stateManager = stateManager;
@@ -106,6 +185,7 @@ public class FailoverManager {
         this.onTopologyChanged = onTopologyChanged;
         this.nodeTimeout = nodeTimeout;
         this.gracePeriod = gracePeriod;
+        this.slaveValidityFactor = slaveValidityFactor;
     }
 
     /**
@@ -116,6 +196,16 @@ public class FailoverManager {
     public void setReplicationLifecycleListener(ReplicationLifecycleListener listener) {
         this.replicationLifecycleListener =
                 listener != null ? listener : new NoOpReplicationLifecycleListener();
+    }
+
+    /**
+     * 设置写暂停门控（P1-12，由 NettyRedisServer 在装配时注入）。
+     *
+     * @param gate 写暂停门控，null 时回退为 NoOp 实现
+     */
+    public void setWritePauseGate(com.janeluo.luban.rds.cluster.lifecycle.WritePauseGate gate) {
+        this.writePauseGate = gate != null ? gate
+                : new com.janeluo.luban.rds.cluster.lifecycle.NoOpWritePauseGate();
     }
 
     public synchronized FailoverState getState() {
@@ -143,6 +233,8 @@ public class FailoverManager {
                 default:
                     break;
             }
+            // P1-12：推进手动 failover 状态机（独立于自动选举，普通模式异步进行）
+            advanceManualFailover();
         } catch (Exception e) {
             logger.error("FailoverManager.tick 异常", e);
         }
@@ -174,28 +266,104 @@ public class FailoverManager {
             return;
         }
 
+        // replica-validity 校验（P1-6，对齐 Redis clusterSlaveValidityFactor）：
+        // slaveValidityFactor > 0 时，若本 slave 的 replOffset 明显落后于同 master 中
+        // 数据最新鲜的 slave（落后量超过 nodeTimeout * factor 表示数据过旧），则不发起选举，
+        // 让更新鲜的 slave 优先接管，避免陈旧 slave 胜选丢数据。
+        // slaveValidityFactor <= 0 时跳过（向后兼容）。offset 全 0（未装配复制）时跳过。
+        if (slaveValidityFactor > 0 && !skipValidityCheck(me, masterId)) {
+            logger.debug("slave 数据过于陈旧，暂不发起选举: nodeId={}, failedMasterId={}",
+                    me.getNodeId(), masterId);
+            return;
+        }
+
         // 满足触发条件
         state = FailoverState.REQUESTING;
         electionStartTime = System.currentTimeMillis();
+
+        // rank 退避（P1-6，对齐 Redis 7：delay = gracePeriod + rank * RANK_DELAY_MS + jitter）。
+        // rank = 同 master 中 replOffset 严格大于本节点的 slave 个数（offset 最大者 rank=0）。
+        // offset 全 0（未装配复制，或 ClusterNode.replOffset 未被 gossip 填充）时所有 slave
+        // 等价于 rank=0，退化为 gracePeriod + jitter（向后兼容旧行为）。
+        int rank = computeFailoverRank(me, masterId);
+        computedRank = rank;
         // 退避抖动：不同 slave 的 nodeId hashCode 不同以错峰广播，降低同纪元多候选同时
-        // 发起导致票数分散的概率。
-        //
-        // Rank 退避（对齐 Redis 7：delay = gracePeriod + rank * 500ms，rank=0 为 offset
-        // 最大的 slave）当前采用 spec §2.9 记可的简化：固定 rank=0（所有 slave 同时发起，
-        // 靠 onAuthRequest 投票比较 replicationOffset 择优）。真正的 rank 计算需要 slave
-        // 复制偏移量经 gossip（PONG）传播，使本地可见同 master 各 slave 的 offset 以排序，
-        // 该机制不在 C8 范围内。故此处保留 gracePeriod + jitter 退避，由投票侧的偏移量
-        // 比较 + 首投即定语义保证数据更新鲜的 slave 优先获票。
-        // 修复 Math.abs(Integer.MIN_VALUE) 仍为负的 bug：先取模再取绝对值
+        // 发起导致票数分散的概率。修复 Math.abs(Integer.MIN_VALUE) 仍为负的 bug：先取模再取绝对值
         long jitter = Math.abs(me.getNodeId().hashCode() % JITTER_BOUND_MS);
-        requestDeadline = electionStartTime + gracePeriod + jitter;
+        requestDeadline = electionStartTime + gracePeriod + rank * RANK_DELAY_MS + jitter;
         failedMasterId = masterId;
         authVotes.clear();
         requestBroadcasted = false;
-        logger.warn("slave 进入选举: nodeId={}, failedMasterId={}, replOffset={}, {}ms 后广播请求",
+        logger.warn("slave 进入选举: nodeId={}, failedMasterId={}, replOffset={}, rank={}, {}ms 后广播请求",
                 me.getNodeId(), failedMasterId,
-                replicationLifecycleListener.getReplicationOffset(),
+                replicationLifecycleListener.getReplicationOffset(), rank,
                 (requestDeadline - electionStartTime));
+    }
+
+    /**
+     * 计算本 slave 的 failover rank（P1-6）。
+     * <p>
+     * rank = 同 master 下 replOffset 严格大于本节点的 slave 数量。
+     * rank=0 表示本节点是同 master 中数据最新鲜者，优先发起选举（配合 onAuthRequest 首投即定，
+     * 数据更新鲜者先获票）。
+     * </p>
+     * <p>
+     * 依赖 ClusterNode.replOffset 已被 gossip 填充。未装配复制（所有 offset=0）时 rank=0，
+     * 所有 slave 同时发起，退化为原 jitter 退避行为。
+     * </p>
+     *
+     * @param me       本节点（slave）
+     * @param masterId master 节点ID
+     * @return rank（≥0）
+     */
+    private int computeFailoverRank(ClusterNode me, String masterId) {
+        long myOffset = me.getReplOffset();
+        int rank = 0;
+        for (ClusterNode sibling : clusterConfig.getSlavesOfMaster(masterId)) {
+            if (sibling == null || sibling.getNodeId().equals(me.getNodeId())) {
+                continue;
+            }
+            // replOffset 更大者排在本节点之前（rank 更小）
+            if (sibling.getReplOffset() > myOffset) {
+                rank++;
+            }
+        }
+        return rank;
+    }
+
+    /**
+     * 判断是否应跳过 replica-validity 校验（即本 slave 数据是否过于陈旧）。
+     * <p>
+     * 返回 true 表示可以跳过/通过（允许发起选举）；false 表示数据过旧应阻止。
+     * 实际阻止逻辑由调用方据返回值处理。本方法返回 false 当且仅当：
+     * 本 slave 的 replOffset 落后同 master 中最新 slave 超过 nodeTimeout * slaveValidityFactor。
+     * </p>
+     * <p>
+     * 简化策略（避免引入无法精确计算的 master repl_offset 时间线）：
+     * 以同 master 各 slave 的 replOffset 差值近似 data_age。offset 全 0 时返回 true（跳过）。
+     * </p>
+     *
+     * @param me       本节点（slave）
+     * @param masterId master 节点ID
+     * @return true 表示数据足够新鲜可发起选举
+     */
+    private boolean skipValidityCheck(ClusterNode me, String masterId) {
+        long myOffset = me.getReplOffset();
+        long maxSiblingOffset = myOffset;
+        for (ClusterNode sibling : clusterConfig.getSlavesOfMaster(masterId)) {
+            if (sibling == null || sibling.getNodeId().equals(me.getNodeId())) {
+                continue;
+            }
+            if (sibling.getReplOffset() > maxSiblingOffset) {
+                maxSiblingOffset = sibling.getReplOffset();
+            }
+        }
+        // 所有 offset 都为 0（未装配复制）→ 跳过校验，保留旧行为
+        if (maxSiblingOffset == 0L && myOffset == 0L) {
+            return true;
+        }
+        long allowedLag = nodeTimeout * slaveValidityFactor;
+        return (maxSiblingOffset - myOffset) <= allowedLag;
     }
 
     /**
@@ -262,6 +430,7 @@ public class FailoverManager {
         requestBroadcasted = false;
         electionStartTime = 0L;
         requestDeadline = 0L;
+        computedRank = 0;
     }
 
     // ==================== 投票侧：master 处理 AUTH_REQUEST ====================
@@ -278,9 +447,8 @@ public class FailoverManager {
      *       更大也<b>不</b>改票。原因是 ACK 为广播消息，其他节点可能已据旧投票推进选举，
      *       撤票重投会导致同一纪元双投、票数统计不一致。</li>
      *   <li>数据新鲜度择优由 {@code tryStartElection} 的 rank 退避保证：offset 大的 slave
-     *       先发起 AUTH_REQUEST、先获票。当前 rank=0 简化（见 tryStartElection 注释），
-     *       所有 slave 同时发起，靠本方法的首投即定 + 各 master 抖动错峰让 offset 大者
-     *       有更高概率先到先得。后续若引入 slave offset gossip 传播，可实现真实 rank 退避。</li>
+     *       先发起 AUTH_REQUEST、先获票（P1-6 已实现真实 rank 退避，依赖 gossip 传播的
+     *       ClusterNode.replOffset 计算排序；未装配复制时 rank 全 0，退化为 gracePeriod+jitter）。</li>
      * </ul>
      * </p>
      *
@@ -320,33 +488,48 @@ public class FailoverManager {
         logger.debug("AUTH_REQUEST 候选校验通过: candidate={}, configEpoch={}, replOffset={}",
                 candidateId, req.getConfigEpoch(), candidateReplOffset);
 
-        // (2) 落后则追平，新纪元清旧票
+        // (2) 落后则追平 currentEpoch，新纪元清旧票。
+        //     注：lastVoteEpoch 不在此推进——它只在真正投出票后更新（见 step 5），保证语义为"最后投出的票"。
         if (reqEpoch > myEpoch) {
             clusterConfig.setCurrentEpoch(reqEpoch);
-            lastVoteEpoch = reqEpoch;
             votesCast.clear();
             votedReplOffset = 0L;
         }
 
-        // (3) 本纪元已投该 slave -> 幂等重发
+        // (3) 本纪元已投该 slave -> 幂等重发 ACK（处理网络重复投递，非重新请求）
+        //     必须在 lastVoteEpoch 闸门前判定：重发同一票不改变选举结果，应继续放行。
         Long votedAt = votesCast.get(candidateId);
         if (votedAt != null && votedAt == reqEpoch) {
             sendAuthAck(candidateId, reqEpoch);
             return;
         }
 
-        // (4) 本纪元已投他 slave -> 拒绝（首投即定，不撤票）
+        // (4) lastVoteEpoch 闸门（对齐 Redis 7 server.cluster->lastVoteEpoch）：
+        //   若已在 reqEpoch 或更晚纪元投过票则拒绝。此值持久化到 nodes.conf，
+        //   重启后 votesCast 清空但 lastVoteEpoch 保留，仍能拒绝同纪元二次投票，杜绝双 master。
+        //   到达此处的请求必是"新票"（非 (3) 幂等路径），故闸门只拦新投。
+        long myLastVoteEpoch = clusterConfig.getLastVoteEpoch();
+        if (reqEpoch <= myLastVoteEpoch) {
+            logger.debug("拒绝 AUTH_REQUEST：投票纪元不晚于已投纪元: reqEpoch={}, lastVoteEpoch={}",
+                    reqEpoch, myLastVoteEpoch);
+            return;
+        }
+
+        // (5) 本纪元已投他 slave -> 拒绝（首投即定，不撤票）
         //     即使新候选 replOffset 更大也不改票：ACK 已广播，撤票重投会造成同纪元双投。
         //     数据新鲜度择优由 tryStartElection 的 rank 退避保证 offset 大者先发起。
+        //     注：(4) 闸门在同纪元二次请求时也会拒绝，此处为防御性双保险。
         if (!votesCast.isEmpty()) {
             logger.debug("本纪元已投他 slave，拒绝（首投即定，不撤票）: votedFor={}, votedReplOffset={}, candidate={}, candidateReplOffset={}",
                     votesCast.keySet(), votedReplOffset, candidateId, candidateReplOffset);
             return;
         }
 
-        // (5) 首投：记录候选及其偏移量，授权
+        // (6) 首投：记录候选及其偏移量，授权
         votesCast.put(candidateId, reqEpoch);
         votedReplOffset = candidateReplOffset;
+        // 记录投票纪元并持久化（P0-4：重启后仍拒绝同纪元重投）
+        clusterConfig.recordVoteEpoch(reqEpoch);
         sendAuthAck(candidateId, reqEpoch);
     }
 
@@ -355,11 +538,14 @@ public class FailoverManager {
         if (me == null) {
             return;
         }
+        // P0-4：ACK 必须携带被投候选ID。ACK 为广播消息，不带 candidateId 会使同纪元
+        // 其他候选误计此票导致双 master。
         FailoverAuthAckMessage ack = new FailoverAuthAckMessage(
                 me.getNodeId(),
                 me.getConfigEpoch(),
                 epoch,
-                epoch);
+                epoch,
+                candidateId);
         busClient.broadcast(ack);
         logger.info("投票授权: voter={}, candidate={}, epoch={}", me.getNodeId(), candidateId, epoch);
     }
@@ -390,6 +576,16 @@ public class FailoverManager {
         if (ack.getVoteEpoch() != electionEpoch) {
             logger.debug("忽略陈旧 ACK: voter={}, voteEpoch={}, electionEpoch={}",
                     voterId, ack.getVoteEpoch(), electionEpoch);
+            return;
+        }
+        // P0-4：ACK 必须是投给"本候选"的，否则忽略。
+        // ACK 为广播消息，同纪元多候选并存时，投给候选 A 的 ACK 会被候选 B 收到，
+        // 不校验 candidateId 会让 B 误计 A 的票数、可能各自过半 → 双 master。
+        ClusterNode me = clusterConfig.getMyNode();
+        String myId = me != null ? me.getNodeId() : null;
+        String ackCandidate = ack.getCandidateId();
+        if (myId == null || !myId.equals(ackCandidate)) {
+            logger.debug("忽略非本候选 ACK: voter={}, ackCandidate={}, me={}", voterId, ackCandidate, myId);
             return;
         }
         if (!authVotes.add(voterId)) {
@@ -457,6 +653,148 @@ public class FailoverManager {
         masterNode.setConfigEpoch(clusterConfig.getCurrentEpoch());
         // 广播 FailoverResult 使全网拓扑收敛（自动+手动共用，C9/3.21）。
         broadcastFailoverResult(slaveNode, masterNode);
+    }
+
+    // ==================== 手动 failover 状态机（P1-12，普通模式异步流程） ====================
+
+    /**
+     * 启动手动故障转移（CLUSTER FAILOVER 普通模式，P1-12）。
+     * <p>
+     * 异步流程：发 MFStart → master 暂停写并回传 offset → slave 追平 → 提升。
+     * FORCE/TAKEOVER 仍走同步 {@link #performManualFailover}，本方法仅普通模式调用。
+     * 调用方（ClusterCommandHandler）应在调用前完成角色校验（必须是 slave）与
+     * master 健康校验（非 FAIL/PFAIL）。
+     * </p>
+     *
+     * @param slaveNode  当前 slave 节点
+     * @param masterNode 原 master 节点（接管目标）
+     */
+    public synchronized void startManualFailover(ClusterNode slaveNode, ClusterNode masterNode) {
+        if (manualState != ManualFailoverState.NONE) {
+            logger.warn("手动 failover 已在进行中，忽略重复请求: state={}", manualState);
+            return;
+        }
+        if (busClient == null) {
+            // 无总线（单测/未装配），降级为同步提升，保持向后兼容
+            logger.warn("busClient 未注入，手动 failover 降级为同步提升");
+            performManualFailover(slaveNode, masterNode);
+            return;
+        }
+        pendingManualMaster = masterNode;
+        mfStartTime = System.currentTimeMillis();
+        mfTargetOffset = 0L;
+        manualState = ManualFailoverState.MF_REQUESTED;
+        // 向 master 发送 MFStart，请求其暂停写并回传 offset
+        ManualFailoverStartMessage msg = new ManualFailoverStartMessage(slaveNode.getNodeId());
+        busClient.send(masterNode.getNodeId(), msg);
+        logger.info("手动 failover 已启动：slave={}, master={}，等待 master 回传暂停 offset",
+                slaveNode.getNodeId(), masterNode.getNodeId());
+    }
+
+    /**
+     * master 侧：收到候选 slave 的 MFStart（P1-12）。
+     * <p>
+     * 本节点作为被接管的目标 master：暂停客户端写、记录当前复制偏移量、回传给发起 slave。
+     * </p>
+     *
+     * @param msg MFStart 消息
+     */
+    public synchronized void onManualFailoverStart(ManualFailoverStartMessage msg) {
+        ClusterNode me = clusterConfig.getMyNode();
+        if (me == null || !me.isMaster()) {
+            logger.warn("收到 MFStart 但本节点非 master，忽略: sender={}", msg.getSenderNodeId());
+            return;
+        }
+        // 仅处理来自本节点 slave 的请求
+        ClusterNode sender = clusterConfig.getNode(msg.getSenderNodeId());
+        if (sender == null || !sender.isSlave()
+                || !me.getNodeId().equals(sender.getMasterNodeId())) {
+            logger.warn("收到非本节点 slave 的 MFStart，忽略: sender={}", msg.getSenderNodeId());
+            return;
+        }
+        // 暂停写并记录当前偏移量
+        writePauseGate.pause();
+        long currentOffset = replicationLifecycleListener.getReplicationOffset();
+        logger.info("收到 MFStart，已暂停写并记录 offset={}，回传给 slave={}",
+                currentOffset, msg.getSenderNodeId());
+        // 回传 offset 给发起 slave
+        ManualFailoverOffsetMessage reply = new ManualFailoverOffsetMessage(me.getNodeId(), currentOffset);
+        busClient.send(msg.getSenderNodeId(), reply);
+    }
+
+    /**
+     * slave 侧：收到 master 回传的暂停 offset（P1-12）。
+     * <p>
+     * 记录目标 offset，转入 WAITING_OFFSET，等待本 slave 复制偏移量追平后提升。
+     * </p>
+     *
+     * @param msg master 暂停写时的 offset 回传消息
+     */
+    public synchronized void onManualFailoverOffset(ManualFailoverOffsetMessage msg) {
+        if (manualState != ManualFailoverState.MF_REQUESTED) {
+            logger.warn("收到 MFOffset 但未处于 MF_REQUESTED 态，忽略: state={}, offset={}",
+                    manualState, msg.getMasterOffset());
+            return;
+        }
+        mfTargetOffset = msg.getMasterOffset();
+        manualState = ManualFailoverState.MF_WAITING_OFFSET;
+        logger.info("收到 master 暂停 offset={}，转入 WAITING_OFFSET 等待追平", mfTargetOffset);
+    }
+
+    /**
+     * 推进手动 failover 状态机（由 tick 每轮调用，P1-12）。
+     * <p>
+     * WAITING_OFFSET 态：检查本 slave 复制偏移量是否追平目标 offset，追平则提升；
+     * 超时保护：超过 {@link #MANUAL_FAILOVER_TIMEOUT_MS} 未完成则回退 NONE 并解除 master 写暂停。
+     * </p>
+     */
+    private synchronized void advanceManualFailover() {
+        if (manualState == ManualFailoverState.NONE) {
+            return;
+        }
+        // 超时保护
+        if ((System.currentTimeMillis() - mfStartTime) > MANUAL_FAILOVER_TIMEOUT_MS) {
+            logger.warn("手动 failover 超时（{}ms），回退 NONE 并解除 master 写暂停",
+                    MANUAL_FAILOVER_TIMEOUT_MS);
+            abortManualFailover();
+            return;
+        }
+        if (manualState == ManualFailoverState.MF_WAITING_OFFSET) {
+            long myOffset = replicationLifecycleListener.getReplicationOffset();
+            // offset 全 0（未装配复制）或 master offset 为 0 → 视为已追平，避免永久阻塞
+            boolean caughtUp = mfTargetOffset <= 0L
+                    || myOffset >= (mfTargetOffset - OFFSET_CATCHUP_TOLERANCE);
+            if (caughtUp) {
+                logger.info("slave offset={} 已追平 master 暂停 offset={}，执行手动提升",
+                        myOffset, mfTargetOffset);
+                ClusterNode me = clusterConfig.getMyNode();
+                if (me != null && pendingManualMaster != null) {
+                    manualState = ManualFailoverState.MF_READY;
+                    performManualFailover(me, pendingManualMaster);
+                }
+                abortManualFailover();
+            }
+        }
+    }
+
+    /**
+     * 中止手动 failover：回退状态、解除 master 写暂停、清空待接管引用。
+     */
+    private synchronized void abortManualFailover() {
+        manualState = ManualFailoverState.NONE;
+        pendingManualMaster = null;
+        mfTargetOffset = 0L;
+        // 解除 master 写暂停（本节点可能是被请求接管的 master，暂停可能仍在生效）
+        writePauseGate.resume();
+    }
+
+    /**
+     * 获取手动 failover 状态（供测试观察，P1-12）。
+     *
+     * @return 当前手动 failover 状态
+     */
+    public synchronized ManualFailoverState getManualFailoverState() {
+        return manualState;
     }
 
     /**
@@ -765,6 +1103,16 @@ public class FailoverManager {
         this.state = FailoverState.REQUESTING;
         this.electionEpoch = epoch;
         this.requestBroadcasted = true;
+    }
+
+    /**
+     * 测试辅助：获取最近一次计算的 failover rank（P1-6）。
+     * 仅供同包测试观察 rank 退避逻辑。
+     *
+     * @return 最近一次计算的 rank，未进入选举前为 0
+     */
+    synchronized int getComputedRankForTest() {
+        return computedRank;
     }
 
     private void notifyTopologyChanged() {

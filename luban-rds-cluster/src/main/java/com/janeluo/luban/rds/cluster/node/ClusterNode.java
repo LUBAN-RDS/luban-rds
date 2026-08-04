@@ -89,6 +89,17 @@ public class ClusterNode implements Serializable {
     private volatile long failTime;
 
     /**
+     * 复制偏移量（P1-6）。
+     * <p>
+     * slave 的已同步偏移量（master_repl_offset），master 通常为 0 或自身偏移。
+     * 由 gossip（PING/PONG/MEET 消息头与 gossip section）传播，
+     * 供 {@link com.janeluo.luban.rds.cluster.gossip.FailoverManager} 计算 failover rank 退避，
+     * 使 offset 更大（数据更新鲜）的 slave 优先发起选举、优先获票。
+     * </p>
+     */
+    private volatile long replOffset;
+
+    /**
      * 连接信息
      */
     private volatile ClusterLink link;
@@ -234,6 +245,24 @@ public class ClusterNode implements Serializable {
 
     public synchronized void setConfigEpoch(long configEpoch) {
         this.configEpoch = configEpoch;
+    }
+
+    /**
+     * 获取复制偏移量（P1-6，用于 failover rank 计算）。
+     *
+     * @return 复制偏移量
+     */
+    public synchronized long getReplOffset() {
+        return replOffset;
+    }
+
+    /**
+     * 设置复制偏移量（P1-6）。
+     *
+     * @param replOffset 复制偏移量
+     */
+    public synchronized void setReplOffset(long replOffset) {
+        this.replOffset = replOffset;
     }
 
     public long getLastPingTime() {

@@ -41,6 +41,21 @@ public abstract class GossipMessage implements Serializable {
     protected GossipMessageType type;
 
     /**
+     * 请求-响应关联 ID（P1-20）。
+     * <p>
+     * 仅用于 {@link GossipMessageType#MIGRATE_KEY}/{@link GossipMessageType#MIGRATE_KEY_ACK}
+     * 请求-响应匹配：sendAndWait 分配递增 requestId 写入请求，响应回填同一 requestId，
+     * ClusterBusClient 据此严格匹配 future，消除并发 MIGRATE 到同节点的 ACK 串线。
+     * </p>
+     * <p>
+     * 默认 0；该字段不在基类 encode/decode 中序列化（避免影响其他消息类型的 body 格式），
+     * 仅由 MigrateKeyMessage/MigrateKeyAckMessage 各自的 encodeBody/decodeBody 读写。
+     * requestId=0（旧消息解码默认值）在严格匹配下不会命中任何新 future（新 future 的 id ≥1）。
+     * </p>
+     */
+    protected long requestId;
+
+    /**
      * 默认构造方法
      */
     public GossipMessage() {
@@ -86,6 +101,24 @@ public abstract class GossipMessage implements Serializable {
 
     public void setType(GossipMessageType type) {
         this.type = type;
+    }
+
+    /**
+     * 请求-响应关联 ID（P1-20）。仅 MIGRATE 路径使用。
+     *
+     * @return requestId，未设置时为 0
+     */
+    public long getRequestId() {
+        return requestId;
+    }
+
+    /**
+     * 设置请求-响应关联 ID（P1-20）。
+     *
+     * @param requestId 关联 ID，由 ClusterBusClient.sendAndWait 分配
+     */
+    public void setRequestId(long requestId) {
+        this.requestId = requestId;
     }
 
     // ==================== 编解码方法 ====================

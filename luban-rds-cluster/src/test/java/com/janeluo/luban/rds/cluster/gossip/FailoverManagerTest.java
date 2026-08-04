@@ -10,6 +10,7 @@ import com.janeluo.luban.rds.cluster.slot.SlotManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.BitSet;
@@ -247,11 +248,12 @@ class FailoverManagerTest {
         failoverManager.prepareRequestedStateForTest(1L);
 
         // 收到 2 个 master 授权（≥ masterCount/2+1 = 2）
-        // FailoverAuthAckMessage 构造: (senderNodeId, configEpoch, currentEpoch, voteEpoch)
+        // FailoverAuthAckMessage 构造: (senderNodeId, configEpoch, currentEpoch, voteEpoch, candidateId)
+        // candidateId 必须是 me(NODE_ID_2)，否则 onAuthAck 的候选绑定校验会忽略
         failoverManager.onAuthAck(new FailoverAuthAckMessage(
-                m2.getNodeId(), 1L, 1L, 1L));
+                m2.getNodeId(), 1L, 1L, 1L, NODE_ID_2));
         failoverManager.onAuthAck(new FailoverAuthAckMessage(
-                m3.getNodeId(), 1L, 1L, 1L));
+                m3.getNodeId(), 1L, 1L, 1L, NODE_ID_2));
 
         // 验证：me 已是 master、继承槽位、m1 降级 slave、广播 RESULT
         assertTrue(me.isMaster());
@@ -283,7 +285,7 @@ class FailoverManagerTest {
         failoverManager.tick();
         // 仅 1 票（需 2 票）
         failoverManager.onAuthAck(new FailoverAuthAckMessage(
-                m2.getNodeId(), 1L, 1L, 1L));
+                m2.getNodeId(), 1L, 1L, 1L, NODE_ID_2));
 
         assertFalse(me.isMaster(), "未过半不应提升");
         assertEquals(FailoverState.REQUESTING, failoverManager.getState());
@@ -434,6 +436,184 @@ class FailoverManagerTest {
         assertEquals(0, oldMaster.getSlotCount(), "oldMaster slots 应清空");
         assertEquals(NODE_ID_2, oldMaster.getMasterNodeId(), "oldMaster.masterNodeId 应指向 winner");
         assertEquals(6L, oldMaster.getConfigEpoch(), "oldMaster.configEpoch 应提升到 winner epoch");
+    }
+
+    // ==================== P0-4 回归：候选绑定 + lastVoteEpoch 闸门 ====================
+
+    /**
+     * P0-4 核心回归：同纪元双候选场景，投给候选 A 的 ACK 不能被候选 B 计入票数。
+     * 修复前 ACK 无 candidateId，B 会误计 A 的票，两个候选各自过半 → 双 master。
+     */
+    @Test
+    @DisplayName("P0-4：候选只计入投给自己的 ACK，投给他候选的 ACK 被忽略（候选绑定）")
+    void testAckCandidateBindingPreventsDoubleCount() {
+        // 3 master 集群，需 2 票胜选
+        ClusterNode m1 = createMasterNode(NODE_ID_1, 7000);
+        ClusterNode m2 = createMasterNode(NODE_ID_3, 7002);
+        ClusterNode m3 = createMasterNode(NODE_ID_4, 7003);
+        ClusterNode me = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
+        me.addState(ClusterNodeState.MYSELF);
+        for (int i = 0; i <= 100; i++) m1.addSlot(i);
+        m1.addState(ClusterNodeState.FAIL);
+
+        config.addNode(m1);
+        config.addNode(m2);
+        config.addNode(m3);
+        config.addNode(me);
+        config.setMyNodeId(NODE_ID_2);
+
+        failoverManager.tick();
+        assertEquals(FailoverState.REQUESTING, failoverManager.getState());
+        failoverManager.prepareRequestedStateForTest(1L);
+
+        // m2 投给"本候选 NODE_ID_2" -> 计入
+        failoverManager.onAuthAck(new FailoverAuthAckMessage(
+                m2.getNodeId(), 1L, 1L, 1L, NODE_ID_2));
+        // m3 投给"另一个候选 NODE_ID_5"（同纪元）-> 必须被忽略（候选绑定校验）
+        failoverManager.onAuthAck(new FailoverAuthAckMessage(
+                m3.getNodeId(), 1L, 1L, 1L, NODE_ID_5));
+
+        // 仅 1 票有效，未过半，不应胜选
+        assertFalse(me.isMaster(), "他候选的 ACK 不应计入本候选票数，未过半不应提升");
+        assertEquals(FailoverState.REQUESTING, failoverManager.getState());
+        Mockito.verify(busClient, Mockito.never())
+                .broadcast(Mockito.any(FailoverResultMessage.class));
+    }
+
+    /**
+     * P0-4：sendAuthAck 产出的 ACK 必须携带 candidateId（被投候选），
+     * 这样同集群其他候选才能正确忽略。
+     */
+    @Test
+    @DisplayName("P0-4：投票方产出的 ACK 携带正确的 candidateId 字段")
+    void testVoteAckCarriesCandidateId() {
+        ClusterNode me = createMasterNode(NODE_ID_1, 7000);
+        me.addState(ClusterNodeState.MYSELF);
+        ClusterNode failedMaster = createMasterNode(NODE_ID_3, 7002);
+        failedMaster.addState(ClusterNodeState.FAIL);
+        ClusterNode candidate = createSlaveNode(NODE_ID_2, 7001, NODE_ID_3);
+        config.addNode(me);
+        config.addNode(failedMaster);
+        config.addNode(candidate);
+        config.setMyNodeId(NODE_ID_1);
+
+        failoverManager.onAuthRequest(new FailoverAuthRequestMessage(NODE_ID_2, 5L, 10L, 0L));
+
+        ArgumentCaptor<FailoverAuthAckMessage> captor =
+                ArgumentCaptor.forClass(FailoverAuthAckMessage.class);
+        Mockito.verify(busClient).broadcast(captor.capture());
+        FailoverAuthAckMessage ack = captor.getValue();
+        assertEquals(NODE_ID_2, ack.getCandidateId(),
+                "ACK 必须携带被投候选 candidateId");
+        assertEquals(NODE_ID_1, ack.getSenderNodeId(), "ACK senderNodeId 应为投票方");
+    }
+
+    /**
+     * P0-4：lastVoteEpoch 闸门——投过票后，同纪元或更早纪元的新候选请求被拒绝。
+     */
+    @Test
+    @DisplayName("P0-4：投票后 lastVoteEpoch 闸门拒绝同纪元他候选二次请求")
+    void testLastVoteEpochGateRejectsSameEpochRevote() {
+        ClusterNode me = createMasterNode(NODE_ID_1, 7000);
+        me.addState(ClusterNodeState.MYSELF);
+        ClusterNode failedMasterA = createMasterNode(NODE_ID_3, 7002);
+        failedMasterA.addState(ClusterNodeState.FAIL);
+        ClusterNode failedMasterB = createMasterNode(NODE_ID_4, 7003);
+        failedMasterB.addState(ClusterNodeState.FAIL);
+        ClusterNode candidateA = createSlaveNode(NODE_ID_2, 7001, NODE_ID_3);
+        ClusterNode candidateB = createSlaveNode(NODE_ID_5, 7004, NODE_ID_4);
+        config.addNode(me);
+        config.addNode(failedMasterA);
+        config.addNode(failedMasterB);
+        config.addNode(candidateA);
+        config.addNode(candidateB);
+        config.setMyNodeId(NODE_ID_1);
+
+        // 投给 candidateA（epoch=10）-> 授权
+        failoverManager.onAuthRequest(new FailoverAuthRequestMessage(NODE_ID_2, 5L, 10L, 0L));
+        assertEquals(10L, config.getLastVoteEpoch(), "投票后 lastVoteEpoch 应更新");
+
+        Mockito.clearInvocations(busClient);
+        // 同纪元 candidateB -> 被 lastVoteEpoch 闸门拒绝
+        failoverManager.onAuthRequest(new FailoverAuthRequestMessage(NODE_ID_5, 5L, 10L, 0L));
+        Mockito.verifyNoInteractions(busClient);
+    }
+
+    /**
+     * P0-4：模拟重启——votesCast 清空（内存态丢失），但 lastVoteEpoch 持久化保留，
+     * 仍能拒绝同纪元重投。这是 Redis 7 lastVoteEpoch 持久化的核心价值。
+     */
+    @Test
+    @DisplayName("P0-4：重启后 votesCast 丢失但 lastVoteEpoch 保留，仍拒绝同纪元重投")
+    void testRestartLastVoteEpochSurvives() {
+        ClusterNode me = createMasterNode(NODE_ID_1, 7000);
+        me.addState(ClusterNodeState.MYSELF);
+        ClusterNode failedMaster = createMasterNode(NODE_ID_3, 7002);
+        failedMaster.addState(ClusterNodeState.FAIL);
+        ClusterNode candidate = createSlaveNode(NODE_ID_2, 7001, NODE_ID_3);
+        config.addNode(me);
+        config.addNode(failedMaster);
+        config.addNode(candidate);
+        config.setMyNodeId(NODE_ID_1);
+
+        // 投票（epoch=10）
+        failoverManager.onAuthRequest(new FailoverAuthRequestMessage(NODE_ID_2, 5L, 10L, 0L));
+        assertEquals(10L, config.getLastVoteEpoch());
+
+        // 模拟重启：重建 FailoverManager（votesCast 为空），仅从 nodes.conf 恢复 lastVoteEpoch
+        FailoverManager restarted = new FailoverManager(config, slotManager, stateManager, busClient,
+                () -> {}, NODE_TIMEOUT, 0L);
+        config.setLastVoteEpoch(10L);  // 模拟持久化恢复
+
+        Mockito.clearInvocations(busClient);
+        // 重启后同纪元同候选重投 -> 被 lastVoteEpoch 闸门拒绝（不会因 votesCast 空而放行）
+        restarted.onAuthRequest(new FailoverAuthRequestMessage(NODE_ID_2, 5L, 10L, 0L));
+        Mockito.verifyNoInteractions(busClient);
+
+        // 更高纪元（epoch=11）-> 闸门放行，可重新投票
+        restarted.onAuthRequest(new FailoverAuthRequestMessage(NODE_ID_2, 5L, 11L, 0L));
+        assertEquals(11L, config.getLastVoteEpoch(), "更高纪元请求应放行并更新 lastVoteEpoch");
+    }
+
+    /**
+     * P0-4：ACK 线编解码往返——candidateId 必须随消息体正确序列化/反序列化，
+     * 否则跨节点传输后候选绑定校验会失效。
+     */
+    @Test
+    @DisplayName("P0-4：FailoverAuthAckMessage candidateId 线编解码往返")
+    void testAckCandidateIdWireRoundTrip() {
+        FailoverAuthAckMessage original = new FailoverAuthAckMessage(
+                NODE_ID_1, 5L, 10L, 10L, NODE_ID_2);
+
+        // 模拟总线编码→解码（通过 encode/decode 走全链路）
+        byte[] encoded = original.encode();
+        assertNotNull(encoded);
+
+        FailoverAuthAckMessage decoded = new FailoverAuthAckMessage();
+        decoded.decode(encoded);
+
+        assertEquals(NODE_ID_1, decoded.getSenderNodeId());
+        assertEquals(5L, decoded.getConfigEpoch());
+        assertEquals(10L, decoded.getCurrentEpoch());
+        assertEquals(10L, decoded.getVoteEpoch());
+        assertEquals(NODE_ID_2, decoded.getCandidateId(),
+                "candidateId 经线编解码后必须保持一致");
+    }
+
+    /**
+     * P0-4：无 candidateId 的旧格式 ACK 解码兼容（candidateId 为 null，候选绑定校验会拒绝）。
+     */
+    @Test
+    @DisplayName("P0-4：旧版无 candidateId 的 ACK 解码后 candidateId 为 null")
+    void testAckLegacyDecodeCandidateIdNull() {
+        // 用 4 参构造（candidateId=null）后编码
+        FailoverAuthAckMessage legacy = new FailoverAuthAckMessage(NODE_ID_1, 5L, 10L, 10L);
+        byte[] encoded = legacy.encode();
+
+        FailoverAuthAckMessage decoded = new FailoverAuthAckMessage();
+        decoded.decode(encoded);
+        assertNull(decoded.getCandidateId(),
+                "旧版 ACK 无候选字段，解码后 candidateId 应为 null（会被候选绑定校验拒绝）");
     }
 
     // ==================== 辅助方法 ====================

@@ -199,6 +199,8 @@ class ClusterEvalSlotRedirectTest extends AbstractClusterHandlerTest {
         myNode.addState(ClusterNodeState.MYSELF);
         myNode.addState(ClusterNodeState.MASTER);
         clusterConfig.addNode(myNode);
+        // P1-13：命令路由门控依赖 cluster_state=ok。
+        clusterConfig.setState("ok");
     }
 
     private void addOtherNode(ClusterConfig clusterConfig) {

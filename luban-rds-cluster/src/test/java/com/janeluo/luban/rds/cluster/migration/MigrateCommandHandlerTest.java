@@ -72,7 +72,8 @@ class MigrateCommandHandlerTest {
         when(memoryStore.exists(0, "test-key")).thenReturn(false);
 
         String result = handler.handle(args);
-        assertEquals("$-1\r\n", result); // NOKEY
+        // P1-17：对齐 Redis 7，单键不存在回复 +NOKEY（而非 bulk nil $-1）
+        assertEquals("+NOKEY\r\n", result);
     }
 
     @Test
@@ -274,5 +275,100 @@ class MigrateCommandHandlerTest {
 
         String result = handler.handle(args);
         assertTrue(result.contains("timeout out of range"));
+    }
+
+    // ==================== P1-17 语义补全测试 ====================
+
+    @Test
+    @DisplayName("P1-17: 单键迁移 - 目标键已存在未带 REPLACE 返回 -BUSYKEY")
+    void testMigrateBusyKey() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000"};
+
+        when(memoryStore.exists(0, "test-key")).thenReturn(true);
+        when(memoryStore.get(0, "test-key")).thenReturn("test-value");
+        when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
+        // 目标节点返回 BUSYKEY 错误
+        MigrateKeyAckMessage busykeyAck =
+                new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", false, "BUSYKEY");
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong()))
+                .thenReturn(busykeyAck);
+
+        String result = handler.handle(args);
+        assertEquals("-BUSYKEY Target key name already exists.\r\n", result);
+        // BUSYKEY 时不应删除源键
+        verify(memoryStore, never()).del(0, "test-key");
+    }
+
+    @Test
+    @DisplayName("P1-17: AUTH 选项被正确解析（单参 password，不报 syntax error）")
+    void testMigrateWithAuth() {
+        // Redis MIGRATE AUTH <password>（单参）。AUTH2 用于 username+password 两参。
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000",
+                "AUTH", "secret"};
+
+        when(memoryStore.exists(0, "test-key")).thenReturn(true);
+        when(memoryStore.get(0, "test-key")).thenReturn("test-value");
+        when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", true, null);
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong()))
+                .thenReturn(ack);
+        when(memoryStore.del(0, "test-key")).thenReturn(true);
+
+        String result = handler.handle(args);
+        assertEquals("+OK\r\n", result);
+    }
+
+    @Test
+    @DisplayName("P1-17: AUTH2 选项被正确解析（不报 syntax error）")
+    void testMigrateWithAuth2() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000",
+                "AUTH2", "myuser", "mypass", "REPLACE"};
+
+        when(memoryStore.exists(0, "test-key")).thenReturn(true);
+        when(memoryStore.get(0, "test-key")).thenReturn("test-value");
+        when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", true, null);
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong()))
+                .thenReturn(ack);
+        when(memoryStore.del(0, "test-key")).thenReturn(true);
+
+        String result = handler.handle(args);
+        assertEquals("+OK\r\n", result);
+    }
+
+    @Test
+    @DisplayName("P1-17: key 与 KEYS 并存报 syntax error")
+    void testMigrateKeyAndKeysConflict() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000",
+                "KEYS", "key1", "key2"};
+
+        String result = handler.handle(args);
+        assertEquals("-ERR syntax error\r\n", result);
+    }
+
+    @Test
+    @DisplayName("P1-17: AUTH 参数不足报 syntax error")
+    void testMigrateAuthMissingArgs() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000", "AUTH"};
+
+        String result = handler.handle(args);
+        assertEquals("-ERR syntax error\r\n", result);
+    }
+
+    @Test
+    @DisplayName("P1-17: timeout=0 不报错且能成功（用内部默认超时）")
+    void testMigrateTimeoutZero() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "0"};
+
+        when(memoryStore.exists(0, "test-key")).thenReturn(true);
+        when(memoryStore.get(0, "test-key")).thenReturn("test-value");
+        when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", true, null);
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong()))
+                .thenReturn(ack);
+        when(memoryStore.del(0, "test-key")).thenReturn(true);
+
+        String result = handler.handle(args);
+        assertEquals("+OK\r\n", result);
     }
 }

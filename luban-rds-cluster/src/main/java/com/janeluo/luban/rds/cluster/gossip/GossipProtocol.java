@@ -7,6 +7,7 @@ import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
 import com.janeluo.luban.rds.cluster.lifecycle.NoOpReplicationLifecycleListener;
 import com.janeluo.luban.rds.cluster.lifecycle.ReplicationLifecycleListener;
+import com.janeluo.luban.rds.cluster.migration.ImportResult;
 import com.janeluo.luban.rds.cluster.migration.SlotMigrationManager;
 import com.janeluo.luban.rds.cluster.node.ClusterLink;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
@@ -283,8 +284,8 @@ public class GossipProtocol {
             // PING 永远发不出去，PFAIL 无法清除，集群重启后成孤岛、节点状态无法恢复。
             connectKnownNodes();
 
-            // 启动定时 Gossip 任务
-            GossipTask gossipTask = new GossipTask(this, failureDetector);
+            // 启动定时 Gossip 任务（传入 nodeTimeout 启用 P1-9 心跳优先策略）
+            GossipTask gossipTask = new GossipTask(this, failureDetector, nodeTimeout);
             scheduler.scheduleAtFixedRate(gossipTask, 0, gossipInterval, TimeUnit.MILLISECONDS);
 
             logger.info("Gossip 协议已启动");
@@ -376,6 +377,8 @@ public class GossipProtocol {
         ping.setSenderMasterNodeId(myNode.getMasterNodeId());
         // 携带发送方集群当前纪元，使对端（尤其是重启节点）能通过心跳同步 currentEpoch
         ping.setSenderCurrentEpoch(clusterConfig.getCurrentEpoch());
+        // 携带发送方复制偏移量（P1-6）：使对端维护本节点的 replOffset，用于 failover rank 退避。
+        ping.setSenderReplicationOffset(replicationLifecycleListener.getReplicationOffset());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -435,6 +438,8 @@ public class GossipProtocol {
         pong.setSenderFlags(buildSenderFlags(myNode));
         pong.setSenderMasterNodeId(myNode.getMasterNodeId());
         pong.setSenderCurrentEpoch(clusterConfig.getCurrentEpoch());
+        // 携带发送方复制偏移量（P1-6）
+        pong.setSenderReplicationOffset(replicationLifecycleListener.getReplicationOffset());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -517,6 +522,8 @@ public class GossipProtocol {
         // 携带发送方角色与 masterNodeId，使对端能同步发送方的 master/slave 角色
         meet.setSenderFlags(buildSenderFlags(myNode));
         meet.setSenderMasterNodeId(myNode.getMasterNodeId());
+        // 携带发送方复制偏移量（P1-6）
+        meet.setSenderReplicationOffset(replicationLifecycleListener.getReplicationOffset());
 
         // 添加 Gossip 节点信息
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -598,6 +605,13 @@ public class GossipProtocol {
         // 检查发送方节点是否已存在
         ClusterNode senderNode = clusterConfig.getNode(meet.getSenderNodeId());
         if (senderNode == null) {
+            // P1-3：FORGET 黑名单闸门。被本节点 FORGET 的节点在 TTL 内直接发 MEET 也会被
+            // 重新引入，需同样拦截。对齐 Redis clusterProcessPacket 对 MEET 的黑名单校验。
+            if (clusterConfig.isBlacklisted(meet.getSenderNodeId())) {
+                logger.info("忽略被 FORGET 节点的 MEET（黑名单有效期内）: {}", meet.getSenderNodeId());
+                return;
+            }
+
             // 清理同地址的临时 HANDSHAKE 节点（MEET 连接失败时的残留）
             removeHandshakeNodeByAddress(meet.getSenderIp(), meet.getSenderPort(), meet.getSenderNodeId());
 
@@ -770,13 +784,17 @@ public class GossipProtocol {
         String myNodeId = myNode != null ? myNode.getNodeId() : msg.getSenderNodeId();
 
         boolean success = false;
+        // P1-17：errorMessage 携带失败原因码（BUSYKEY / NOT_IMPORTING / ERROR），
+        // 源端 MigrateCommandHandler 据此回送精确的 Redis 错误。
         String errorMessage = null;
 
         if (slotMigrationManager != null) {
             try {
-                success = slotMigrationManager.importKey(msg.getKey(), msg.getValue(), msg.getTtl());
+                ImportResult result = slotMigrationManager.importKey(msg.getKey(), msg.getValue(),
+                        msg.getTtl(), msg.isReplace());
+                success = result.isSuccess();
                 if (!success) {
-                    errorMessage = "importKey 失败：槽位未处于 IMPORTING 状态或导入异常";
+                    errorMessage = result.getError();
                 }
             } catch (Exception e) {
                 errorMessage = "导入键异常: " + e.getMessage();
@@ -787,7 +805,45 @@ public class GossipProtocol {
             logger.warn("收到 MIGRATE_KEY 但 SlotMigrationManager 未注入: key={}", msg.getKey());
         }
 
-        return new MigrateKeyAckMessage(myNodeId, msg.getKey(), success, errorMessage);
+        // P1-20：ACK 回填入站请求的 requestId，源端按 id 严格匹配等待中的 future
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(myNodeId, msg.getKey(), success, errorMessage);
+        ack.setRequestId(msg.getRequestId());
+        return ack;
+    }
+
+    /**
+     * 处理手动故障转移启动请求（P1-12，MANUAL_FAILOVER_START）。
+     * <p>
+     * 委托给 {@link FailoverManager#onManualFailoverStart}：master 侧暂停写、记录 offset、回传。
+     * </p>
+     *
+     * @param msg MFStart 消息
+     */
+    public void handleManualFailoverStart(ManualFailoverStartMessage msg) {
+        FailoverManager fm = getFailoverManager();
+        if (fm != null) {
+            fm.onManualFailoverStart(msg);
+        } else {
+            logger.warn("收到 MFStart 但 FailoverManager 未注入，忽略: sender={}", msg.getSenderNodeId());
+        }
+    }
+
+    /**
+     * 处理手动故障转移 offset 回传（P1-12，MANUAL_FAILOVER_OFFSET）。
+     * <p>
+     * 委托给 {@link FailoverManager#onManualFailoverOffset}：slave 侧记录目标 offset，转入追平等待。
+     * </p>
+     *
+     * @param msg master 暂停写时的 offset 回传消息
+     */
+    public void handleManualFailoverOffset(ManualFailoverOffsetMessage msg) {
+        FailoverManager fm = getFailoverManager();
+        if (fm != null) {
+            fm.onManualFailoverOffset(msg);
+        } else {
+            logger.warn("收到 MFOffset 但 FailoverManager 未注入，忽略: sender={}, offset={}",
+                    msg.getSenderNodeId(), msg.getMasterOffset());
+        }
     }
 
     /**
@@ -915,6 +971,9 @@ public class GossipProtocol {
 
             // 同步集群级 currentEpoch（重启节点本地可能滞后，导致 epoch 仲裁门控失效）
             clusterConfig.setEpochIfGreater(ping.getSenderCurrentEpoch());
+
+            // 同步发送方复制偏移量（P1-6），用于 failover rank 退避计算
+            senderNode.setReplOffset(ping.getSenderReplicationOffset());
         }
     }
 
@@ -954,6 +1013,9 @@ public class GossipProtocol {
 
             // 同步集群级 currentEpoch（重启节点本地可能滞后，导致 epoch 仲裁门控失效）
             clusterConfig.setEpochIfGreater(pong.getSenderCurrentEpoch());
+
+            // 同步发送方复制偏移量（P1-6），用于 failover rank 退避计算
+            senderNode.setReplOffset(pong.getSenderReplicationOffset());
         }
     }
 
@@ -1011,6 +1073,9 @@ public class GossipProtocol {
             // 同步发送方角色（master/slave）与 masterNodeId
             syncSenderRole(senderNode, meet.getSenderFlags(),
                     meet.getSenderMasterNodeId(), meet.getSenderConfigEpoch(), epochBaseline);
+
+            // 同步发送方复制偏移量（P1-6），用于 failover rank 退避计算
+            senderNode.setReplOffset(meet.getSenderReplicationOffset());
         }
     }
 
@@ -1041,6 +1106,14 @@ public class GossipProtocol {
             // 重启节点错过后只能经 gossip 心跳的 epoch 仲裁自降级。
             if (isMyselfEntry) {
                 handleMyselfGossipEntry(nodeInfo);
+                continue;
+            }
+
+            // P1-3：FORGET 黑名单闸门。被 CLUSTER FORGET 移除的节点在 TTL 内禁止经
+            // Gossip 重新引入——否则对端的 gossip 段会立即把它"复活"，使 FORGET 失效。
+            // 对齐 Redis clusterProcessPacket 的 clusterBlacklistExists 检查。
+            if (clusterConfig.isBlacklisted(nodeId)) {
+                logger.info("忽略 Gossip 中被 FORGET 的节点（黑名单有效期内）: {}", nodeId);
                 continue;
             }
 
@@ -1144,6 +1217,9 @@ public class GossipProtocol {
             // 同步该节点拥有的槽位归属（基于其配置纪元裁决冲突）
             clusterConfig.syncSlotsFromNode(nodeId, nodeInfo.getSlots(), nodeInfo.getConfigEpoch());
 
+            // 同步该节点的复制偏移量（P1-6），用于 failover rank 退避计算
+            node.setReplOffset(nodeInfo.getReplicationOffset());
+
             // 将发送方对该节点的 PFAIL 投票登记到故障检测器，用于跨节点 FAIL 共识
             failureDetector.processGossipPfailVote(nodeInfo, senderNodeId);
         }
@@ -1239,6 +1315,8 @@ public class GossipProtocol {
         // 携带发送方角色与 masterNodeId，使对端能同步发送方的 master/slave 角色
         meet.setSenderFlags(buildSenderFlags(myNode));
         meet.setSenderMasterNodeId(myNode.getMasterNodeId());
+        // 携带发送方复制偏移量（P1-6）
+        meet.setSenderReplicationOffset(replicationLifecycleListener.getReplicationOffset());
 
         // 携带 Gossip 节点信息，便于对端同步拓扑
         List<GossipNodeInfo> gossipNodes = selectGossipNodes();
@@ -1368,6 +1446,9 @@ public class GossipProtocol {
         //（作为 FailoverResult 丢包时的后备收敛机制）
         info.setMasterNodeId(node.getMasterNodeId());
 
+        // 携带复制偏移量（P1-6），使第三方 slave 的 offset 经 gossip 传播，供 failover rank 计算
+        info.setReplicationOffset(node.getReplOffset());
+
         return info;
     }
 
@@ -1417,6 +1498,56 @@ public class GossipProtocol {
     public void saveClusterConfigIfNeeded() {
         if (clusterConfig.isDirty() && onTopologyChanged != null) {
             onTopologyChanged.run();
+        }
+    }
+
+    /**
+     * 清理 FORGET 黑名单中已过期的条目（对齐 Redis clusterBlacklistCleanup）。
+     * 由 GossipTask 周期调用。
+     */
+    public void cleanupForgetBlacklist() {
+        clusterConfig.cleanupBlacklist();
+    }
+
+    /**
+     * 清理超时未完成握手的 HANDSHAKE 节点（P1-21，对齐 Redis clusterCron 对 orphaned
+     * HANDSHAKE 节点的 free）。
+     * <p>
+     * HANDSHAKE 节点在 {@link #initiateMeetForDiscoveredNode} 或收到对端 PING/PONG 后会移除
+     * HANDSHAKE 标志；若对端始终不响应（网络分区/对端未启动），临时节点会无限残留，导致
+     * sendHeartbeats 每秒对其发起 MEET+建连，刷屏 ERROR 日志并堆积无效连接。
+     * </p>
+     * <p>
+     * 本方法移除停留时间超过 {@code timeoutMs} 的 HANDSHAKE 节点。停留时间以节点创建时的
+     * lastPongTime（构造时设为 now）为起点计算——HANDSHAKE 节点未收到过 PONG，
+     * getTimeSinceLastPong() 即为其作为 HANDSHAKE 的存活时长。
+     * </p>
+     *
+     * @param timeoutMs HANDSHAKE 节点允许的最大存活时间（毫秒），≤0 时跳过（向后兼容）
+     */
+    public void cleanupStaleHandshakeNodes(long timeoutMs) {
+        if (timeoutMs <= 0) {
+            return;
+        }
+        // 收集待移除节点（避免边遍历边修改 clusterConfig）
+        java.util.List<String> stale = new java.util.ArrayList<>();
+        for (ClusterNode node : clusterConfig.getAllNodes()) {
+            if (node.isMyself()) {
+                continue;
+            }
+            if (node.hasState(ClusterNodeState.HANDSHAKE)
+                    && node.getTimeSinceLastPong() > timeoutMs) {
+                stale.add(node.getNodeId());
+            }
+        }
+        for (String nodeId : stale) {
+            clusterConfig.removeNode(nodeId);
+            // 同步断开可能残留的总线连接（disconnect 会清除端点+退避计数）
+            if (busClient != null) {
+                busClient.disconnect(nodeId);
+            }
+            logger.info("清理超时未握手的 HANDSHAKE 节点: nodeId={}, age={}ms",
+                    nodeId, timeoutMs);
         }
     }
 
