@@ -55,13 +55,14 @@ class MeshBootstrapTest {
         return c;
     }
 
-    /** 构造 3 节点 mesh 配置。 */
+    /** 构造 3 节点 mesh 配置（单机多实例：各节点显式给出 servicePort 第三段，避免地址塌缩）。 */
     private RdsConfig threeNodeConfig() {
         RdsConfig c = new RdsConfig();
         c.setDir(tempDir.toString());
         c.setMeshEnabled(true);
         c.setPort(6390);
-        c.setMeshPeers("n1@127.0.0.1:11000,n2@127.0.0.1:11001,n3@127.0.0.1:11002");
+        // 单机多实例：同 host、不同 RESP 端口，必须显式给出 servicePort 第三段（D1 校验）
+        c.setMeshPeers("n1@127.0.0.1:11000:6391,n2@127.0.0.1:11001:6392,n3@127.0.0.1:11002:6393");
         c.setMeshSelfNodeId("n1");
         return c;
     }
@@ -246,19 +247,69 @@ class MeshBootstrapTest {
 
     /**
      * 向后兼容：peers 不带第三段 servicePort 时，回落全局 servicePort / port（旧行为不变）。
+     * <p>注意：D1 校验要求同 host 下未显式指定 servicePort 的节点 service 地址唯一；
+     * 故本用例用 <b>不同 host</b>（多机部署）验证回落，不触发塌缩校验。</p>
      */
     @Test
     void bootstrap_legacyPeersWithoutServicePort_fallsBackToGlobalPort() {
-        RdsConfig c = threeNodeConfig(); // port=6390, peers 无第三段
+        RdsConfig c = new RdsConfig();
+        c.setDir(tempDir.toString());
+        c.setMeshEnabled(true);
+        c.setPort(6390);
+        // 多机部署：不同 host，peers 无第三段 → 回落全局 port=6390（旧行为，不触发 D1 塌缩校验）
+        c.setMeshPeers("n1@10.0.0.1:11000,n2@10.0.0.2:11001,n3@10.0.0.3:11002");
+        c.setMeshSelfNodeId("n1");
         DefaultMemoryStore rawStore = new DefaultMemoryStore();
         DefaultCommandHandler handler = new DefaultCommandHandler();
 
         MeshBootstrap bootstrap = new MeshBootstrap();
         MeshAssembly assembly = bootstrap.bootstrap(c, rawStore, handler);
 
-        // 旧格式：所有节点回落全局 port=6390（旧行为）
-        assertEquals("127.0.0.1:6390", assembly.getClientRedirector().getServiceAddr("n1"));
-        assertEquals("127.0.0.1:6390", assembly.getClientRedirector().getServiceAddr("n2"));
-        assertEquals("127.0.0.1:6390", assembly.getClientRedirector().getServiceAddr("n3"));
+        // 旧格式：各节点回落全局 port=6390（host 不同故不塌缩）
+        assertEquals("10.0.0.1:6390", assembly.getClientRedirector().getServiceAddr("n1"));
+        assertEquals("10.0.0.2:6390", assembly.getClientRedirector().getServiceAddr("n2"));
+        assertEquals("10.0.0.3:6390", assembly.getClientRedirector().getServiceAddr("n3"));
+    }
+
+    /**
+     * D1：单机多实例（同 host）peers 缺第三段 servicePort 时，service 地址塌缩到同一 host:port，
+     * 启动期应抛 IllegalStateException 拒绝启动（把"配置缺第三段"这个运维错误前移，而非运行期死循环）。
+     */
+    @Test
+    void bootstrap_singleHostMultiInstanceWithoutServicePort_throwsAddrCollapse() {
+        RdsConfig c = new RdsConfig();
+        c.setDir(tempDir.toString());
+        c.setMeshEnabled(true);
+        c.setPort(9736);
+        // 单机多实例：同 host、不同 busPort，但漏配第三段 servicePort → 全部塌缩到 127.0.0.1:9736
+        c.setMeshPeers("n1@127.0.0.1:11000,n2@127.0.0.1:11001,n3@127.0.0.1:11002");
+        c.setMeshSelfNodeId("n1");
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        DefaultCommandHandler handler = new DefaultCommandHandler();
+
+        MeshBootstrap bootstrap = new MeshBootstrap();
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> bootstrap.bootstrap(c, rawStore, handler));
+        // 错误信息应提示 servicePort 第三段与修复示例
+        assertTrue(ex.getMessage().contains("塌缩"),
+                "应提示地址塌缩: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("servicePort"),
+                "应提示补全 servicePort 第三段: " + ex.getMessage());
+    }
+
+    /**
+     * D2：装配后 redirector 应携带本节点自身 service 地址（topo.selfServiceAddr 注入）。
+     */
+    @Test
+    void bootstrap_selfServiceAddr_injectedIntoRedirectorAndGate() {
+        RdsConfig c = threeNodeConfig(); // n1 self, servicePort=6391
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        DefaultCommandHandler handler = new DefaultCommandHandler();
+
+        MeshBootstrap bootstrap = new MeshBootstrap();
+        MeshAssembly assembly = bootstrap.bootstrap(c, rawStore, handler);
+
+        // 本节点 n1 的 service 地址应为 127.0.0.1:6391（第三段）
+        assertEquals("127.0.0.1:6391", assembly.getClientRedirector().getServiceAddr("n1"));
     }
 }

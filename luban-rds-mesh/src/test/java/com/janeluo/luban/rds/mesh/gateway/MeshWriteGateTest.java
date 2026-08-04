@@ -262,6 +262,43 @@ class MeshWriteGateTest {
         assertEquals("-MOVED 0 10.0.0.1:6379\r\n", moved);
     }
 
+    /**
+     * D2 自重定向守卫：解析出的 Leader 地址等于本节点自身地址时，redirectResponse 不下发 MOVED
+     * （会触发客户端死循环），改发 MESHDOWN。
+     */
+    @Test
+    void redirectResponse_leaderAddrEqualsSelf_returnsMeshdownNotMoved() {
+        MeshNode node = mock(MeshNode.class);
+        when(node.getLeaderId()).thenReturn("leaderNode");
+
+        // 映射把 leaderNode 解析到 10.0.0.1:6379；自身地址也是 10.0.0.1:6379（塌缩）
+        java.util.Map<String, String> map = java.util.Collections.singletonMap("leaderNode", "10.0.0.1:6379");
+        MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler(),
+                null, map, "10.0.0.1:6379");
+
+        String resp = gate.redirectResponse("foo");
+        assertTrue(resp.startsWith("-MESHDOWN"), "应返回 MESHDOWN 而非 MOVED 到自己: " + resp);
+        assertTrue(resp.contains("self"), "应是自重定向 MESHDOWN: " + resp);
+    }
+
+    /**
+     * D2：Leader 地址与自身不同时，redirectResponse 正常 MOVED（守卫不误伤）。
+     */
+    @Test
+    void redirectResponse_leaderAddrDifferentFromSelf_normalMoved() {
+        MeshNode node = mock(MeshNode.class);
+        when(node.getLeaderId()).thenReturn("leaderNode");
+
+        java.util.Map<String, String> map = java.util.Collections.singletonMap("leaderNode", "10.0.0.2:6380");
+        // 自身 10.0.0.1:6379，Leader 10.0.0.2:6380 → 正常 MOVED
+        MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler(),
+                null, map, "10.0.0.1:6379");
+
+        String moved = gate.redirectResponse("foo");
+        int expectedSlot = com.janeluo.luban.rds.common.util.SlotUtils.getSlot("foo");
+        assertEquals("-MOVED " + expectedSlot + " 10.0.0.2:6380\r\n", moved);
+    }
+
     // ==================== isWriteCommand 判定 ====================
 
     @Test

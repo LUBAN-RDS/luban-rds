@@ -8,6 +8,7 @@ import com.janeluo.luban.rds.mesh.MeshConfig;
 import com.janeluo.luban.rds.mesh.MeshConfig.ReadConsistency;
 import com.janeluo.luban.rds.mesh.MeshNode;
 import com.janeluo.luban.rds.mesh.client.LeaseInvalidException;
+import com.janeluo.luban.rds.mesh.client.MeshClientRedirector;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
 import com.janeluo.luban.rds.protocol.RedisProtocolParser;
 import io.netty.buffer.ByteBuf;
@@ -113,6 +114,12 @@ public class MeshWriteGate {
      * 为空映射时回退为返回 nodeId（仅占位，生产装配总会注入）。</p>
      */
     private final Map<String, String> nodeIdToServiceAddr;
+    /**
+     * 本节点自身 service 地址（{@code "host:port"}）；自重定向守卫用。可空（不触发守卫）。
+     * <p>{@link #redirectResponse(String)} 解析出的 Leader 地址等于自身时改发 MESHDOWN，
+     * 防止非 Leader 节点 MOVED 回自己触发客户端死循环。</p>
+     */
+    private final String selfServiceAddr;
 
     // ==================== 读写命令集合 ====================
 
@@ -180,7 +187,7 @@ public class MeshWriteGate {
     // ==================== 构造 ====================
 
     public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler) {
-        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, null, null);
+        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, null, null, null);
     }
 
     /**
@@ -194,7 +201,7 @@ public class MeshWriteGate {
      */
     public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
                          RedisProtocolParser protocolParser, long writeTimeoutMs) {
-        this(meshNode, rawStore, handler, protocolParser, writeTimeoutMs, null, null);
+        this(meshNode, rawStore, handler, protocolParser, writeTimeoutMs, null, null, null);
     }
 
     /**
@@ -207,7 +214,7 @@ public class MeshWriteGate {
      */
     public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
                          MeshConfig config) {
-        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, config, null);
+        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, config, null, null);
     }
 
     /**
@@ -223,8 +230,26 @@ public class MeshWriteGate {
      */
     public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
                          MeshConfig config, Map<String, String> nodeIdToServiceAddr) {
+        this(meshNode, rawStore, handler, config, nodeIdToServiceAddr, null);
+    }
+
+    /**
+     * 阶段 12 装配构造器（带自身地址）：同时注入 {@link MeshConfig}、nodeId→serviceAddr 映射、
+     * 本节点自身 service 地址。
+     * <p>selfServiceAddr 用于 {@link #redirectResponse(String)} 自重定向守卫（D2）：解析出的 Leader
+     * 地址等于自身时改发 MESHDOWN，防止非 Leader 节点 MOVED 回自己触发客户端死循环。</p>
+     *
+     * @param meshNode            集群节点
+     * @param rawStore            真实存储
+     * @param handler             命令处理器
+     * @param config              集群配置；null 时按默认 LEASE 行为
+     * @param nodeIdToServiceAddr nodeId → service 地址（{@code "host:port"}）映射；null/空 等同空映射
+     * @param selfServiceAddr     本节点自身 service 地址（{@code "host:port"}）；null 时不触发自重定向守卫
+     */
+    public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
+                         MeshConfig config, Map<String, String> nodeIdToServiceAddr, String selfServiceAddr) {
         this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS,
-                config, nodeIdToServiceAddr);
+                config, nodeIdToServiceAddr, selfServiceAddr);
     }
 
     /**
@@ -234,7 +259,7 @@ public class MeshWriteGate {
      */
     private MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
                           RedisProtocolParser protocolParser, long writeTimeoutMs, MeshConfig config,
-                          Map<String, String> nodeIdToServiceAddr) {
+                          Map<String, String> nodeIdToServiceAddr, String selfServiceAddr) {
         if (meshNode == null) {
             throw new IllegalArgumentException("meshNode 不能为 null");
         }
@@ -256,6 +281,7 @@ public class MeshWriteGate {
         this.nodeIdToServiceAddr = nodeIdToServiceAddr == null
                 ? Collections.emptyMap()
                 : Collections.unmodifiableMap(new java.util.LinkedHashMap<>(nodeIdToServiceAddr));
+        this.selfServiceAddr = selfServiceAddr;
     }
 
     // ==================== 写路径 ====================
@@ -467,6 +493,12 @@ public class MeshWriteGate {
         String leaderAddr = resolveLeaderServiceAddr();
         if (leaderAddr == null || leaderAddr.isEmpty()) {
             return "-MESHDOWN The mesh cluster has no leader\r\n";
+        }
+        // D2: 自重定向守卫——解析出的 Leader 地址等于本节点自身地址时，本节点明明非 Leader
+        // 却 MOVED 回自己，客户端会死循环（Redisson "MOVED redirection loop detected"）。
+        // 改发 MESHDOWN 让客户端退避重试，等 Leader 稳定 / 拓扑刷新后再 MOVED 到正确地址。
+        if (selfServiceAddr != null && selfServiceAddr.equals(leaderAddr)) {
+            return MeshClientRedirector.MESHDOWN_SELF_REDIRECT_RESPONSE;
         }
         int slot = SlotUtils.getSlot(key);
         return "-MOVED " + slot + " " + leaderAddr + "\r\n";

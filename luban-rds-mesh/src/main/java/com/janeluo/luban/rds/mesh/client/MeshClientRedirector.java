@@ -47,15 +47,28 @@ public class MeshClientRedirector {
     /** 无 Leader 时返回的 MESHDOWN 响应（DESIGN §5.3）。 */
     public static final String MESHDOWN_RESPONSE = "-MESHDOWN The mesh cluster has no leader\r\n";
 
+    /**
+     * 自重定向兜底响应：解析出的 Leader 地址等于本节点自身地址时返回（D2 守卫）。
+     * <p>此时本节点明确非 Leader（抛 {@link MovedToLeaderException} 的前置条件），发 MOVED 到自己
+     * 会让客户端死循环（Redisson "MOVED redirection loop detected"）；改发 MESHDOWN 让客户端退避重试，
+     * 等 Leader 稳定 / 拓扑刷新后 MOVED 到正确地址。</p>
+     */
+    public static final String MESHDOWN_SELF_REDIRECT_RESPONSE =
+            "-MESHDOWN redirect target is self; cluster topology unstable\r\n";
+
     /** nodeId → service 地址（{@code "ip:port"}，service 端口）映射；只读。 */
     private final Map<String, String> nodeIdToServiceAddr;
 
+    /** 本节点自身 service 地址（{@code "ip:port"}）；自重定向守卫用。可空（不触发守卫）。 */
+    private final String selfServiceAddr;
+
     /**
      * 默认构造器：无 nodeId→serviceAddr 映射，仅依据异常自身携带的 serviceAddr 生成响应。
-     * <p>适用于 {@link MovedToLeaderException#getLeaderServiceAddr()} 已是完整 {@code "ip:port"} 的场景。</p>
+     * <p>适用于 {@link MovedToLeaderException#getLeaderServiceAddr()} 已是完整 {@code ip:port} 的场景。</p>
      */
     public MeshClientRedirector() {
         this.nodeIdToServiceAddr = Collections.emptyMap();
+        this.selfServiceAddr = null;
     }
 
     /**
@@ -63,9 +76,22 @@ public class MeshClientRedirector {
      *                            leaderNodeId 时补全 serviceAddr。null 等同空映射。
      */
     public MeshClientRedirector(Map<String, String> nodeIdToServiceAddr) {
+        this(nodeIdToServiceAddr, null);
+    }
+
+    /**
+     * 阶段 12 装配构造器：同时注入 nodeId→serviceAddr 映射与本节点自身地址。
+     * <p>selfServiceAddr 用于自重定向守卫（D2）：解析出的 Leader 地址等于自身时改发 MESHDOWN，
+     * 防止 MOVED 回自己触发客户端死循环。</p>
+     *
+     * @param nodeIdToServiceAddr nodeId → service 地址（{@code "ip:port"}）映射；null 等同空映射
+     * @param selfServiceAddr     本节点自身 service 地址（{@code "ip:port"}）；null 时不触发自重定向守卫
+     */
+    public MeshClientRedirector(Map<String, String> nodeIdToServiceAddr, String selfServiceAddr) {
         this.nodeIdToServiceAddr = nodeIdToServiceAddr == null
                 ? Collections.emptyMap()
                 : Collections.unmodifiableMap(new LinkedHashMap<>(nodeIdToServiceAddr));
+        this.selfServiceAddr = selfServiceAddr;
     }
 
     /**
@@ -95,6 +121,12 @@ public class MeshClientRedirector {
         if (leaderAddr == null || leaderAddr.isEmpty()) {
             // 无 Leader → MESHDOWN
             return MESHDOWN_RESPONSE;
+        }
+        // D2: 自重定向守卫——解析出的 Leader 地址等于本节点自身地址时，本节点明明非 Leader
+        // 却 MOVED 回自己，客户端会死循环（Redisson "MOVED redirection loop detected"）。
+        // 改发 MESHDOWN 让客户端退避重试，等 Leader 稳定 / 拓扑刷新后再 MOVED 到正确地址。
+        if (selfServiceAddr != null && selfServiceAddr.equals(leaderAddr)) {
+            return MESHDOWN_SELF_REDIRECT_RESPONSE;
         }
         // 有 Leader：slot 用 key 的真实 CRC16（0-16383）
         int slot = SlotUtils.getSlot(e.getKey());

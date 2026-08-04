@@ -161,12 +161,14 @@ public class MeshBootstrap {
                 });
         meshNode.setSnapshotManager(snapshotManager);
 
-        // 8. MeshWriteGate（meshNode/rawStore/handler/config + nodeId→serviceAddr 映射）
-        //    映射与 redirector 同源，供 redirectResponse 把 Leader nodeId 解析成真实 ip:port。
-        MeshWriteGate writeGate = new MeshWriteGate(meshNode, rawStore, handler, meshConfig, topo.nodeIdToServiceAddr);
+        // 8. MeshWriteGate（meshNode/rawStore/handler/config + nodeId→serviceAddr 映射 + 本节点地址）
+        //    映射与 redirector 同源，供 redirectResponse 把 Leader nodeId 解析成真实 ip:port；
+        //    selfServiceAddr 供自重定向守卫（解析出的 leaderAddr 等于自己时改发 MESHDOWN，防死循环）。
+        MeshWriteGate writeGate = new MeshWriteGate(meshNode, rawStore, handler, meshConfig,
+                topo.nodeIdToServiceAddr, topo.selfServiceAddr);
 
-        // 9. MeshClientRedirector（nodeId→serviceAddr 映射）
-        MeshClientRedirector redirector = new MeshClientRedirector(topo.nodeIdToServiceAddr);
+        // 9. MeshClientRedirector（nodeId→serviceAddr 映射 + 本节点地址，自重定向守卫）
+        MeshClientRedirector redirector = new MeshClientRedirector(topo.nodeIdToServiceAddr, topo.selfServiceAddr);
 
         // 10. MeshClusterCommands（leader 供应商 + allNodes）
         MeshClusterCommands clusterCommands = buildClusterCommands(meshConfig, meshNode, topo);
@@ -231,6 +233,8 @@ public class MeshBootstrap {
 
         Map<String, String> nodeIdToBusAddr = new LinkedHashMap<>();
         Map<String, String> nodeIdToServiceAddr = new LinkedHashMap<>();
+        // 记录每个 nodeId 是否显式给出了第三段 :servicePort（用于 D1 地址塌缩校验）
+        Map<String, Boolean> nodeIdToExplicitServicePort = new LinkedHashMap<>();
         java.util.List<String> orderedNodeIds = new java.util.ArrayList<>();
 
         String[] entries = peersRaw.split(",");
@@ -267,6 +271,7 @@ public class MeshBootstrap {
             }
             // 可选第三段：per-node servicePort（单机多实例必需）
             int nodeServicePort = servicePort;
+            boolean explicitServicePort = false;
             if (parts.length >= 3) {
                 try {
                     nodeServicePort = Integer.parseInt(parts[2].trim());
@@ -276,11 +281,19 @@ public class MeshBootstrap {
                 if (nodeServicePort <= 0) {
                     throw new IllegalStateException("mesh-peers 条目 servicePort 必须 > 0: " + e);
                 }
+                explicitServicePort = true;
             }
             nodeIdToBusAddr.put(nodeId, host + ":" + busPort);
             nodeIdToServiceAddr.put(nodeId, host + ":" + nodeServicePort);
+            nodeIdToExplicitServicePort.put(nodeId, explicitServicePort);
             orderedNodeIds.add(nodeId);
         }
+
+        // D1: 同 host 下未显式指定 servicePort 的条目，service 地址（host:port）必须唯一。
+        // 单机多实例（同 host、各节点 RESP 端口不同）若漏配第三段，所有节点 service 地址会塌缩到
+        // 同一 host:port（本进程全局 port），非 Leader 节点 MOVED 到自己 → Redisson 死循环。
+        // 此处把该配置错误前移到启动期，给出可操作修复示例。
+        validateServiceAddrUniqueness(nodeIdToServiceAddr, nodeIdToExplicitServicePort);
 
         if (orderedNodeIds.isEmpty()) {
             throw new IllegalStateException("mesh-enabled=yes 但 mesh-peers 解析后无有效节点");
@@ -300,14 +313,51 @@ public class MeshBootstrap {
         // 本节点 busPort：从 peers 拓扑取（调用方可用 config.getMeshBusPort() 覆盖）
         String selfBusAddr = nodeIdToBusAddr.get(selfNodeId);
         int selfBusPort = Integer.parseInt(selfBusAddr.substring(selfBusAddr.lastIndexOf(':') + 1));
+        // 本节点 service 地址：供装配层注入 redirector/gate 做自重定向守卫（D2）
+        String selfServiceAddr = nodeIdToServiceAddr.get(selfNodeId);
 
         PeerTopology topo = new PeerTopology();
         topo.selfNodeId = selfNodeId;
         topo.selfBusPort = selfBusPort;
+        topo.selfServiceAddr = selfServiceAddr;
         topo.nodeIdToBusAddr = nodeIdToBusAddr;
         topo.nodeIdToServiceAddr = nodeIdToServiceAddr;
         topo.orderedNodeIds = orderedNodeIds;
         return topo;
+    }
+
+    /**
+     * D1: 同 host 下未显式指定 servicePort 的条目，service 地址（host:port）必须唯一。
+     * <p>
+     * 单机多实例（同 host、各节点 RESP 端口不同）若漏配第三段 :servicePort，parsePeers 会用
+     * 本进程全局 port 平铺到所有节点，service 地址全部塌缩到同一 host:port。非 Leader 节点
+     * MOVED 到自己 → Redisson "MOVED redirection loop detected" 死循环。
+     * </p>
+     * <p>仅对「未显式给出第三段」的塌缩报错；显式指定相同 servicePort 视为用户意图，不报错
+     * （D2 自重定向守卫仍兜底）。</p>
+     */
+    private void validateServiceAddrUniqueness(Map<String, String> nodeIdToServiceAddr,
+                                                Map<String, Boolean> nodeIdToExplicitServicePort) {
+        // 按 host:port 分组，统计同地址下「未显式指定 servicePort」的 nodeId
+        Map<String, java.util.List<String>> addrToImplicitNodeIds = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : nodeIdToServiceAddr.entrySet()) {
+            String nodeId = entry.getKey();
+            String addr = entry.getValue();
+            // 只关心未显式指定第三段的条目
+            if (!Boolean.TRUE.equals(nodeIdToExplicitServicePort.get(nodeId))) {
+                addrToImplicitNodeIds.computeIfAbsent(addr, k -> new java.util.ArrayList<>()).add(nodeId);
+            }
+        }
+        for (Map.Entry<String, java.util.List<String>> e : addrToImplicitNodeIds.entrySet()) {
+            if (e.getValue().size() > 1) {
+                throw new IllegalStateException(
+                        "mesh-peers service 地址塌缩: 多个节点 (" + e.getValue() + ") 解析到同一 service 地址 "
+                                + e.getKey() + "，且均未显式指定 :servicePort 第三段。"
+                                + "单机多实例部署（同 host、各节点 RESP 端口不同）必须为每个 peer 显式给出 servicePort，"
+                                + "例如: mesh-peers=n1@127.0.0.1:11000:9736,n2@127.0.0.1:11001:9737,n3@127.0.0.1:11002:9738。"
+                                + "否则非 Leader 节点会 MOVED 重定向到自己，触发客户端死循环。");
+            }
+        }
     }
 
     /**
@@ -419,6 +469,8 @@ public class MeshBootstrap {
     private static final class PeerTopology {
         String selfNodeId;
         int selfBusPort;
+        /** 本节点 service 地址（host:port），供装配层注入 redirector/gate 做自重定向守卫。 */
+        String selfServiceAddr;
         Map<String, String> nodeIdToBusAddr;
         Map<String, String> nodeIdToServiceAddr;
         java.util.List<String> orderedNodeIds;

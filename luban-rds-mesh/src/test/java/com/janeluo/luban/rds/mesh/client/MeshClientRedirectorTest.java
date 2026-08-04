@@ -193,4 +193,79 @@ class MeshClientRedirectorTest {
         assertNotNull(resp);
         assertTrue(resp.endsWith("\r\n"), "RESP 响应必须以 \\r\\n 结尾");
     }
+
+    // ==================== D2: 自重定向守卫 ====================
+
+    /**
+     * D2：解析出的 Leader 地址等于本节点自身地址时，不下发 MOVED（会触发客户端死循环），
+     * 改发 MESHDOWN 让客户端退避重试。
+     * <p>复现场景：单机多实例漏配第三段 servicePort，nodeIdToServiceAddr 全塌缩到同一地址，
+     * 非 Leader 节点 MOVED 到自己 → Redisson "MOVED redirection loop detected"。</p>
+     */
+    @Test
+    void formatResponse_leaderAddrEqualsSelf_returnsMeshdownNotMoved() {
+        // 本节点自身地址 = 10.0.0.1:6379；Leader 地址也解析到 10.0.0.1:6379（塌缩）
+        Map<String, String> map = new HashMap<>();
+        map.put("leader-node", "10.0.0.1:6379");
+        MeshClientRedirector r = new MeshClientRedirector(map, "10.0.0.1:6379");
+
+        MovedToLeaderException e = new MovedToLeaderException("leader-node", null, "foo");
+        String resp = r.formatResponse(e);
+
+        assertEquals(MeshClientRedirector.MESHDOWN_SELF_REDIRECT_RESPONSE, resp,
+                "Leader 地址等于自身时应返回自重定向 MESHDOWN，而非 MOVED 到自己");
+        assertTrue(resp.startsWith("-MESHDOWN"), "应是 MESHDOWN 响应: " + resp);
+    }
+
+    /**
+     * D2：Leader 地址与自身地址不同时，正常下发 MOVED（守卫不误伤正常重定向）。
+     */
+    @Test
+    void formatResponse_leaderAddrDifferentFromSelf_normalMoved() {
+        Map<String, String> map = new HashMap<>();
+        map.put("leader-node", "10.0.0.2:6380");
+        // 本节点是 10.0.0.1:6379，Leader 是 10.0.0.2:6380 → 正常 MOVED
+        MeshClientRedirector r = new MeshClientRedirector(map, "10.0.0.1:6379");
+
+        MovedToLeaderException e = new MovedToLeaderException("leader-node", null, "foo");
+        String resp = r.formatResponse(e);
+
+        assertEquals("-MOVED " + SLOT_FOO + " 10.0.0.2:6380\r\n", resp,
+                "Leader 地址与自身不同时应正常 MOVED");
+    }
+
+    /**
+     * D2：未注入 selfServiceAddr（旧构造器 / 测试场景）时不触发守卫，保持原行为。
+     */
+    @Test
+    void formatResponse_noSelfAddr_guardNotTriggered() {
+        Map<String, String> map = new HashMap<>();
+        map.put("leader-node", "10.0.0.1:6379");
+        // 旧构造器：selfServiceAddr=null
+        MeshClientRedirector r = new MeshClientRedirector(map);
+
+        MovedToLeaderException e = new MovedToLeaderException("leader-node", null, "foo");
+        String resp = r.formatResponse(e);
+
+        // 无自身地址注入 → 不触发守卫 → 正常 MOVED（即便地址恰好等于自己）
+        assertEquals("-MOVED " + SLOT_FOO + " 10.0.0.1:6379\r\n", resp);
+    }
+
+    /**
+     * D2：异常直接携带 serviceAddr（非经 map 解析）等于自身时，守卫同样生效。
+     */
+    @Test
+    void formatResponse_explicitServiceAddrEqualsSelf_guardTriggered() {
+        MeshClientRedirector r = new MeshClientRedirector(new HashMap<>(), "10.0.0.1:6379");
+        // 异常直接带 serviceAddr=10.0.0.1:6379（等于自身）
+        MovedToLeaderException e = new MovedToLeaderException(null, "10.0.0.1:6379", "foo");
+        String resp = r.formatResponse(e);
+        assertEquals(MeshClientRedirector.MESHDOWN_SELF_REDIRECT_RESPONSE, resp);
+    }
+
+    @Test
+    void selfRedirectMeshdownConstantIsCorrect() {
+        assertEquals("-MESHDOWN redirect target is self; cluster topology unstable\r\n",
+                MeshClientRedirector.MESHDOWN_SELF_REDIRECT_RESPONSE);
+    }
 }
