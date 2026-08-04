@@ -1,6 +1,7 @@
 package com.janeluo.luban.rds.server;
 
 import com.janeluo.luban.rds.core.handler.DefaultCommandHandler;
+import com.janeluo.luban.rds.core.handler.LuaScriptAnalyzer;
 import com.janeluo.luban.rds.core.stream.BlockingResult;
 import com.janeluo.luban.rds.core.stream.Stream;
 import com.janeluo.luban.rds.core.stream.StreamEntry;
@@ -1440,6 +1441,34 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             return false;
         }
         return true;
+    }
+
+    /**
+     * 从节点门控专用的读/写判定（仅 {@link #checkSlaveRedirect} 使用）。
+     * <p>
+     * 对 EVAL/EVALSHA 做脚本级只读分析（对齐 Redis 7 {@code evalGetCommandFlags}）：
+     * 通过 {@link LuaScriptAnalyzer} 判定脚本内容是否只读，只读脚本视为读命令可在从节点执行，
+     * 含写操作的脚本仍判为写。取不到脚本原文（如 EVALSHA 在本节点未缓存）保守判为写。
+     * 其余命令沿用 {@link #isReadOnlyCommand} 的命令级白名单。
+     * </p>
+     * <p>
+     * 注意：此方法仅影响"从节点是否拒绝/MOVED"，不影响 {@link #shouldPropagate}
+     * 的复制传播决策——后者对 EVAL 仍默认按写传播，保证写脚本正确复制。
+     * </p>
+     *
+     * @param commandName 命令名（大小写不敏感）
+     * @param args        原始命令参数（EVAL/EVALSHA 用于提取脚本）
+     * @return true 表示该命令在从节点上应被视为写（拒绝）
+     */
+    private boolean isWriteCommandOnSlave(String commandName, String[] args) {
+        String cmdUpper = commandName != null ? commandName.toUpperCase() : "";
+        if ("EVAL".equals(cmdUpper) || "EVALSHA".equals(cmdUpper)) {
+            String script = commandHandler.resolveScriptBody(cmdUpper, args);
+            // 取不到脚本（EVALSHA 未命中）保守判为写，触发 -READONLY，
+            // 客户端收到后会回退到 EVAL（带原文），再次判定即可放行。
+            return script == null || !LuaScriptAnalyzer.isReadOnlyScript(script);
+        }
+        return !isReadOnlyCommand(cmdUpper);
     }
 
     /**
@@ -2890,10 +2919,11 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
      *
      * @param commandName 命令名称（用于判定读/写）
      * @param key         首键
+     * @param args        原始命令参数（用于 EVAL/EVALSHA 的脚本只读性判定）
      * @param clientInfo  客户端信息
      * @return null 表示放行，否则返回 -READONLY 或 -MOVED 响应字符串
      */
-    private String checkSlaveRedirect(String commandName, String key, ClientInfo clientInfo) {
+    private String checkSlaveRedirect(String commandName, String key, String[] args, ClientInfo clientInfo) {
         if (!clusterEnabled || clusterConfig == null) {
             return null;
         }
@@ -2913,7 +2943,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             return null;
         }
 
-        boolean isWrite = !isReadOnlyCommand(commandName != null ? commandName.toUpperCase() : "");
+        boolean isWrite = isWriteCommandOnSlave(commandName, args);
         if (isWrite) {
             // slave 永不接受写命令（即使客户端声明了 READONLY）。
             return "-READONLY You can't write against a read only replica.\r\n";
@@ -3120,7 +3150,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         }
 
         // ② slave 角色路由
-        String slaveGate = checkSlaveRedirect(commandName, keys.get(0), clientInfo);
+        String slaveGate = checkSlaveRedirect(commandName, keys.get(0), args, clientInfo);
         if (slaveGate != null) {
             return slaveGate;
         }

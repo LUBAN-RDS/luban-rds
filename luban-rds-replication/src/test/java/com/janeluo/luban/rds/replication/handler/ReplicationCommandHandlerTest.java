@@ -15,6 +15,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
+import org.mockito.ArgumentCaptor;
 
 class ReplicationCommandHandlerTest {
 
@@ -272,5 +273,57 @@ class ReplicationCommandHandlerTest {
 
         assertEquals("+OK\r\n", result);
         assertFalse(bareHandler.getReadOnlyModeManager().isSlave());
+    }
+
+    @Test
+    @DisplayName("PSYNC 全量同步响应必须以 ByteBuf 写出（String 无法穿过 Netty pipeline）")
+    void testPsyncFullSyncResponseWrittenAsByteBuf() {
+        // 回归背景：handlePsync 内部对 +FULLRESYNC 响应调用 channel.writeAndFlush(String)，
+        // 而服务器 pipeline 未注册 StringEncoder——String 消息在 Netty 中无法写出，
+        // slave 只能收到 RDB 帧（$<len>\r\nREDIS...）而永远收不到 +FULLRESYNC 行，
+        // 握手失败回退 DISCONNECTED 并无限重连，slave 内存永远为空。
+        // 必须与 RDB 传输一致，用 ByteBuf 写出。
+        io.netty.channel.ChannelHandlerContext ctx =
+                mock(io.netty.channel.ChannelHandlerContext.class);
+        when(ctx.channel()).thenReturn(channel);
+
+        handler.handleWithChannel(ctx, new String[]{"PSYNC", "?", "-1"});
+
+        // 捕获所有写出，断言每条都是 ByteBuf（String 会被 Netty 拒绝写出）
+        ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
+        verify(channel, atLeast(1)).writeAndFlush(captor.capture());
+        for (Object written : captor.getAllValues()) {
+            assertTrue(written instanceof io.netty.buffer.ByteBuf,
+                    "PSYNC 握手响应必须以 ByteBuf 写出，实际类型: " + written.getClass().getName());
+        }
+        // 第一条必须是 +FULLRESYNC 响应行（顺序在 RDB 帧之前）
+        io.netty.buffer.ByteBuf first = (io.netty.buffer.ByteBuf) captor.getAllValues().get(0);
+        String firstText = first.toString(io.netty.util.CharsetUtil.UTF_8);
+        assertTrue(firstText.startsWith("+FULLRESYNC"),
+                "PSYNC 首个写出应为 +FULLRESYNC 行，实际: " + firstText);
+        first.release();
+    }
+
+    @Test
+    @DisplayName("PSYNC 部分同步（CONTINUE）响应必须以 ByteBuf 写出")
+    void testPsyncPartialSyncResponseWrittenAsByteBuf() {
+        io.netty.channel.ChannelHandlerContext ctx =
+                mock(io.netty.channel.ChannelHandlerContext.class);
+        when(ctx.channel()).thenReturn(channel);
+
+        // 先建立 replid 使 backlog 能部分同步
+        String replId = MasterReplicationManager.getInstance().getBacklog().getReplId();
+        handler.handleWithChannel(ctx, new String[]{"PSYNC", replId, "0"});
+
+        ArgumentCaptor<Object> captor = ArgumentCaptor.forClass(Object.class);
+        verify(channel, atLeast(1)).writeAndFlush(captor.capture());
+        for (Object written : captor.getAllValues()) {
+            assertTrue(written instanceof io.netty.buffer.ByteBuf,
+                    "PSYNC 部分同步响应必须以 ByteBuf 写出，实际类型: " + written.getClass().getName());
+        }
+        io.netty.buffer.ByteBuf first = (io.netty.buffer.ByteBuf) captor.getAllValues().get(0);
+        assertTrue(first.toString(io.netty.util.CharsetUtil.UTF_8).startsWith("+CONTINUE"),
+                "PSYNC 部分同步首个写出应为 +CONTINUE 行");
+        first.release();
     }
 }

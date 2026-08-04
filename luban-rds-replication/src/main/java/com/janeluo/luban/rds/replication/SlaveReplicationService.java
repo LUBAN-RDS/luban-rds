@@ -146,7 +146,13 @@ public class SlaveReplicationService implements ReplicationCallback {
             this.masterHost = parts[0].trim();
             this.masterPort = parts.length > 1 ? Integer.parseInt(parts[1].trim()) : 6379;
         }
-        
+
+        // 将最终解析出的 master 地址注入复制客户端。
+        // 客户端构造时只从 config.replicaof 解析地址（集群模式下为空），
+        // 若不显式传递，client.start() 会因 masterHost 为 null 而静默返回、
+        // 永不建立复制连接 → slave 内存永远为空。
+        client.setMasterAddress(masterHost + ":" + masterPort);
+
         // 启动客户端
         client.start();
         

@@ -4,7 +4,10 @@ import com.janeluo.luban.rds.common.config.RdsConfig;
 import com.janeluo.luban.rds.replication.*;
 import com.janeluo.luban.rds.core.handler.CommandHandler;
 import com.janeluo.luban.rds.core.store.MemoryStore;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.util.CharsetUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -152,10 +155,14 @@ public class ReplicationCommandHandler implements CommandHandler {
         MasterReplicationManager.PsyncResponse response = replicationManager.handlePsync(ctx.channel(), args);
         
         if (response.getResponse() != null) {
-            ctx.channel().writeAndFlush(response.getResponse());
+            // 必须以 ByteBuf 写出：服务器 pipeline 未注册 StringEncoder，
+            // writeAndFlush(String) 会被 Netty 拒绝，slave 将永远收不到
+            // +FULLRESYNC/+CONTINUE 握手行（只收到 RDB 帧），导致握手失败无限重连。
+            ctx.channel().writeAndFlush(
+                    Unpooled.copiedBuffer(response.getResponse(), CharsetUtil.UTF_8));
             
             if (response.getBacklogData() != null && response.getBacklogData().length > 0) {
-                ctx.channel().writeAndFlush(response.getBacklogData());
+                ctx.channel().writeAndFlush(Unpooled.wrappedBuffer(response.getBacklogData()));
             }
             
             // 如果需要 RDB 传输，启动全量同步

@@ -10,6 +10,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -237,6 +239,45 @@ class SlaveReplicationServiceTest {
         
         assertEquals(4, service.getReplOffset());
     }
+
+    @Test
+    @DisplayName("集群模式 setMasterAddress 注入后 start 应真正发起 TCP 连接（回归：复制死因）")
+    void testStartWithInjectedMasterAddressActuallyConnects() throws Exception {
+        // 模拟集群模式：config 未配置 replicaof，master 地址由 ReplicationCoordinator
+        // 通过 setMasterAddress() 显式注入（与 CLUSTER REPLICATE 路径一致）。
+        // 回归背景：SlaveReplicationClient 构造时只从 config.replicaof 解析地址，
+        // 注入的地址从未传递到 client，start() 因 masterHost==null 静默返回、永不建连，
+        // 导致 slave 内存永远为空 → 读请求(PTTL)返回 -2 → Redisson UnknownSessionException。
+        RdsConfig clusterConfig = new RdsConfig();
+        clusterConfig.setPort(9737);
+        clusterConfig.setSlaveReadOnly(true);
+
+        try (ServerSocket fakeMaster = new ServerSocket(0)) {
+            int masterPort = fakeMaster.getLocalPort();
+            SlaveReplicationService clusterService = new SlaveReplicationService(clusterConfig);
+            clusterService.setMemoryStore(new DefaultMemoryStore(16, 0L, "noeviction"));
+            clusterService.setMasterAddress("127.0.0.1:" + masterPort);
+
+            try {
+                clusterService.start();
+
+                // 等待 slave 客户端真正发起 TCP 连接（当前实现不会连接，会超时）
+                fakeMaster.setSoTimeout(3000);
+                try (Socket conn = fakeMaster.accept()) {
+                    byte[] buf = new byte[128];
+                    int n = conn.getInputStream().read(buf);
+                    String request = new String(buf, 0, n, StandardCharsets.UTF_8);
+                    assertTrue(request.contains("PING"),
+                            "slave 连接 master 后应先发送 PING 握手，实际收到: " + request);
+                }
+            } finally {
+                clusterService.stop();
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("测试获取复制偏移量")
 
     private void setServiceState(SlaveReplicationService svc, ReplicationState state) {
         try {

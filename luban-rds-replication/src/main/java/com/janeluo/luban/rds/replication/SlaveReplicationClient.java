@@ -52,8 +52,10 @@ public class SlaveReplicationClient {
     
     private final RdsConfig config;
     private final ReplicationCallback callback;
-    private final String masterHost;
-    private final int masterPort;
+    // volatile：集群模式下由 ReplicationCoordinator 通过 setMasterAddress() 动态注入
+    // （CLUSTER REPLICATE / failover），覆盖构造函数从 config.replicaof 解析的地址。
+    private volatile String masterHost;
+    private volatile int masterPort;
     
     private EventLoopGroup workerGroup;
     private Channel channel;
@@ -109,6 +111,38 @@ public class SlaveReplicationClient {
         });
     }
     
+    /**
+     * 显式设置主节点地址（host:port）。
+     * <p>
+     * 集群模式下由 {@code ReplicationCoordinator} 注入从 CLUSTER REPLICATE /
+     * failover 解析出的 master 地址。构造函数只从 {@code config.getReplicaof()}
+     * 解析地址（standalone 模式），集群模式下 replicaof 为空，若不注入则
+     * {@link #start()} 会因 masterHost 为 null 而静默返回、永不建立复制连接。
+     * </p>
+     *
+     * @param masterAddress master 地址（host:port），null 或空时清除已注入地址
+     */
+    public void setMasterAddress(String masterAddress) {
+        if (masterAddress == null || masterAddress.isEmpty()) {
+            this.masterHost = null;
+            this.masterPort = 0;
+            return;
+        }
+        String trimmed = masterAddress.trim();
+        int idx = trimmed.lastIndexOf(':');
+        if (idx < 0) {
+            this.masterHost = trimmed;
+            this.masterPort = 6379;
+        } else {
+            this.masterHost = trimmed.substring(0, idx).trim();
+            try {
+                this.masterPort = Integer.parseInt(trimmed.substring(idx + 1).trim());
+            } catch (NumberFormatException e) {
+                this.masterPort = 6379;
+            }
+        }
+    }
+
     /**
      * 启动复制客户端
      */

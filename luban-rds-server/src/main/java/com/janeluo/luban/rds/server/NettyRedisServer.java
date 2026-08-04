@@ -442,6 +442,17 @@ public class NettyRedisServer implements RedisServer {
             failoverManager.setReplicationLifecycleListener(replicationCoordinator);
             this.gossipProtocol.setReplicationLifecycleListener(replicationCoordinator);
             logger.info("ReplicationLifecycleListener 已注入集群组件");
+
+            // 10.56 重启恢复 slave 身份时重建复制连接。
+            // restoreClusterFromConfig() 从 nodes.conf 恢复了 MYSELF 的 slave 角色与
+            // masterNodeId，但只更新了 ClusterConfig 视图，并未启动实际复制连接——
+            // 复制子系统的连接建立只由运行时事件（CLUSTER REPLICATE 命令 / failover
+            // 角色切换）通过 replicateTo 触发。因此全集群重启后，slave 节点虽在
+            // CLUSTER NODES 中显示为 slave，复制层却仍是孤立 master（connected_slaves:0,
+            // master_repl_offset:0），写入不传播，从节点无数据。
+            // 此处对恢复为 slave 的 MYSELF 主动调用 replicateTo，与 Redis 重启后
+            // clusterLoadConfig -> replicationResume 重建 PSYNC 的行为对齐。
+            resumeReplicationForRestoredSlave();
         }
 
         // 10.6 初始化 SlotMigrationManager 和 MigrateCommandHandler
@@ -550,6 +561,41 @@ public class NettyRedisServer implements RedisServer {
             logger.info("MYSELF 以本地配置恢复为 master, configEpoch={}, currentEpoch={}, 等待 gossip 对齐",
                     clusterConfig.getConfigEpoch(), clusterConfig.getCurrentEpoch());
         }
+    }
+
+    /**
+     * 重启后恢复 slave 身份时，主动向其 master 发起复制连接。
+     * <p>
+     * 对齐 Redis 的 {@code replicationResume}：集群重启从 nodes.conf 恢复了节点角色，
+     * 但实际复制连接只在运行时事件（CLUSTER REPLICATE / failover）中建立。
+     * 若不在启动时补建，slave 节点重启后会退化为孤立 master，写入不传播、从节点无数据。
+     * </p>
+     * <p>
+     * 仅当 MYSELF 携带有效 masterNodeId 且对应 master 节点存在于配置中时触发。
+     * startSlave 内部幂等，master 地址缺失（NOADDR）时由 SlaveReplicationService
+     * 后续重连，或待 gossip 收到该 master 的 PING 补全地址后由角色变更路径重建。
+     * </p>
+     */
+    private void resumeReplicationForRestoredSlave() {
+        ClusterNode myNode = clusterConfig.getMyNode();
+        if (myNode == null) {
+            return;
+        }
+        // 仅对 slave 身份的 MYSELF 触发：master 节点无需向上游复制。
+        // 双重判定（isSlave() + masterNodeId）以兼容只设了 masterNodeId 未设 flag 的历史 nodes.conf。
+        String masterNodeId = myNode.getMasterNodeId();
+        if (!myNode.isSlave() || masterNodeId == null || masterNodeId.isEmpty()) {
+            return;
+        }
+        ClusterNode masterNode = clusterConfig.getNode(masterNodeId);
+        if (masterNode == null) {
+            logger.warn("重启恢复 slave 身份但 master 节点不在配置中: masterNodeId={}, 等待 gossip 补全",
+                    masterNodeId);
+            return;
+        }
+        logger.info("重启恢复 slave 身份，主动向 master 发起复制: master={}, address={}:{}",
+                masterNodeId, masterNode.getIp(), masterNode.getPort());
+        replicationCoordinator.replicateTo(masterNode);
     }
 
     /**
@@ -995,6 +1041,14 @@ public class NettyRedisServer implements RedisServer {
     
     public PersistService getPersistService() {
         return persistService;
+    }
+
+    /**
+     * @return 复制协调器（集群 slave/master 角色驱动的复制连接管理）。
+     * 主要供测试观测重启恢复 slave 身份后是否真正发起复制连接。
+     */
+    public ReplicationCoordinator getReplicationCoordinator() {
+        return replicationCoordinator;
     }
 
     /**

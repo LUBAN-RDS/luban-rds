@@ -62,6 +62,22 @@ public class LuaCommandHandler implements CommandHandler {
         Thread t = currentScriptThread;
         return t != null && t.isAlive();
     }
+
+    /**
+     * 按 SHA1 查询已缓存的脚本文本。
+     * <p>
+     * 供集群从节点在处理 EVALSHA 时解析脚本只读性使用
+     * （见 {@link LuaScriptAnalyzer#isReadOnlyScript(String)}）。
+     *
+     * @param sha1 脚本 SHA1（小写十六进制）
+     * @return 脚本文本；未缓存返回 null
+     */
+    public String getScriptBySha1(String sha1) {
+        if (sha1 == null) {
+            return null;
+        }
+        return scriptCache.get(sha1);
+    }
     
     @Override
     public Object handle(int database, String[] args, MemoryStore store) {
@@ -246,6 +262,8 @@ public class LuaCommandHandler implements CommandHandler {
     private Object handleScriptFlush(int database, String[] args, MemoryStore store) {
         int count = scriptCache.size();
         scriptCache.clear();
+        // 同步清空脚本只读性判定缓存，避免持有已删除脚本的分析结果
+        LuaScriptAnalyzer.invalidateCache();
         RuntimeConfig.resetCachedScriptsCount();
         RuntimeConfig.resetCachedScriptsBytes();
         logger.info("脚本缓存已清空: {} 个脚本被清除", count);

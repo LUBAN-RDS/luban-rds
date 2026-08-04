@@ -390,4 +390,124 @@ class RedisServerHandlerRedirectTest {
         String out = readOut(ch);
         assertTrue(out.startsWith("-READONLY"), "READONLY 标志不应使写命令通过，实际: " + out);
     }
+
+    // ============ EVAL/EVALSHA 脚本只读性（修复 Redisson READONLY 报错）============
+
+    /**
+     * 只读 EVAL 脚本（PTTL）+ 客户端声明 READONLY → 本 slave 服务读（放行，非 -READONLY）。
+     * <p>对应 Redisson 报错场景：从节点不应把只读 EVAL 当写命令拒绝。
+     */
+    @Test
+    @DisplayName("slave READONLY + 只读 EVAL(PTTL) 本地服务（修复 Redisson 报错）")
+    void testSlaveEvalReadOnlyServesLocallyWithReadonly() {
+        EmbeddedChannel ch = buildSlaveChannel(true);
+        // 声明 READONLY
+        ch.writeInbound(Unpooled.copiedBuffer("*1\r\n$8\r\nREADONLY\r\n".getBytes(StandardCharsets.UTF_8)));
+        readOut(ch); // 消费 +OK
+        // 只读脚本：return redis.call('PTTL', KEYS[1])
+        ch.writeInbound(Unpooled.copiedBuffer(
+                respEval("return redis.call('PTTL', KEYS[1])", 1, "slave-eval-key")
+                        .getBytes(StandardCharsets.UTF_8)));
+        String out = readOut(ch);
+        assertTrue(!out.startsWith("-READONLY"),
+                "只读 EVAL 在 READONLY 从节点应放行执行，实际: " + out);
+    }
+
+    /**
+     * 只读 EVAL 脚本（GET）+ 客户端未声明 READONLY → MOVED 到 master。
+     * <p>只读脚本按读命令处理：未声明 READONLY 时 slave 不擅自服务，重定向到 master。
+     */
+    @Test
+    @DisplayName("slave 未声明 READONLY 的只读 EVAL(GET) 返回 MOVED 到 master")
+    void testSlaveEvalReadOnlyWithoutReadonlyRedirectsToMaster() {
+        String key = "slave-eval-ro";
+        int slot = SlotUtils.keyHashSlot(key);
+        EmbeddedChannel ch = buildSlaveChannel(true);
+        ch.writeInbound(Unpooled.copiedBuffer(
+                respEval("return redis.call('GET', KEYS[1])", 1, key)
+                        .getBytes(StandardCharsets.UTF_8)));
+        String out = readOut(ch);
+        assertTrue(out.startsWith("-MOVED " + slot + " 127.0.0.1:7000"),
+                "只读 EVAL 未声明 READONLY 应 MOVED 到 master，实际: " + out);
+    }
+
+    /**
+     * 含写操作的 EVAL 脚本（SET）→ -READONLY（无论 READONLY 标志）。
+     * <p>从节点永不接受写脚本，保持原拒绝行为。
+     */
+    @Test
+    @DisplayName("slave 收到写 EVAL(SET) 返回 -READONLY")
+    void testSlaveEvalWriteReturnsReadonly() {
+        EmbeddedChannel ch = buildSlaveChannel(true);
+        ch.writeInbound(Unpooled.copiedBuffer(
+                respEval("return redis.call('SET', KEYS[1], ARGV[1])", 1, "slave-eval-write", "v")
+                        .getBytes(StandardCharsets.UTF_8)));
+        String out = readOut(ch);
+        assertTrue(out.startsWith("-READONLY"),
+                "写 EVAL 应被 slave 拒绝返回 -READONLY，实际: " + out);
+    }
+
+    /**
+     * EVALSHA 只读脚本：先 SCRIPT LOAD 注册，再 EVALSHA → READONLY 从节点放行。
+     * <p>验证 EVALSHA 路径能通过脚本缓存取回原文并正确判定只读性。
+     */
+    @Test
+    @DisplayName("slave READONLY + EVALSHA 只读脚本本地服务")
+    void testSlaveEvalshaReadOnlyServesLocallyWithReadonly() {
+        EmbeddedChannel ch = buildSlaveChannel(true);
+        // 声明 READONLY
+        ch.writeInbound(Unpooled.copiedBuffer("*1\r\n$8\r\nREADONLY\r\n".getBytes(StandardCharsets.UTF_8)));
+        readOut(ch);
+        // SCRIPT LOAD 只读脚本
+        String script = "return redis.call('EXISTS', KEYS[1])";
+        ch.writeInbound(Unpooled.copiedBuffer(
+                respScriptLoad(script).getBytes(StandardCharsets.UTF_8)));
+        String loadResp = readOut(ch);
+        // 提取 sha1（响应格式：$40\r\n<sha>\r\n）
+        String sha1 = loadResp.trim().substring(loadResp.trim().length() - 40);
+        // EVALSHA 执行
+        ch.writeInbound(Unpooled.copiedBuffer(
+                respEvalsha(sha1, 1, "slave-evalsha-key").getBytes(StandardCharsets.UTF_8)));
+        String out = readOut(ch);
+        assertTrue(!out.startsWith("-READONLY"),
+                "只读 EVALSHA 在 READONLY 从节点应放行，实际: " + out);
+    }
+
+    /**
+     * 构造 EVAL 命令的 RESP 帧：EVAL script numkeys key [key ...] arg [arg ...]
+     */
+    private static String respEval(String script, int numkeys, String key, String... argv) {
+        return respScriptCommand("EVAL", script, numkeys, key, argv);
+    }
+
+    /**
+     * 构造 EVALSHA 命令的 RESP 帧：EVALSHA sha1 numkeys key [key ...] arg [arg ...]
+     */
+    private static String respEvalsha(String sha1, int numkeys, String key, String... argv) {
+        return respScriptCommand("EVALSHA", sha1, numkeys, key, argv);
+    }
+
+    /**
+     * 构造 SCRIPT LOAD 的 RESP 帧。
+     */
+    private static String respScriptLoad(String script) {
+        return "*3\r\n$6\r\nSCRIPT\r\n$4\r\nLOAD\r\n$" + script.length() + "\r\n" + script + "\r\n";
+    }
+
+    /**
+     * 构造 EVAL/EVALSHA 命令的 RESP 帧（scriptBody 为脚本文本或 sha1）。
+     */
+    private static String respScriptCommand(String cmd, String scriptBody, int numkeys, String key, String... argv) {
+        StringBuilder sb = new StringBuilder();
+        int argc = 3 + 1 + argv.length; // cmd + body + numkeys + key + argv...
+        sb.append("*").append(argc).append("\r\n");
+        sb.append("$").append(cmd.length()).append("\r\n").append(cmd).append("\r\n");
+        sb.append("$").append(scriptBody.length()).append("\r\n").append(scriptBody).append("\r\n");
+        sb.append("$1\r\n").append(numkeys).append("\r\n");
+        sb.append("$").append(key.length()).append("\r\n").append(key).append("\r\n");
+        for (String a : argv) {
+            sb.append("$").append(a.length()).append("\r\n").append(a).append("\r\n");
+        }
+        return sb.toString();
+    }
 }

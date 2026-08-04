@@ -93,6 +93,38 @@ public class DefaultCommandHandler {
     public String getRequirepass() {
         return requirepass;
     }
+
+    /**
+     * 解析 EVAL/EVALSHA 命令的脚本文本。
+     * <p>
+     * 供集群从节点在路由判定时分析脚本只读性使用
+     * （配合 {@link LuaScriptAnalyzer#isReadOnlyScript(String)}）。
+     * <ul>
+     *   <li>EVAL：直接取 {@code args[1]}（脚本文本）</li>
+     *   <li>EVALSHA：按 {@code args[1]}（SHA1）查 LuaCommandHandler 脚本缓存</li>
+     * </ul>
+     *
+     * @param commandName 命令名（EVAL/EVALSHA，大小写不敏感）
+     * @param args        命令参数（含命令名，与 {@link #handle} 入参一致）
+     * @return 脚本文本；非脚本命令、参数不全或 EVALSHA 未命中缓存返回 null
+     */
+    public String resolveScriptBody(String commandName, String[] args) {
+        if (commandName == null || args == null || args.length < 2) {
+            return null;
+        }
+        String cmd = commandName.toUpperCase();
+        if ("EVAL".equals(cmd)) {
+            return args[1];
+        }
+        if ("EVALSHA".equals(cmd)) {
+            CommandHandler handler = commandHandlers.get("EVALSHA");
+            if (handler instanceof LuaCommandHandler) {
+                return ((LuaCommandHandler) handler).getScriptBySha1(args[1]);
+            }
+            return null;
+        }
+        return null;
+    }
     
     /**
      * 是否需要密码验证
