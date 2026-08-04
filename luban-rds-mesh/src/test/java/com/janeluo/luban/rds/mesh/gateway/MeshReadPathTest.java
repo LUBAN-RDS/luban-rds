@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -284,7 +285,9 @@ class MeshReadPathTest {
 
         MovedToLeaderException ex = assertThrows(MovedToLeaderException.class,
                 () -> gate.read(0, new String[]{"GET", "foo"}));
-        assertEquals("leaderNode", ex.getLeaderAddr());
+        // 修正：抛点只携带 leaderNodeId（serviceAddr 留空），由 redirector 解析 ip:port
+        assertEquals("leaderNode", ex.getLeaderNodeId());
+        assertNull(ex.getLeaderServiceAddr(), "serviceAddr 应留空，由 redirector 解析");
         // 非 Leader 不查租约、不 propose
         verify(lease, never()).isValid(org.mockito.ArgumentMatchers.anyLong());
         verify(lease, never()).awaitValid(org.mockito.ArgumentMatchers.anyLong());

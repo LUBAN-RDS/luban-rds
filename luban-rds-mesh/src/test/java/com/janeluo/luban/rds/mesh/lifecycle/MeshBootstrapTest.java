@@ -215,4 +215,50 @@ class MeshBootstrapTest {
         // myself 标记应在 n1（selfNodeId）
         assertTrue(nodesStr.contains("myself"), "CLUSTER NODES 应含 myself 标记");
     }
+
+    /**
+     * 验证 peers 第三段 servicePort 解析：单机多实例（同 host、不同 RESP 端口）时，
+     * nodeIdToServiceAddr 每节点独立端口正确（修正 MOVED 地址塌缩 bug）。
+     */
+    @Test
+    void bootstrap_perNodeServicePort_resolvedFromThirdSegment() {
+        RdsConfig c = new RdsConfig();
+        c.setDir(tempDir.toString());
+        c.setMeshEnabled(true);
+        c.setPort(6390); // 全局 port；peers 显式给出 servicePort 时不应被使用
+        // n1/n2/n3 同 host，busPort 11000/11001/11002，servicePort 9736/9737/9738
+        c.setMeshPeers("n1@127.0.0.1:11000:9736,n2@127.0.0.1:11001:9737,n3@127.0.0.1:11002:9738");
+        c.setMeshSelfNodeId("n1");
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        DefaultCommandHandler handler = new DefaultCommandHandler();
+
+        MeshBootstrap bootstrap = new MeshBootstrap();
+        MeshAssembly assembly = bootstrap.bootstrap(c, rawStore, handler);
+
+        // 每节点 serviceAddr 应是各自的 RESP 端口，不是全局 port=6390
+        assertEquals("127.0.0.1:9736", assembly.getClientRedirector().getServiceAddr("n1"),
+                "n1 serviceAddr 应取第三段 servicePort");
+        assertEquals("127.0.0.1:9737", assembly.getClientRedirector().getServiceAddr("n2"),
+                "n2 serviceAddr 应取第三段 servicePort");
+        assertEquals("127.0.0.1:9738", assembly.getClientRedirector().getServiceAddr("n3"),
+                "n3 serviceAddr 应取第三段 servicePort");
+    }
+
+    /**
+     * 向后兼容：peers 不带第三段 servicePort 时，回落全局 servicePort / port（旧行为不变）。
+     */
+    @Test
+    void bootstrap_legacyPeersWithoutServicePort_fallsBackToGlobalPort() {
+        RdsConfig c = threeNodeConfig(); // port=6390, peers 无第三段
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        DefaultCommandHandler handler = new DefaultCommandHandler();
+
+        MeshBootstrap bootstrap = new MeshBootstrap();
+        MeshAssembly assembly = bootstrap.bootstrap(c, rawStore, handler);
+
+        // 旧格式：所有节点回落全局 port=6390（旧行为）
+        assertEquals("127.0.0.1:6390", assembly.getClientRedirector().getServiceAddr("n1"));
+        assertEquals("127.0.0.1:6390", assembly.getClientRedirector().getServiceAddr("n2"));
+        assertEquals("127.0.0.1:6390", assembly.getClientRedirector().getServiceAddr("n3"));
+    }
 }

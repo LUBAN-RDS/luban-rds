@@ -161,8 +161,9 @@ public class MeshBootstrap {
                 });
         meshNode.setSnapshotManager(snapshotManager);
 
-        // 8. MeshWriteGate（meshNode/rawStore/handler/config）
-        MeshWriteGate writeGate = new MeshWriteGate(meshNode, rawStore, handler, meshConfig);
+        // 8. MeshWriteGate（meshNode/rawStore/handler/config + nodeId→serviceAddr 映射）
+        //    映射与 redirector 同源，供 redirectResponse 把 Leader nodeId 解析成真实 ip:port。
+        MeshWriteGate writeGate = new MeshWriteGate(meshNode, rawStore, handler, meshConfig, topo.nodeIdToServiceAddr);
 
         // 9. MeshClientRedirector（nodeId→serviceAddr 映射）
         MeshClientRedirector redirector = new MeshClientRedirector(topo.nodeIdToServiceAddr);
@@ -238,33 +239,46 @@ public class MeshBootstrap {
             if (e.isEmpty()) {
                 continue;
             }
-            // 格式：nodeId@host:busPort
+            // 格式：nodeId@host:busPort[:servicePort]
+            //   - busPort：节点间 Raft 总线端口（必填）
+            //   - servicePort：对外 RESP 服务端口（可选；缺省回落全局 mesh-service-port / port）
+            //     单机多实例（各节点 RESP 端口不同）必须显式给出，否则 service 地址会塌缩到同一端口。
             int atIdx = e.indexOf('@');
             if (atIdx <= 0 || atIdx == e.length() - 1) {
-                throw new IllegalStateException("mesh-peers 条目格式非法（应为 nodeId@host:busPort）: " + e);
+                throw new IllegalStateException("mesh-peers 条目格式非法（应为 nodeId@host:busPort[:servicePort]）: " + e);
             }
             String nodeId = e.substring(0, atIdx).trim();
-            String hostPort = e.substring(atIdx + 1).trim();
-            int colonIdx = hostPort.lastIndexOf(':');
-            if (colonIdx <= 0 || colonIdx == hostPort.length() - 1) {
+            String hostPorts = e.substring(atIdx + 1).trim();
+            // busPort 在最后一个 ':' 之前；若存在第三段 servicePort，则 hostPorts 形如 host:busPort:servicePort
+            // 用 split 限制 3 段，避免 IPv6 host 干扰（当前不支持 IPv6，与原实现一致）。
+            String[] parts = hostPorts.split(":");
+            if (parts.length < 2) {
                 throw new IllegalStateException("mesh-peers 条目缺少 host:busPort: " + e);
             }
-            String host = hostPort.substring(0, colonIdx).trim();
+            String host = parts[0].trim();
             int busPort;
             try {
-                busPort = Integer.parseInt(hostPort.substring(colonIdx + 1).trim());
+                busPort = Integer.parseInt(parts[1].trim());
             } catch (NumberFormatException nfe) {
                 throw new IllegalStateException("mesh-peers 条目 busPort 非整数: " + e);
             }
             if (nodeId.isEmpty() || host.isEmpty() || busPort <= 0) {
                 throw new IllegalStateException("mesh-peers 条目字段不完整: " + e);
             }
+            // 可选第三段：per-node servicePort（单机多实例必需）
+            int nodeServicePort = servicePort;
+            if (parts.length >= 3) {
+                try {
+                    nodeServicePort = Integer.parseInt(parts[2].trim());
+                } catch (NumberFormatException nfe) {
+                    throw new IllegalStateException("mesh-peers 条目 servicePort 非整数: " + e);
+                }
+                if (nodeServicePort <= 0) {
+                    throw new IllegalStateException("mesh-peers 条目 servicePort 必须 > 0: " + e);
+                }
+            }
             nodeIdToBusAddr.put(nodeId, host + ":" + busPort);
-            // serviceAddr：所有节点共用配置的 servicePort（单机多实例时各节点 port 不同，
-            // 但 v1 简化：用全局 servicePort + host 推导；caller 若需精确可在配置层覆盖）。
-            // 更准确的做法是 peers 条目同时带 servicePort，但 DESIGN 当前格式只有 busPort，
-            // 故 v1 用「全局 port 作 servicePort」近似——对单机多实例（不同 port）需各自配置。
-            nodeIdToServiceAddr.put(nodeId, host + ":" + servicePort);
+            nodeIdToServiceAddr.put(nodeId, host + ":" + nodeServicePort);
             orderedNodeIds.add(nodeId);
         }
 

@@ -387,7 +387,14 @@ public class MeshNode {
     private void doPropose(byte[] respPayload, int dbIndex, byte[] extra, CompletableFuture<byte[]> future) {
         // 1. 校验 Leader
         if (state.role != MeshRole.LEADER) {
-            future.completeExceptionally(new MovedToLeaderException(state.leaderId));
+            // 非 Leader：抛 MovedToLeaderException 让客户端 MOVED 到 Leader。
+            // 只携带 leaderNodeId（serviceAddr 留空），由 MeshClientRedirector 经
+            // nodeIdToServiceAddr 映射解析真实 ip:port。此前用单参构造器把 nodeId 塞进
+            // serviceAddr 字段，导致 MOVED 地址无端口 → Redisson "Redis url doesn't contain a port"。
+            // 写路径此时无 key（rawFrame 未解析），slot 由 redirector 取 0（无害，集群感知客户端
+            // 收到 MOVED 即刷新拓扑，slot 仅用于本地路由缓存更新）。
+            future.completeExceptionally(
+                    new MovedToLeaderException(state.leaderId, null, null));
             return;
         }
 

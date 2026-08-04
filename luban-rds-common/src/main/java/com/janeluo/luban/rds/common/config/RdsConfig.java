@@ -286,7 +286,10 @@ public class RdsConfig {
 
     /**
      * mesh 集群 peers 列表。格式（逗号分隔）：
-     * {@code nodeId1@host1:busPort1,nodeId2@host2:busPort2,nodeId3@host3:busPort3}
+     * {@code nodeId1@host1:busPort1[:servicePort1],nodeId2@host2:busPort2[:servicePort2],...}
+     * <p>每条目第三段 {@code :servicePort} <b>可选</b>：节点对外 RESP 服务端口；缺省时回落全局
+     * {@code mesh-service-port}（再缺省回落 {@code port}）。<b>单机多实例（同 host、不同 RESP 端口）
+     * 必须显式给出每节点 servicePort</b>，否则 MOVED 重定向地址会塌缩到同一端口。</p>
      * <p>本节点 selfNodeId 由 mesh-self-node-id 指定（未指定时按 peers 顺序取第一个）。</p>
      */
     private String meshPeers = "";

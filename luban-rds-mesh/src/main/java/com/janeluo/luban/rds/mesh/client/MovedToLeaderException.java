@@ -28,9 +28,11 @@ package com.janeluo.luban.rds.mesh.client;
  * <h3>兼容性</h3>
  * <p>
  * 保留旧的 {@link #MovedToLeaderException(String)} 单参构造器与 {@link #getLeaderAddr()}，
- * 供阶段 4/5 已有调用方（{@code MeshNode.propose} / {@code MeshWriteGate.read}，传入 nodeId 占位）
- * 与既有测试（{@code MeshWriteGateTest} 断言 {@code getLeaderAddr() == 构造参数}）继续工作。
- * 新的 leaderServiceAddr 与 leaderNodeId 为同值时由单参构造器一并填充。
+ * 供测试与兼容调用方继续工作。<b>生产抛点（{@code MeshNode.doPropose} / {@code MeshWriteGate.read}）
+ * 已统一改用 {@link #MovedToLeaderException(String, String, String)} 三参构造器</b>：只携带
+ * {@code leaderNodeId}（{@code leaderServiceAddr=null}），由 {@code MeshClientRedirector} 经
+ * {@code nodeIdToServiceAddr} 映射解析真实 {@code ip:port}。此前单参构造器把 nodeId 塞进
+ * serviceAddr 字段，导致 MOVED 地址无端口 → Redisson "Redis url doesn't contain a port"。
  * </p>
  */
 public class MovedToLeaderException extends RuntimeException {

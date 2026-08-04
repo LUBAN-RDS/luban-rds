@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -105,6 +106,13 @@ public class MeshWriteGate {
      * 失效 awaitValid({@link #DEFAULT_READ_LEASE_WAIT_MS})。
      */
     private final MeshConfig config;
+    /**
+     * nodeId → service 地址（{@code "host:port"}）映射；只读。
+     * <p>供 {@link #resolveLeaderServiceAddr()} 把 Leader 的 nodeId 解析成真实客户端可达地址，
+     * 用于 {@link #redirectResponse(String)} 生成 {@code -MOVED <slot> <ip:port>}。
+     * 为空映射时回退为返回 nodeId（仅占位，生产装配总会注入）。</p>
+     */
+    private final Map<String, String> nodeIdToServiceAddr;
 
     // ==================== 读写命令集合 ====================
 
@@ -172,7 +180,7 @@ public class MeshWriteGate {
     // ==================== 构造 ====================
 
     public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler) {
-        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, null);
+        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, null, null);
     }
 
     /**
@@ -186,7 +194,7 @@ public class MeshWriteGate {
      */
     public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
                          RedisProtocolParser protocolParser, long writeTimeoutMs) {
-        this(meshNode, rawStore, handler, protocolParser, writeTimeoutMs, null);
+        this(meshNode, rawStore, handler, protocolParser, writeTimeoutMs, null, null);
     }
 
     /**
@@ -199,7 +207,24 @@ public class MeshWriteGate {
      */
     public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
                          MeshConfig config) {
-        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, config);
+        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, config, null);
+    }
+
+    /**
+     * 阶段 12 装配构造器：同时注入 {@link MeshConfig} 与 nodeId→serviceAddr 映射。
+     * <p>映射用于 {@link #redirectResponse(String)} 把 Leader nodeId 解析成真实 {@code ip:port}，
+     * 修正阶段 5 用 nodeId 作地址占位的缺陷（MOVED 无端口致 Redisson 解码失败）。</p>
+     *
+     * @param meshNode            集群节点
+     * @param rawStore            真实存储
+     * @param handler             命令处理器
+     * @param config              集群配置；null 时按默认 LEASE 行为
+     * @param nodeIdToServiceAddr nodeId → service 地址（{@code "host:port"}）映射；null/空 等同空映射
+     */
+    public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
+                         MeshConfig config, Map<String, String> nodeIdToServiceAddr) {
+        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS,
+                config, nodeIdToServiceAddr);
     }
 
     /**
@@ -208,7 +233,8 @@ public class MeshWriteGate {
      * @param config 集群配置（读一致性模式 / 租约等待时长）；null 时按默认 LEASE 行为
      */
     private MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
-                          RedisProtocolParser protocolParser, long writeTimeoutMs, MeshConfig config) {
+                          RedisProtocolParser protocolParser, long writeTimeoutMs, MeshConfig config,
+                          Map<String, String> nodeIdToServiceAddr) {
         if (meshNode == null) {
             throw new IllegalArgumentException("meshNode 不能为 null");
         }
@@ -227,6 +253,9 @@ public class MeshWriteGate {
         this.protocolParser = protocolParser;
         this.writeTimeoutMs = writeTimeoutMs;
         this.config = config;
+        this.nodeIdToServiceAddr = nodeIdToServiceAddr == null
+                ? Collections.emptyMap()
+                : Collections.unmodifiableMap(new java.util.LinkedHashMap<>(nodeIdToServiceAddr));
     }
 
     // ==================== 写路径 ====================
@@ -320,7 +349,11 @@ public class MeshWriteGate {
 
         // 1. 非 Leader → MOVED
         if (!meshNode.isLeader()) {
-            throw new MovedToLeaderException(meshNode.getLeaderId());
+            // 只携带 leaderNodeId（serviceAddr 留空）+ 命令 key，由上层 redirector 经映射
+            // 解析真实 ip:port。此前单参构造器把 nodeId 塞进 serviceAddr → MOVED 无端口。
+            String leaderId = meshNode.getLeaderId();
+            String key = args.length >= 2 ? args[1] : null;
+            throw new MovedToLeaderException(leaderId, null, key);
         }
 
         // 2. 按读一致性模式切换
@@ -442,16 +475,19 @@ public class MeshWriteGate {
     /**
      * 解析 Leader 的 service 地址（{@code host:port}）。
      * <p>
-     * 阶段 5：{@link MeshConfig} 尚无 nodeId→serviceAddr 映射，暂以 {@code leaderId} 作占位返回。
-     * 阶段 6 完善后从配置查真实 service 端口（非 bus 端口）。
+     * 从构造时注入的 {@code nodeIdToServiceAddr} 映射查 Leader nodeId 对应的真实 service 地址
+     * （客户端可达端口，非 bus 端口）。映射为空或查无时返回 {@code null}（→ 由
+     * {@link #redirectResponse(String)} 生成 MESHDOWN，避免回写无端口的 MOVED）。
      * </p>
      *
-     * @return Leader service 地址；无 Leader 返回 {@code null}
+     * @return Leader service 地址；无 Leader 或映射无此节点返回 {@code null}
      */
     protected String resolveLeaderServiceAddr() {
         String leaderId = meshNode.getLeaderId();
-        // 阶段 6：从 MeshConfig 查 nodeId→serviceAddr 映射；此处先用 leaderId 占位
-        return leaderId;
+        if (leaderId == null) {
+            return null;
+        }
+        return nodeIdToServiceAddr.get(leaderId);
     }
 
     // ==================== 写命令判定 ====================

@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -164,7 +165,11 @@ class MeshWriteGateTest {
 
         MovedToLeaderException ex = assertThrows(MovedToLeaderException.class,
                 () -> gate.read(0, new String[]{"GET", "foo"}));
-        assertEquals("leaderNode", ex.getLeaderAddr());
+        // 修正：非 Leader 抛点只携带 leaderNodeId（serviceAddr 留空），
+        // 由 redirector 经 nodeIdToServiceAddr 映射解析真实 ip:port（修正 MOVED 无端口 bug）
+        assertEquals("leaderNode", ex.getLeaderNodeId());
+        assertNull(ex.getLeaderServiceAddr(), "serviceAddr 应留空，由 redirector 解析");
+        assertEquals("foo", ex.getKey(), "读路径应携带命令 key 以算真实 slot");
         verify(node, never()).propose(any(), anyInt(), any());
     }
 
@@ -221,13 +226,15 @@ class MeshWriteGateTest {
         MeshNode node = mock(MeshNode.class);
         when(node.getLeaderId()).thenReturn("leaderNode");
 
-        MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler());
+        // 注入 nodeId→serviceAddr 映射：redirectResponse 据此把 nodeId 解析成 ip:port
+        java.util.Map<String, String> map = java.util.Collections.singletonMap("leaderNode", "10.0.0.1:6379");
+        MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler(), null, map);
 
         String moved = gate.redirectResponse("mykey");
 
-        // 阶段 5：leaderAddr 用 leaderId 占位；slot 用真实 CRC16（与 common SlotUtils 一致）
+        // leaderAddr 取映射的真实 ip:port（修正：不再用 nodeId 占位）；slot 用真实 CRC16
         int expectedSlot = com.janeluo.luban.rds.common.util.SlotUtils.getSlot("mykey");
-        assertEquals("-MOVED " + expectedSlot + " leaderNode\r\n", moved);
+        assertEquals("-MOVED " + expectedSlot + " 10.0.0.1:6379\r\n", moved);
         assertTrue(expectedSlot >= 0 && expectedSlot < 16384, "slot 应在 0-16383: " + expectedSlot);
     }
 
@@ -248,10 +255,11 @@ class MeshWriteGateTest {
         MeshNode node = mock(MeshNode.class);
         when(node.getLeaderId()).thenReturn("leaderNode");
 
-        MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler());
+        java.util.Map<String, String> map = java.util.Collections.singletonMap("leaderNode", "10.0.0.1:6379");
+        MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler(), null, map);
 
         String moved = gate.redirectResponse(null);
-        assertEquals("-MOVED 0 leaderNode\r\n", moved);
+        assertEquals("-MOVED 0 10.0.0.1:6379\r\n", moved);
     }
 
     // ==================== isWriteCommand 判定 ====================
@@ -413,8 +421,10 @@ class MeshWriteGateTest {
             byte[] frame = respFrame("SET", "foo", "bar");
             MovedToLeaderException ex = assertThrows(MovedToLeaderException.class,
                     () -> gate.write(frame, 0, null));
-            // Leader 地址来自 state.leaderId
-            assertEquals("someOtherNode", ex.getLeaderAddr());
+            // 修正：doPropose 非 Leader 抛点只携带 leaderNodeId（serviceAddr 留空），
+            // 由 redirector 经映射解析真实 ip:port（修正 MOVED 无端口 bug）
+            assertEquals("someOtherNode", ex.getLeaderNodeId());
+            assertNull(ex.getLeaderServiceAddr(), "serviceAddr 应留空，由 redirector 解析");
         } finally {
             node.stop();
         }
