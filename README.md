@@ -43,7 +43,7 @@ Luban-RDS 是一款完全兼容 Redis 协议的轻量级高性能内存数据库
 - **集群一键搭建**：内置 `redis-cli --cluster create` 兼容的 CLI 工具 `RedisCliMain`，一行命令完成多节点集群创建与主从划分
 - **集群配置持久化与节点恢复（v1.0.4）**：`nodes.conf` 自动持久化、节点 ID 复用、槽位表重建、启动主动建连，避免全集群重启后节点成孤岛
 - **主从复制**：完整支持主从复制功能，包括全量同步和增量同步
-- **3 节点 Raft 强一致集群（mesh 模块，设计阶段）**：只需 3 台机器即可实现强一致高可用，MOVED 重定向兼容任意 Redis 客户端
+- **3 节点 Raft 强一致集群（mesh 模块）**：只需 3 台机器（替代 Redis Cluster 的 6 节点）即可实现强一致高可用，已确认写入不丢，`CLUSTER SLOTS` + `MOVED` 兼容 JedisCluster/lettuce 等集群感知客户端（详见 [luban-rds-mesh/README.md](luban-rds-mesh/README.md)）
 - **健壮的网络层**：NETTY 客户端与服务端协议解析器均修复了 TCP 半包/粘包问题，能够正确处理跨段 RESP 响应与多响应合包
 
 ## 🚀 快速开始
@@ -243,11 +243,11 @@ luban-rds/
 │       ├── MasterReplicationManager.java  # 主节点复制管理器
 │       ├── SlaveReplicationService.java   # 从节点复制服务
 │       └── ReplicationBacklog.java        # 复制积压缓冲区
-├── luban-rds-mesh/                # 3 节点 Raft 强一致集群模块（设计阶段）
-│   ├── README.md                                # 模块快速上手
+├── luban-rds-mesh/                # 3 节点 Raft 强一致集群模块（强一致、不丢已确认写入）
+│   ├── README.md                                # 模块快速上手（配置/启动/客户端/运维命令）
 │   └── docs/
-│       ├── DESIGN.md                            # 完整协议设计文档
-│       └── IMPLEMENTATION_PLAN.md               # 11 阶段实施计划
+│       ├── DESIGN.md                            # 完整协议设计文档 v1.2
+│       └── IMPLEMENTATION_PLAN.md               # 13 阶段实施计划 v1.2
 ├── luban-rds-sentinel/            # 哨兵模块
 │   └── src/main/java/.../sentinel/
 │       ├── SentinelManager.java   # 哨兵管理器
@@ -847,6 +847,12 @@ luban.rds.server.data-dir=./data
 | **节点状态恢复** | 节点启动时从 `nodes.conf` 加载节点列表、槽位分配与 config epoch，复用已有节点 ID；从恢复的 `ClusterConfig` 重建 `SlotManager` 槽位表 |
 | **主动建连** | 启动时主动 `MEET` 已知节点，避免全集群重启后节点成孤岛无法恢复 |
 | **版本兼容** | 解析 `nodes.conf` 时忽略 `fail` 标志，v1.0.0 ~ v1.0.3 已生成的配置文件可平滑升级 |
+
+### v1.0.5（开发中）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **luban-rds-mesh** | 3 节点 Raft 强一致集群模块：3 台机器替代 Redis Cluster 的 6 节点，强一致（多数派 ACK + 落盘）、已确认写入不丢；`CLUSTER SLOTS/NODES/INFO` + `MOVED` 兼容 JedisCluster/lettuce 零侵入；Leader Lease 线性一致读；chunked snapshot 防日志无界增长。详见 [luban-rds-mesh/README.md](luban-rds-mesh/README.md) |
 
 ### 开发中
 
