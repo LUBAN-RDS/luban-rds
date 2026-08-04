@@ -20,6 +20,8 @@ import com.janeluo.luban.rds.cluster.slot.SlotManager;
 import com.janeluo.luban.rds.cluster.slot.SlotUtils;
 import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.replication.MasterReplicationManager;
+import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
+import com.janeluo.luban.rds.mesh.client.MeshClientRedirector;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
@@ -218,6 +220,13 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     // 写暂停门控（P1-12，手动 failover 普通模式期间拒绝写）。volatile 保证写路径零开销读
     private volatile com.janeluo.luban.rds.cluster.lifecycle.WritePauseGate writePauseGate =
             new com.janeluo.luban.rds.cluster.lifecycle.NoOpWritePauseGate();
+
+    /**
+     * Mesh 模式客户端重定向器（阶段 6）。仅 mesh 模式下由装配层（阶段 12 MeshBootstrap）注入；
+     * 非 mesh 模式为 {@code null}，processCommand 不会产生 {@link MovedToLeaderException}，
+     * catch 块形同虚设，对 cluster / standalone 模式零影响。
+     */
+    private MeshClientRedirector meshClientRedirector;
     
     public RedisServerHandler(MemoryStore memoryStore, DefaultCommandHandler commandHandler, RedisProtocolParser protocolParser) {
         this(memoryStore, commandHandler, protocolParser, 0, false, null, null);
@@ -322,6 +331,20 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
     public void setWritePauseGate(com.janeluo.luban.rds.cluster.lifecycle.WritePauseGate gate) {
         this.writePauseGate = gate != null ? gate
                 : new com.janeluo.luban.rds.cluster.lifecycle.NoOpWritePauseGate();
+    }
+
+    /**
+     * 设置 Mesh 客户端重定向器（阶段 6）。
+     * <p>
+     * 仅 mesh 模式下由装配层注入（用于把 {@link MovedToLeaderException} 转成 MOVED/MESHDOWN 响应）。
+     * 非 mesh 模式不注入（保持 {@code null}），processCommand catch 块判断非空才处理，
+     * 不影响 cluster / standalone 模式。mesh gate 的真正接入（写命令走 MeshWriteGate）留阶段 12。
+     * </p>
+     *
+     * @param redirector Mesh 客户端重定向器，{@code null} 表示非 mesh 模式
+     */
+    public void setMeshClientRedirector(MeshClientRedirector redirector) {
+        this.meshClientRedirector = redirector;
     }
     
     @Override
@@ -843,6 +866,30 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 ctx.writeAndFlush(responseBuffer);
             } else if (responseBuffer != null) {
                 responseBuffer.release();
+            }
+        } catch (MovedToLeaderException e) {
+            // 阶段 6：mesh 非 Leader 重定向。专用 catch 必须在通用 catch (Exception) 之前，
+            // 否则会被吞成 "ERR Error handling command"。mesh gate 的真正接入（写命令走
+            // MeshWriteGate 抛本异常）留阶段 12；此处仅在 mesh 模式（redirector != null）时处理，
+            // 非 mesh 模式不会产生本异常，catch 形同虚设，对 cluster / standalone 零影响。
+            if (meshClientRedirector != null) {
+                String resp = meshClientRedirector.formatResponse(e);
+                ByteBuf redirectBuffer = protocolParser.serialize(resp);
+                if (redirectBuffer != null && redirectBuffer.isReadable()) {
+                    ctx.writeAndFlush(redirectBuffer);
+                } else if (redirectBuffer != null) {
+                    redirectBuffer.release();
+                }
+                return;
+            }
+            // redirector 未注入：退化为通用错误处理（保留向下兼容）
+            logger.error("MovedToLeaderException without meshClientRedirector configured", e);
+            Object errorResponse = "MOVED redirector not configured";
+            ByteBuf errorBuffer = protocolParser.serialize(errorResponse);
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
             }
         } catch (Exception e) {
             logger.error("Error handling command", e);

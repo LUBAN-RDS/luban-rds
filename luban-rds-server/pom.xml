@@ -49,6 +49,13 @@
             <artifactId>luban-rds-sentinel</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- mesh 集群模块：RedisServerHandler 阶段 6 catch MovedToLeaderException + 注入 MeshClientRedirector。
+             依赖方向：server → mesh（mesh 仅依赖 core/protocol/persistence/replication，不反向依赖 server，无循环）。 -->
+        <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-mesh</artifactId>
+            <version>${project.version}</version>
+        </dependency>
         <dependency>
             <groupId>io.netty</groupId>
             <artifactId>netty-all</artifactId>
