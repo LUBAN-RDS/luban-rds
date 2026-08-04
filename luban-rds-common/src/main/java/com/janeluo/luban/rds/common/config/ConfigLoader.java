@@ -366,6 +366,44 @@ public class ConfigLoader {
                         config.setLuaBlockedFunctions(value);
                         break;
 
+                    // Mesh 配置（阶段 12 / DESIGN §6）
+                    case "mesh-enabled":
+                        config.setMeshEnabled("yes".equalsIgnoreCase(value));
+                        break;
+                    case "mesh-peers":
+                        config.setMeshPeers(value);
+                        break;
+                    case "mesh-self-node-id":
+                        config.setMeshSelfNodeId(value);
+                        break;
+                    case "mesh-service-port":
+                        config.setMeshServicePort(Integer.parseInt(value));
+                        break;
+                    case "mesh-bus-port":
+                        config.setMeshBusPort(Integer.parseInt(value));
+                        break;
+                    case "mesh-election-timeout-min-ms":
+                        config.setMeshElectionTimeoutMinMs(Long.parseLong(value));
+                        break;
+                    case "mesh-election-timeout-max-ms":
+                        config.setMeshElectionTimeoutMaxMs(Long.parseLong(value));
+                        break;
+                    case "mesh-heartbeat-interval-ms":
+                        config.setMeshHeartbeatIntervalMs(Long.parseLong(value));
+                        break;
+                    case "mesh-lease-duration-ms":
+                        config.setMeshLeaseDurationMs(Long.parseLong(value));
+                        break;
+                    case "mesh-read-lease-wait-ms":
+                        config.setMeshReadLeaseWaitMs(Long.parseLong(value));
+                        break;
+                    case "mesh-read-consistency":
+                        config.setMeshReadConsistency(value);
+                        break;
+                    case "mesh-snapshot-log-threshold":
+                        config.setMeshSnapshotLogThreshold(Long.parseLong(value));
+                        break;
+
                     default:
                         logger.debug("未知配置项: {} = {}", key, value);
                         break;

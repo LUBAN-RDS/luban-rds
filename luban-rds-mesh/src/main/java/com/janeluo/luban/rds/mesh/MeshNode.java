@@ -95,6 +95,12 @@ public class MeshNode {
     /** 落盘 hook 占位（阶段 11 实现真实 fsync）；阶段 3 为 no-op。 */
     private volatile Runnable persistHook = () -> { };
 
+    /**
+     * 角色/Leader 变更监听器（阶段 12 装配注入）。可为 {@code null}（无监听器）。
+     * <p>在 {@code raftExecutor} 单线程上由 {@link #notifyRoleListener} 调用，故实现无需自身加锁。</p>
+     */
+    private volatile RoleChangeListener roleListener;
+
     // ==================== 阶段 4：日志复制与 apply ====================
 
     /**
@@ -240,6 +246,53 @@ public class MeshNode {
     /** 注入落盘 hook（阶段 11 替换为真实 fsync）。 */
     public void setPersistHook(Runnable hook) {
         this.persistHook = hook == null ? () -> { } : hook;
+    }
+
+    /**
+     * 取当前落盘 hook（阶段 12 装配用，供 {@link com.janeluo.luban.rds.mesh.replication.SnapshotManager}
+     * 复用同一 fsync 路径）。
+     */
+    public Runnable getPersistHookRef() {
+        return persistHook;
+    }
+
+    /**
+     * 注入角色/Leader 变更监听器（阶段 12 装配注入）。
+     * <p>在 {@code raftExecutor} 单线程上回调，故实现无需自身加锁。传 {@code null} 清除监听器。</p>
+     *
+     * @param listener 监听器；{@code null} 清除
+     */
+    public void setRoleChangeListener(RoleChangeListener listener) {
+        this.roleListener = listener;
+    }
+
+    /**
+     * 通知监听器角色/Leader 变更（在 raftExecutor 上调用）。
+     * <p>异常仅记录日志——监听器异常不应中断 Raft 状态机转换。</p>
+     */
+    private void notifyRoleListener() {
+        RoleChangeListener l = roleListener;
+        if (l == null) {
+            return;
+        }
+        try {
+            l.onRoleChanged(state.role, state.leaderId);
+        } catch (Exception e) {
+            logger.warn("roleListener 回调异常 role={} leader={}", state.role, state.leaderId, e);
+        }
+    }
+
+    /**
+     * 角色/Leader 变更监听器接口（阶段 12）。
+     * <p>回调在 {@code raftExecutor} 单线程上执行，实现无需自身加锁。
+     * 典型用法：{@code MeshLifecycleListener} 收到 becomeLeader/becomeFollower 时刷新 leader 缓存。</p>
+     */
+    public interface RoleChangeListener {
+        /**
+         * @param role     当前角色（FOLLOWER/CANDIDATE/LEADER）
+         * @param leaderId 当前已知 Leader nodeId；无 Leader 时为 {@code null}
+         */
+        void onRoleChanged(com.janeluo.luban.rds.mesh.core.MeshRole role, String leaderId);
     }
 
     /**
@@ -491,6 +544,8 @@ public class MeshNode {
         // 启动心跳 + 首轮空 AppendEntries（建立权威 + 续租）
         startHeartbeat();
         broadcastHeartbeat();
+        // 阶段 12：通知角色监听器（Leader 变更）
+        notifyRoleListener();
     }
 
     private void cancelCurrentCollector() {
@@ -782,6 +837,8 @@ public class MeshNode {
         }
         failPendingProposalsOnLeadershipLoss();
         logger.info("转为 FOLLOWER: term={}, leader={}", t.newTerm, t.newLeaderId);
+        // 阶段 12：通知角色监听器（失去 Leader / Leader 变更）
+        notifyRoleListener();
     }
 
     /**

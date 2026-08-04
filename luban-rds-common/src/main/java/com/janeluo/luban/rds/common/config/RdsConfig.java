@@ -277,6 +277,50 @@ public class RdsConfig {
      */
     private boolean clusterAllowReadsWhenDown = false;
 
+    // ==================== Mesh 配置（阶段 12）====================
+    // DESIGN §6 配置入口走 luban-rds.conf（mesh-enabled yes、mesh-peers 等）。
+    // 与 cluster 互斥：同一进程只能启用 cluster 或 mesh 其一（启动时校验）。
+
+    /** 是否启用 mesh 模式（Raft 强一致）。与 clusterEnabled 互斥。 */
+    private boolean meshEnabled = false;
+
+    /**
+     * mesh 集群 peers 列表。格式（逗号分隔）：
+     * {@code nodeId1@host1:busPort1,nodeId2@host2:busPort2,nodeId3@host3:busPort3}
+     * <p>本节点 selfNodeId 由 mesh-self-node-id 指定（未指定时按 peers 顺序取第一个）。</p>
+     */
+    private String meshPeers = "";
+
+    /** 本节点 nodeId（40 字符十六进制）；未指定时由 MeshBootstrap 按 peers 顺序推断。 */
+    private String meshSelfNodeId = "";
+
+    /** 本节点 service 端口（对外服务；默认 = port，可不显式配置）。 */
+    private int meshServicePort = 0;
+
+    /** mesh 总线端口（节点间 Raft RPC）；未配置时按 peers 列表中本节点条目取。 */
+    private int meshBusPort = 0;
+
+    /** 选举超时区间下限（毫秒），默认 150。 */
+    private long meshElectionTimeoutMinMs = 150;
+
+    /** 选举超时区间上限（毫秒），默认 300。 */
+    private long meshElectionTimeoutMaxMs = 300;
+
+    /** Leader 心跳间隔（毫秒），默认 100。 */
+    private long meshHeartbeatIntervalMs = 100;
+
+    /** 租约时长（毫秒），默认 600。 */
+    private long meshLeaseDurationMs = 600;
+
+    /** lease 模式租约失效等待上限（毫秒），默认 1000。 */
+    private long meshReadLeaseWaitMs = 1000;
+
+    /** 读一致性模式：LEASE（默认）或 READ_INDEX。 */
+    private String meshReadConsistency = "LEASE";
+
+    /** 周期快照阈值（log 条目数），默认 100000。 */
+    private long meshSnapshotLogThreshold = 100000;
+
     // ==================== 主从复制配置 ====================
 
     /**
@@ -769,6 +813,104 @@ public class RdsConfig {
 
     public void setClusterAllowReadsWhenDown(boolean clusterAllowReadsWhenDown) {
         this.clusterAllowReadsWhenDown = clusterAllowReadsWhenDown;
+    }
+
+    // ==================== Mesh 配置 getter/setter（阶段 12）====================
+
+    public boolean isMeshEnabled() {
+        return meshEnabled;
+    }
+
+    public void setMeshEnabled(boolean meshEnabled) {
+        this.meshEnabled = meshEnabled;
+    }
+
+    public String getMeshPeers() {
+        return meshPeers;
+    }
+
+    public void setMeshPeers(String meshPeers) {
+        this.meshPeers = meshPeers;
+    }
+
+    public String getMeshSelfNodeId() {
+        return meshSelfNodeId;
+    }
+
+    public void setMeshSelfNodeId(String meshSelfNodeId) {
+        this.meshSelfNodeId = meshSelfNodeId;
+    }
+
+    public int getMeshServicePort() {
+        return meshServicePort;
+    }
+
+    public void setMeshServicePort(int meshServicePort) {
+        this.meshServicePort = meshServicePort;
+    }
+
+    public int getMeshBusPort() {
+        return meshBusPort;
+    }
+
+    public void setMeshBusPort(int meshBusPort) {
+        this.meshBusPort = meshBusPort;
+    }
+
+    public long getMeshElectionTimeoutMinMs() {
+        return meshElectionTimeoutMinMs;
+    }
+
+    public void setMeshElectionTimeoutMinMs(long meshElectionTimeoutMinMs) {
+        this.meshElectionTimeoutMinMs = meshElectionTimeoutMinMs;
+    }
+
+    public long getMeshElectionTimeoutMaxMs() {
+        return meshElectionTimeoutMaxMs;
+    }
+
+    public void setMeshElectionTimeoutMaxMs(long meshElectionTimeoutMaxMs) {
+        this.meshElectionTimeoutMaxMs = meshElectionTimeoutMaxMs;
+    }
+
+    public long getMeshHeartbeatIntervalMs() {
+        return meshHeartbeatIntervalMs;
+    }
+
+    public void setMeshHeartbeatIntervalMs(long meshHeartbeatIntervalMs) {
+        this.meshHeartbeatIntervalMs = meshHeartbeatIntervalMs;
+    }
+
+    public long getMeshLeaseDurationMs() {
+        return meshLeaseDurationMs;
+    }
+
+    public void setMeshLeaseDurationMs(long meshLeaseDurationMs) {
+        this.meshLeaseDurationMs = meshLeaseDurationMs;
+    }
+
+    public long getMeshReadLeaseWaitMs() {
+        return meshReadLeaseWaitMs;
+    }
+
+    public void setMeshReadLeaseWaitMs(long meshReadLeaseWaitMs) {
+        this.meshReadLeaseWaitMs = meshReadLeaseWaitMs;
+    }
+
+    public String getMeshReadConsistency() {
+        return meshReadConsistency;
+    }
+
+    public void setMeshReadConsistency(String meshReadConsistency) {
+        this.meshReadConsistency = meshReadConsistency;
+    }
+
+    public long getMeshSnapshotLogThreshold() {
+        return meshSnapshotLogThreshold;
+    }
+
+    public void setMeshSnapshotLogThreshold(long meshSnapshotLogThreshold) {
+        this.meshSnapshotLogThreshold = meshSnapshotLogThreshold;
     }
 
     public String getReplicaof() {

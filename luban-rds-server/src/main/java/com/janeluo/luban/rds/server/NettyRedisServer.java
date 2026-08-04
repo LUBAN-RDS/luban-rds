@@ -75,7 +75,9 @@ public class NettyRedisServer implements RedisServer {
     
     private final int port;
     private final RdsConfig config;
-    private final MemoryStore memoryStore;
+    // 阶段 12：去 final——mesh 模式下与 server 共享同一 rawStore（apply 唯一目标 + 读路径直接读），
+    // 不需要在构造时重新分配，但移除 final 以保持与装配层（MeshBootstrap 接收此引用）语义一致。
+    private MemoryStore memoryStore;
     private final DefaultCommandHandler commandHandler;
     private final RedisProtocolParser protocolParser;
     private final PersistService persistService;
@@ -148,7 +150,20 @@ public class NettyRedisServer implements RedisServer {
      * </p>
      */
     private ReplicationCoordinator replicationCoordinator;
-    
+
+    // ==================== Mesh 相关组件（阶段 12）====================
+
+    /**
+     * 是否启用 mesh 模式（Raft 强一致）。与 {@link #clusterEnabled} 互斥。
+     */
+    private boolean meshEnabled;
+
+    /**
+     * Mesh 装配产物（meshNode / writeGate / redirector / clusterCommands / busClient / busServer）。
+     * mesh 模式下由 {@link #initMeshMode()} 装配；非 mesh 模式为 {@code null}。
+     */
+    private com.janeluo.luban.rds.mesh.lifecycle.MeshAssembly meshAssembly;
+
     // ==================== 哨兵相关组件 ====================
     
     /**
@@ -278,9 +293,19 @@ public class NettyRedisServer implements RedisServer {
         
         // 初始化集群模式
         if (config.isClusterEnabled()) {
+            // 阶段 12：cluster 与 mesh 互斥（DESIGN §8：同一进程只能启用其一）。
+            if (config.isMeshEnabled()) {
+                throw new IllegalStateException(
+                        "cluster-enabled 与 mesh-enabled 不能同时启用（DESIGN §8 互斥）");
+            }
             initClusterMode();
         }
-        
+
+        // 初始化 mesh 模式（阶段 12 / DESIGN §6）
+        if (config.isMeshEnabled()) {
+            initMeshMode();
+        }
+
         // 初始化哨兵模式
         if (config.isSentinelEnabled()) {
             initSentinelMode();
@@ -481,8 +506,38 @@ public class NettyRedisServer implements RedisServer {
         }
         this.clusterBusServer = new ClusterBusServer(port, listenBusPort, clusterConfig, gossipProtocol);
         
-        logger.info("集群模式初始化完成: nodeId={}, port={}, busPort={}", 
+        logger.info("集群模式初始化完成: nodeId={}, port={}, busPort={}",
                 nodeId, port, clusterBusServer.getPort());
+    }
+
+    /**
+     * 初始化 mesh 模式（阶段 12 / DESIGN §6）。
+     * <p>
+     * 仿 {@link #initClusterMode()}：通过 {@link com.janeluo.luban.rds.mesh.lifecycle.MeshBootstrap}
+     * 按 §5.5 启动顺序装配全部 mesh 组件（加载 raft-nodes.conf + dump.rdb + logTail 重放），
+     * 返回 {@link com.janeluo.luban.rds.mesh.lifecycle.MeshAssembly}。
+     * </p>
+     * <p>
+     * <b>注意</b>：本方法只<b>装配</b>组件，不启动 MeshNode / busServer / busClient——这些在
+     * {@link #start()} 中网络层就绪后统一驱动（与 clusterBusServer.start / gossipProtocol.start
+     * 同位置），避免构造函数中启动长连接的时序问题。
+     * </p>
+     * <p>
+     * mesh 与 server 共享同一 {@link #memoryStore}（apply 唯一目标 + 读路径直接读，DESIGN §7.2），
+     * 与 {@link #commandHandler}（apply 与读路径复用同一个 handler）。
+     * </p>
+     */
+    private void initMeshMode() {
+        logger.info("初始化 mesh 模式...");
+        this.meshEnabled = true;
+
+        com.janeluo.luban.rds.mesh.lifecycle.MeshBootstrap bootstrap =
+                new com.janeluo.luban.rds.mesh.lifecycle.MeshBootstrap();
+        this.meshAssembly = bootstrap.bootstrap(config, memoryStore, commandHandler);
+
+        logger.info("mesh 模式初始化完成: nodeId={}, peers={}",
+                com.janeluo.luban.rds.mesh.lifecycle.MeshAssembly.class.getSimpleName(),
+                meshAssembly.getClientRedirector() != null ? "ready" : "n/a");
     }
     
     /**
@@ -874,6 +929,14 @@ public class NettyRedisServer implements RedisServer {
                     // 注入持久化服务：用于在命令执行后将写命令的原始 RESP 帧写入 AOF。
                     // 非 AOF 模式下 recordCommand 为 default 空实现（no-op）。
                     handler.setPersistService(persistService);
+                    // 阶段 12：mesh 模式注入 mesh 组件（writeGate / redirector / clusterCommands / meshEnabled）。
+                    // 非 mesh 模式 meshAssembly=null，全部不注入，RedisServerHandler 行为与既有完全一致。
+                    if (meshEnabled && meshAssembly != null) {
+                        handler.setMeshEnabled(true);
+                        handler.setMeshWriteGate(meshAssembly.getWriteGate());
+                        handler.setMeshClientRedirector(meshAssembly.getClientRedirector());
+                        handler.setMeshClusterCommands(meshAssembly.getClusterCommands());
+                    }
                      pipeline.addLast(businessGroup, "handler", handler);
                  }
              });
@@ -893,7 +956,12 @@ public class NettyRedisServer implements RedisServer {
                 gossipProtocol.start();
                 logger.info("Gossip 协议启动成功");
             }
-            
+
+            // 阶段 12：启动 mesh 组件（DESIGN §5.5 步骤 5：busServer → busClient → MeshNode）
+            if (meshEnabled && meshAssembly != null) {
+                startMeshComponents();
+            }
+
             // Start periodic persistence task
             startPeriodicPersistTask();
             
@@ -908,6 +976,116 @@ public class NettyRedisServer implements RedisServer {
         }
     }
     
+    /**
+     * 阶段 12：启动 mesh 组件（DESIGN §5.5 步骤 5：busServer → busClient → MeshNode.start）。
+     * <p>启动顺序：先 busServer（绑定总线端口）→ busClient（连接 peer）→ MeshNode.start（ElectionTimer）。
+     * 这样 MeshNode 启动选举后，总线通路已就绪，AppendEntries/RequestVote 能正常收发。</p>
+     */
+    private void startMeshComponents() {
+        try {
+            // 1. 启动 busServer（绑定总线端口）
+            meshAssembly.getBusServer().start();
+            logger.info("mesh 总线服务器启动成功，端口: {}", meshAssembly.getBusServer().getBusPort());
+
+            // 2. 启动 busClient（连接 peers）
+            //    从 config.mesh-peers 解析 peer 端点映射（MeshBusClient.start 接收 nodeId→PeerEndpoint）
+            java.util.Map<String, com.janeluo.luban.rds.mesh.bus.MeshBusClient.PeerEndpoint> peers =
+                    resolveMeshPeerEndpoints();
+            meshAssembly.getBusClient().start(peers);
+            logger.info("mesh 总线客户端启动成功，已连接 peers: {}",
+                    meshAssembly.getBusClient().getConnectedCount());
+
+            // 3. 启动 MeshNode（ElectionTimer + 心跳；FOLLOWER 起步，选举超时后竞选）
+            meshAssembly.getMeshNode().start();
+            logger.info("mesh MeshNode 启动成功，nodeId={}",
+                    meshAssembly.getMeshNode().getState().currentTerm);
+        } catch (Exception e) {
+            logger.error("mesh 组件启动失败", e);
+            throw new RuntimeException("mesh 组件启动失败", e);
+        }
+    }
+
+    /**
+     * 从 config.mesh-peers 解析 peer 端点映射（nodeId → PeerEndpoint），过滤自身。
+     * <p>复用 {@link com.janeluo.luban.rds.mesh.lifecycle.MeshBootstrap} 的解析逻辑，
+     * 这里仅提取 nodeId→(host,busPort) 给 {@link com.janeluo.luban.rds.mesh.bus.MeshBusClient#start}。</p>
+     */
+    private java.util.Map<String, com.janeluo.luban.rds.mesh.bus.MeshBusClient.PeerEndpoint>
+            resolveMeshPeerEndpoints() {
+        java.util.Map<String, com.janeluo.luban.rds.mesh.bus.MeshBusClient.PeerEndpoint> peers =
+                new java.util.LinkedHashMap<>();
+        String peersRaw = config.getMeshPeers();
+        if (peersRaw == null || peersRaw.isEmpty()) {
+            return peers;
+        }
+        String selfNodeId = config.getMeshSelfNodeId();
+        // selfNodeId 未配置时取首个（与 MeshBootstrap 一致）
+        String[] entries = peersRaw.split(",");
+        int idx = 0;
+        String inferredSelf = null;
+        for (String entry : entries) {
+            String e = entry.trim();
+            if (e.isEmpty()) {
+                continue;
+            }
+            int atIdx = e.indexOf('@');
+            if (atIdx <= 0) {
+                continue;
+            }
+            String nodeId = e.substring(0, atIdx).trim();
+            String hostPort = e.substring(atIdx + 1).trim();
+            int colonIdx = hostPort.lastIndexOf(':');
+            if (colonIdx <= 0) {
+                continue;
+            }
+            String host = hostPort.substring(0, colonIdx).trim();
+            int busPort;
+            try {
+                busPort = Integer.parseInt(hostPort.substring(colonIdx + 1).trim());
+            } catch (NumberFormatException nfe) {
+                continue;
+            }
+            if (idx == 0 && (selfNodeId == null || selfNodeId.isEmpty())) {
+                inferredSelf = nodeId;
+            }
+            idx++;
+            // 过滤自身（MeshBusClient.start 内部也会过滤，这里提前避免无意义条目）
+            String effectiveSelf = (selfNodeId != null && !selfNodeId.isEmpty()) ? selfNodeId : inferredSelf;
+            if (nodeId.equals(effectiveSelf)) {
+                continue;
+            }
+            peers.put(nodeId, new com.janeluo.luban.rds.mesh.bus.MeshBusClient.PeerEndpoint(host, busPort));
+        }
+        return peers;
+    }
+
+    /**
+     * 阶段 12：停止 mesh 组件（反向顺序：MeshNode → busClient → busServer）。
+     */
+    private void stopMeshComponents() {
+        if (meshAssembly == null) {
+            return;
+        }
+        try {
+            meshAssembly.getMeshNode().stop();
+            logger.info("mesh MeshNode 已停止");
+        } catch (Exception e) {
+            logger.warn("停止 mesh MeshNode 失败", e);
+        }
+        try {
+            meshAssembly.getBusClient().close();
+            logger.info("mesh 总线客户端已关闭");
+        } catch (Exception e) {
+            logger.warn("关闭 mesh 总线客户端失败", e);
+        }
+        try {
+            meshAssembly.getBusServer().stop();
+            logger.info("mesh 总线服务器已停止");
+        } catch (Exception e) {
+            logger.warn("停止 mesh 总线服务器失败", e);
+        }
+    }
+
     /**
      * Configure memory leak detection level based on config
      */
@@ -973,15 +1151,23 @@ public class NettyRedisServer implements RedisServer {
             if (replicationCoordinator != null) {
                 replicationCoordinator.shutdown();
             }
-            
+
+            // 阶段 12：停止 mesh 组件（MeshNode → busClient → busServer，反向顺序）。
+            // 放在 persistService.persist 之前，避免 raftExecutor 与持久化并发写内存存储。
+            if (meshEnabled) {
+                stopMeshComponents();
+            }
+
             // 停止定期持久化任务
             persistExecutor.shutdown();
             if (!persistExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
                 persistExecutor.shutdownNow();
             }
             
-            // 持久化数据
-            persistService.persist(memoryStore);
+            // 持久化数据（mesh 模式跳过：dump.rdb 由 SnapshotManager 管理，DESIGN D3）
+            if (!meshEnabled) {
+                persistService.persist(memoryStore);
+            }
             
             // 关闭持久化服务
             persistService.close();
@@ -1015,8 +1201,13 @@ public class NettyRedisServer implements RedisServer {
             while (running) {
                 try {
                     Thread.sleep(saveIntervalMs);
-                    persistService.persist(memoryStore);
-                    logger.debug("定期持久化完成");
+                    // 阶段 12：mesh 模式禁用 server 定期 RDB save（DESIGN D3）——
+                    // dump.rdb 唯一写者 = SnapshotManager（按日志阈值触发周期快照）。
+                    // 两路写入会互相覆盖 dump.rdb，破坏 §5.5「dump.rdb 索引 = lastIncludedIndex」校验。
+                    if (!meshEnabled) {
+                        persistService.persist(memoryStore);
+                        logger.debug("定期持久化完成");
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
@@ -1104,11 +1295,29 @@ public class NettyRedisServer implements RedisServer {
     
     /**
      * 检查是否启用集群模式
-     * 
+     *
      * @return 是否启用集群模式
      */
     public boolean isClusterEnabled() {
         return clusterEnabled;
+    }
+
+    /**
+     * 检查是否启用 mesh 模式（阶段 12）。
+     *
+     * @return 是否启用 mesh 模式
+     */
+    public boolean isMeshEnabled() {
+        return meshEnabled;
+    }
+
+    /**
+     * 获取 mesh 装配产物（阶段 12）。
+     *
+     * @return mesh 装配产物，未启用 mesh 模式时返回 {@code null}
+     */
+    public com.janeluo.luban.rds.mesh.lifecycle.MeshAssembly getMeshAssembly() {
+        return meshAssembly;
     }
     
     /**

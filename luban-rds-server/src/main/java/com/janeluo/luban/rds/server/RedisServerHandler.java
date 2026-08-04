@@ -22,6 +22,8 @@ import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.replication.MasterReplicationManager;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
 import com.janeluo.luban.rds.mesh.client.MeshClientRedirector;
+import com.janeluo.luban.rds.mesh.client.MeshClusterCommands;
+import com.janeluo.luban.rds.mesh.gateway.MeshWriteGate;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
@@ -227,6 +229,26 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
      * catch 块形同虚设，对 cluster / standalone 模式零影响。
      */
     private MeshClientRedirector meshClientRedirector;
+
+    /**
+     * Mesh 写/读门面（阶段 12 / DESIGN §7.2）。
+     * <p>仅 mesh 模式下由装配层注入。mesh-enabled 时写命令走 {@link MeshWriteGate#write}（Raft propose），
+     * 读命令走 {@link MeshWriteGate#read}（租约校验 + 本地读）。非 mesh 模式为 {@code null}。</p>
+     */
+    private MeshWriteGate meshWriteGate;
+
+    /**
+     * Mesh CLUSTER 命令响应生成器（阶段 12 / DESIGN §5.6）。
+     * <p>仅 mesh 模式下由装配层注入。mesh-enabled 时 CLUSTER SLOTS/NODES/INFO 由其接管
+     * （全 16384 slot → Leader）。非 mesh 模式为 {@code null}，CLUSTER 走原 cluster 逻辑。</p>
+     */
+    private MeshClusterCommands meshClusterCommands;
+
+    /**
+     * 是否启用 mesh 模式（阶段 12）。注入后，processCommand 走 mesh gate 分支。
+     * <p>默认 {@code false}（非 mesh 模式），由装配层在 mesh-enabled 时设为 {@code true}。</p>
+     */
+    private boolean meshEnabled;
     
     public RedisServerHandler(MemoryStore memoryStore, DefaultCommandHandler commandHandler, RedisProtocolParser protocolParser) {
         this(memoryStore, commandHandler, protocolParser, 0, false, null, null);
@@ -345,6 +367,37 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
      */
     public void setMeshClientRedirector(MeshClientRedirector redirector) {
         this.meshClientRedirector = redirector;
+    }
+
+    /**
+     * 设置 Mesh 写/读门面（阶段 12）。
+     * <p>仅 mesh 模式下由装配层注入。mesh-enabled 时写命令走 Raft propose、读命令走租约校验+本地读。</p>
+     *
+     * @param gate Mesh 写/读门面，{@code null} 表示非 mesh 模式
+     */
+    public void setMeshWriteGate(MeshWriteGate gate) {
+        this.meshWriteGate = gate;
+    }
+
+    /**
+     * 设置 Mesh CLUSTER 命令响应生成器（阶段 12）。
+     * <p>仅 mesh 模式下由装配层注入。mesh-enabled 时 CLUSTER SLOTS/NODES/INFO 由其接管。</p>
+     *
+     * @param commands Mesh CLUSTER 命令响应生成器，{@code null} 表示非 mesh 模式
+     */
+    public void setMeshClusterCommands(MeshClusterCommands commands) {
+        this.meshClusterCommands = commands;
+    }
+
+    /**
+     * 设置 mesh 模式开关（阶段 12）。
+     * <p>注入 {@code true} 后，processCommand 走 mesh gate 分支（写 propose / 读 gate.read /
+     * CLUSTER 接管 / AOF/传播跳过 / RDB save gate）。默认 {@code false}（非 mesh 模式）。</p>
+     *
+     * @param meshEnabled 是否启用 mesh 模式
+     */
+    public void setMeshEnabled(boolean meshEnabled) {
+        this.meshEnabled = meshEnabled;
     }
     
     @Override
@@ -661,6 +714,16 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     responseBuffer.release();
                 }
                 return;
+            } else if ("CLUSTER".equals(commandName) && meshEnabled && meshClusterCommands != null) {
+                // 阶段 12：mesh 模式 CLUSTER 命令接管（DESIGN §5.6 / §6.4）。
+                // mesh 无分片：CLUSTER SLOTS/NODES/INFO 由 MeshClusterCommands 生成（全 16384 slot → Leader）。
+                // 必须在 cluster 模式 CLUSTER 分支之前判定，避免 cluster 逻辑误处理。
+                logger.debug("Handling CLUSTER command (mesh mode)");
+                byte[] resp = handleMeshCluster(args);
+                if (resp != null) {
+                    ctx.writeAndFlush(Unpooled.wrappedBuffer(resp));
+                }
+                return;
             } else if ("CLUSTER".equals(commandName) && clusterEnabled) {
                 // 处理 CLUSTER 命令
                 logger.debug("Handling CLUSTER command");
@@ -809,6 +872,44 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 }
             }
 
+            // ==================== 阶段 12：mesh 写/读 gate 接入（DESIGN §6.1/§7.2）====================
+            // mesh 模式下，写命令走 Raft propose（MeshWriteGate.write），读命令走租约校验+本地读
+            // （MeshWriteGate.read）。命令执行（commandHandler.handle）与 AOF/复制传播在 gate 内完成，
+            // 故本分支命中后直接 return，不进入下方 :884 的常规 handle + :891 的 AOF/传播段。
+            // 连接/控制命令（PING/AUTH/SELECT/HELLO/INFO/CONFIG/CLIENT/COMMAND/QUIT 等）不走 gate，
+            // 由下方常规路径本地处理（不修改 keyspace，无需复制）。
+            // 非 mesh 模式（meshEnabled=false）本块整体跳过，对 cluster / standalone 零影响。
+
+            // mesh 模式 RDB save gate（DESIGN D3 / §6.6）：BGSAVE/SAVE 在 mesh 模式禁用，
+            // dump.rdb 唯一写者 = SnapshotManager。必须在 mesh gate 之前拦截，避免被当写命令走 Raft。
+            if (meshRdbSaveGate(ctx, commandName)) {
+                return;
+            }
+
+            if (meshEnabled && meshWriteGate != null && shouldUseMeshGate(commandName)) {
+                // BLOCK 类命令禁用（DESIGN §9 / 决策 17）：BLPOP/BRPOP/BZPOPMIN/BZPOPMAX / XREAD BLOCK
+                if (MeshWriteGate.isBlockCommand(commandName, args)) {
+                    byte[] err = MeshWriteGate.blockCommandError();
+                    ctx.writeAndFlush(Unpooled.wrappedBuffer(err));
+                    return;
+                }
+                if (MeshWriteGate.isWriteCommand(commandName)) {
+                    // 写命令：走 Raft propose（阻塞至 commit+apply），返回 apply 产生的响应字节。
+                    // 事务 EXEC 已在前置分支处理；此处 rawRespFrame 为单条写命令帧。
+                    // gate.write 内部抛 MovedToLeaderException → 下方专用 catch 生成 MOVED/MESHDOWN。
+                    byte[] resp = meshWriteGate.write(rawRespFrame, currentDatabase, null);
+                    ctx.writeAndFlush(Unpooled.wrappedBuffer(resp));
+                } else {
+                    // 读命令：走 gate.read（租约校验 + 本地读），返回序列化响应字节。
+                    // 非 Leader 时抛 MovedToLeaderException → 下方专用 catch。
+                    byte[] resp = meshWriteGate.read(currentDatabase, args);
+                    ctx.writeAndFlush(Unpooled.wrappedBuffer(resp));
+                }
+                // mesh 模式：AOF/复制传播整体跳过（DESIGN §5.1：Raft log 即 WAL，AOF 退役；
+                // apply 已在 gate 内完成，不重复 handle）。
+                return;
+            }
+
             // P1-12：写暂停门控。手动 failover 普通模式期间 master 已暂停写，
             // 此期间拒绝写命令（非只读），避免接管时丢失未暂停的写入。
             // 无暂停时 writePauseGate.isPaused() 为单次 volatile 读，零开销。
@@ -901,6 +1002,114 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 errorBuffer.release();
             }
         }
+    }
+
+    // ==================== 阶段 12：mesh 辅助方法 ====================
+
+    /**
+     * 判定命令是否应走 mesh gate（写 propose / 读租约校验）。大小写不敏感。
+     * <p>
+     * 连接/控制类命令（不修改 keyspace 数据、不需复制）在 mesh 模式下走本地常规路径，
+     * 不经 gate。其余 keyspace 命令（GET/SET/INCR/DEL/...）一律走 gate（写 propose、读 gate.read）。
+     * </p>
+     * <p><b>关键</b>：CLUSTER/MULTI/EXEC/SUBSCRIBE 等已在 processCommand 前置分支处理，
+     * 不会到达本方法。BGSAVE/SAVE 由 {@link #meshRdbSaveGate} 单独拦截（在 shouldUseMeshGate 后判定）。</p>
+     *
+     * @param commandName 命令名
+     * @return true=走 mesh gate；false=本地处理（不经 gate）
+     */
+    private boolean shouldUseMeshGate(String commandName) {
+        if (commandName == null || commandName.isEmpty()) {
+            return true; // 未知命令默认走 gate（保守，与 isWriteCommand 一致）
+        }
+        String upper = commandName.toUpperCase();
+        switch (upper) {
+            // 连接类（不修改 keyspace）
+            case "PING":
+            case "ECHO":
+            case "AUTH":
+            case "HELLO":
+            case "RESET":
+            case "SELECT":
+            case "QUIT":
+                // 控制类（观测/配置，不修改 keyspace）
+            case "INFO":
+            case "CONFIG":
+            case "CLIENT":
+            case "COMMAND":
+            case "TIME":
+            case "ROLE":
+            case "LASTSAVE":
+            case "SLOWLOG":
+            case "MEMORY":
+            case "WAIT":
+            case "acl":
+                // mesh 模式禁用 server 复制/迁移命令（PSYNC/SYNC/REPLCONF/REPLICAOF/SLAVEOF），
+                // 由 mesh Raft 复制接管；放本地路径返回错误，避免经 gate。
+            case "PSYNC":
+            case "SYNC":
+            case "REPLCONF":
+            case "REPLICAOF":
+            case "SLAVEOF":
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    /**
+     * 处理 mesh 模式 CLUSTER 命令（DESIGN §5.6 / 阶段 12）。
+     * <p>根据 subcommand 分派到 {@link MeshClusterCommands} 对应方法：
+     * SLOTS/NODES/INFO，其余子命令返回错误。</p>
+     *
+     * @param args 完整参数（含命令名 CLUSTER），{@code args[1]} 为子命令
+     * @return RESP 响应字节；{@code null} 表示无响应
+     */
+    private byte[] handleMeshCluster(String[] args) {
+        if (meshClusterCommands == null) {
+            return "-ERR mesh cluster command not configured\r\n"
+                    .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        }
+        if (args == null || args.length < 2) {
+            return "-ERR wrong number of arguments for 'cluster' command\r\n"
+                    .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        }
+        String sub = args[1].trim().toUpperCase();
+        switch (sub) {
+            case "SLOTS":
+                return meshClusterCommands.clusterSlots();
+            case "NODES":
+                return meshClusterCommands.clusterNodes();
+            case "INFO":
+                return meshClusterCommands.clusterInfo();
+            default:
+                return ("-ERR Unknown CLUSTER subcommand or unsupported in mesh mode: " + sub + "\r\n")
+                        .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+        }
+    }
+
+    /**
+     * mesh 模式 RDB save gate（DESIGN D3 / §6.6）。
+     * <p>mesh 模式禁用 server 原 RDB save——dump.rdb 唯一写者 = SnapshotManager。
+     * BGSAVE/SAVE 命令在 mesh 模式下返回错误（不执行）。调用方在命令执行前调用本方法判定。</p>
+     *
+     * @param ctx     Channel 上下文（写回错误响应）
+     * @param commandName 命令名
+     * @return true=该命令在 mesh 模式应被拒绝（已写回错误响应）；false=放行
+     */
+    private boolean meshRdbSaveGate(ChannelHandlerContext ctx, String commandName) {
+        if (!meshEnabled || commandName == null) {
+            return false;
+        }
+        String upper = commandName.toUpperCase();
+        if ("BGSAVE".equals(upper) || "SAVE".equals(upper)) {
+            byte[] err = ("-ERR RDB save is disabled in mesh mode "
+                    + "(dump.rdb managed by SnapshotManager, DESIGN D3)\r\n")
+                    .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+            ctx.writeAndFlush(Unpooled.wrappedBuffer(err));
+            return true;
+        }
+        return false;
     }
     
 
