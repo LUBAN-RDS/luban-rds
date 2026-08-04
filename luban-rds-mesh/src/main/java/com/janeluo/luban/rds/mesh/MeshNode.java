@@ -243,6 +243,24 @@ public class MeshNode {
     }
 
     /**
+     * 阶段 11：安全触发持久化 hook（term/votedFor/log/lastIncluded 变化时机）。
+     * <p>persistHook 实际实现由装配层注入（调 {@code MeshConfigPersister.save}）。
+     * 异常仅记录日志——persistHook 实现内部应自行决定 fail-fast 策略（如 propose 路径
+     * 已在 {@code doPropose} 内 catch 并 completeExceptionally）。</p>
+     * <p>本方法用于 term/votedFor 变化的「软」持久化点：落盘失败不应中断角色转换
+     * （节点仍可继续运行，最坏情况下崩溃后 term 不一致由 Raft 任期裁决自愈）。</p>
+     *
+     * @param reason 持久化原因（日志用）
+     */
+    private void persistStateSafe(String reason) {
+        try {
+            persistHook.run();
+        } catch (Exception e) {
+            logger.warn("persistStateSafe: 持久化失败 reason={}, term={}", reason, state.currentTerm, e);
+        }
+    }
+
+    /**
      * 注入快照管理器（阶段 10）。注入后入站 INSTALL_SNAPSHOT 走 chunked 接收路径，
      * Leader 侧可调 {@link SnapshotManager#sendSnapshot} / {@link SnapshotManager#takePeriodicSnapshotIfNeeded}。
      * 未注入时收到 INSTALL_SNAPSHOT 静默忽略。
@@ -433,6 +451,9 @@ public class MeshNode {
         Transition t = stateMachine.becomeCandidate(state, nodeId);
         logger.info("转为 CANDIDATE: term={}, lastLog={}/{}", t.newTerm, t.lastLogIndex, t.lastLogTerm);
 
+        // 阶段 11：becomeCandidate 自增了 term、设了 votedFor=self → 持久化（fsync 在确认路径）
+        persistStateSafe("becomeCandidate");
+
         // 重置 election timer（candidate 状态下继续计时，超时则下一轮选举）
         electionTimer.reset();
 
@@ -610,9 +631,16 @@ public class MeshNode {
         // 若发生降级（term > currentTerm），应用副作用
         if (decision.transition.kind == Transition.Kind.TO_FOLLOWER) {
             applyFollowerSideEffects(decision.transition);
+            // 降级时 term 已变化 → 持久化（阶段 11 fsync 在确认路径）
+            persistStateSafe("decideRequestVote-term-up");
         }
         if (decision.resetElectionTimer) {
             electionTimer.reset();
+        }
+        // 阶段 11：正式投票（非 PreVote）且 granted → votedFor 已设置 → 持久化
+        // （fsync 在回复投票前完成，保证崩溃恢复后不会同任期二次投票）
+        if (!msg.isPreVote() && decision.response.isVoteGranted()) {
+            persistStateSafe("decideRequestVote-grant");
         }
         // 回复投票结果
         sendResponse(fromNodeId, MessageType.REQUEST_VOTE_RESP, decision.response);
@@ -627,6 +655,8 @@ public class MeshNode {
         if (resp.getTerm() > state.currentTerm) {
             Transition t = stateMachine.becomeFollower(state, resp.getTerm(), null);
             applyFollowerSideEffects(t);
+            // 阶段 11：term 自增 → 持久化（fsync 在确认路径）
+            persistStateSafe("handleRequestVoteResponse-term-up");
             electionTimer.reset();
             return;
         }
@@ -647,6 +677,9 @@ public class MeshNode {
         AppendDecision decision = stateMachine.decideAppendEntries(state, msg, persistHook);
         if (decision.transition.kind == Transition.Kind.TO_FOLLOWER) {
             applyFollowerSideEffects(decision.transition);
+            // 阶段 11：若 term 自增导致降级 → 持久化（追加的 fsync 已由 decideAppendEntries 内
+            // persistHook 完成；此处覆盖 term 变化场景）
+            persistStateSafe("handleAppendEntries-term-up");
         }
         if (decision.resetElectionTimer) {
             electionTimer.reset();
@@ -675,6 +708,8 @@ public class MeshNode {
         if (resp.getTerm() > state.currentTerm) {
             Transition t = stateMachine.becomeFollower(state, resp.getTerm(), null);
             applyFollowerSideEffects(t);
+            // 阶段 11：term 自增 → 持久化（fsync 在确认路径）
+            persistStateSafe("handleAppendEntriesResponse-term-up");
             electionTimer.reset();
             return;
         }

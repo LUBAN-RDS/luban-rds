@@ -90,6 +90,14 @@ public class SnapshotManager {
      */
     private final Runnable persistHook;
 
+    /**
+     * dump.rdb 索引写入 hook（阶段 11）：写完 dump.rdb 后调用，把 {@code lastIncludedIndex}
+     * 落盘到 {@code dump.rdb.index}（含 fsync + ATOMIC_MOVE）。{@code null} 时跳过
+     * （阶段 10 之前的测试兼容）。
+     * <p>用函数式回调而非直接依赖 lifecycle 包，保持 replication → lifecycle 的依赖方向不反转。</p>
+     */
+    private final java.util.function.LongConsumer dumpRdbIndexWriter;
+
     // ==================== Follower 侧 chunk 累积状态 ====================
 
     /**
@@ -123,7 +131,7 @@ public class SnapshotManager {
                            MemoryStore rawStore, RdbSnapshotGenerator snapshotGenerator,
                            RdbDataLoader dataLoader, String dataDir) {
         this(nodeId, state, busClient, rawStore, snapshotGenerator, dataLoader, dataDir,
-                DEFAULT_CHUNK_SIZE_BYTES, DEFAULT_SNAPSHOT_LOG_THRESHOLD, null);
+                DEFAULT_CHUNK_SIZE_BYTES, DEFAULT_SNAPSHOT_LOG_THRESHOLD, null, null);
     }
 
     /**
@@ -138,6 +146,24 @@ public class SnapshotManager {
                            RdbDataLoader dataLoader, String dataDir,
                            int chunkSizeBytes, long snapshotLogThreshold,
                            Runnable persistHook) {
+        this(nodeId, state, busClient, rawStore, snapshotGenerator, dataLoader, dataDir,
+                chunkSizeBytes, snapshotLogThreshold, persistHook, null);
+    }
+
+    /**
+     * 全参构造（阶段 11：增加 dump.rdb.index 写入 hook）。
+     *
+     * @param chunkSizeBytes       chunk 大小（字节）；&lt;=0 用默认 4MB
+     * @param snapshotLogThreshold 周期快照阈值（log 条目数）；&lt;=0 用默认值
+     * @param persistHook          MeshState 持久化 hook；可为 {@code null}
+     * @param dumpRdbIndexWriter   dump.rdb.index 写入 hook；可为 {@code null}（跳过索引落盘）
+     */
+    public SnapshotManager(String nodeId, MeshState state, MeshBusClient busClient,
+                           MemoryStore rawStore, RdbSnapshotGenerator snapshotGenerator,
+                           RdbDataLoader dataLoader, String dataDir,
+                           int chunkSizeBytes, long snapshotLogThreshold,
+                           Runnable persistHook,
+                           java.util.function.LongConsumer dumpRdbIndexWriter) {
         this.nodeId = nodeId;
         this.state = state;
         this.busClient = busClient;
@@ -149,6 +175,7 @@ public class SnapshotManager {
         this.snapshotLogThreshold = snapshotLogThreshold > 0
                 ? snapshotLogThreshold : DEFAULT_SNAPSHOT_LOG_THRESHOLD;
         this.persistHook = persistHook;
+        this.dumpRdbIndexWriter = dumpRdbIndexWriter;
     }
 
     /** 默认周期快照阈值：10 万条 log（DESIGN §5.4「每 N 条 / 累计 M 字节，如 10 万条」）。 */
@@ -301,6 +328,9 @@ public class SnapshotManager {
 
         // 4. 持久化 MeshState（阶段 11 fsync；阶段 10 no-op）
         runPersistHook();
+
+        // 5. 落盘 dump.rdb.index（阶段 11：记录 dump.rdb 对应的 snapshotIndex，供启动比对衔接）
+        runDumpRdbIndexWriter(snapshotIndex);
 
         logger.info("takePeriodicSnapshotIfNeeded: 完成, lastIncluded={}/{}, logSizeAfter={}",
                 state.lastIncludedIndex, state.lastIncludedTerm, state.log.size());
@@ -490,6 +520,9 @@ public class SnapshotManager {
                 // 4c. 持久化 MeshState（阶段 11）
                 runPersistHook();
 
+                // 4c.1 落盘 dump.rdb.index（阶段 11：记录 dump.rdb 对应的 lastIncludedIndex）
+                runDumpRdbIndexWriter(done.lastIncludedIndex);
+
                 logger.info("handleInstallSnapshot: 快照加载完成 lastIncluded={}/{}, bytes={}, 回 ACK 给 {}",
                         done.lastIncludedIndex, done.lastIncludedTerm, receivedBytes, fromNodeId);
                 // 4d. 回 ACK（复用 AppendEntriesResponse，success=true, matchIndex=lastIncludedIndex）
@@ -635,6 +668,24 @@ public class SnapshotManager {
             } catch (Exception e) {
                 logger.warn("runPersistHook: 持久化 hook 异常（阶段 11 之前可忽略）", e);
             }
+        }
+    }
+
+    /**
+     * 落盘 dump.rdb.index（阶段 11）：记录 dump.rdb 对应的 lastIncludedIndex，供启动时比对衔接。
+     * <p>在 dump.rdb 写完 <b>且</b> lastIncludedIndex 更新之后调用。{@code dumpRdbIndexWriter} 为
+     * {@code null} 时跳过（阶段 10 之前的测试兼容）。异常不抛出（仅 warn），避免索引落盘失败中断快照
+     * ——即使索引没落盘，下次启动也只是触发「不可信衔接 → Leader INSTALL_SNAPSHOT 追平」（常态容错）。</p>
+     */
+    private void runDumpRdbIndexWriter(long lastIncludedIndex) {
+        if (dumpRdbIndexWriter == null) {
+            return;
+        }
+        try {
+            dumpRdbIndexWriter.accept(lastIncludedIndex);
+        } catch (Exception e) {
+            logger.warn("runDumpRdbIndexWriter: 写 dump.rdb.index 失败 lastIncludedIndex={}",
+                    lastIncludedIndex, e);
         }
     }
 
