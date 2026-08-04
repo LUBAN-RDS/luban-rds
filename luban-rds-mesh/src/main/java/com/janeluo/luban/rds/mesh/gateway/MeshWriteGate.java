@@ -4,7 +4,10 @@ import com.janeluo.luban.rds.common.util.SlotUtils;
 import com.janeluo.luban.rds.core.acl.ACLCommandCategories;
 import com.janeluo.luban.rds.core.handler.DefaultCommandHandler;
 import com.janeluo.luban.rds.core.store.MemoryStore;
+import com.janeluo.luban.rds.mesh.MeshConfig;
+import com.janeluo.luban.rds.mesh.MeshConfig.ReadConsistency;
 import com.janeluo.luban.rds.mesh.MeshNode;
+import com.janeluo.luban.rds.mesh.client.LeaseInvalidException;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
 import com.janeluo.luban.rds.protocol.RedisProtocolParser;
 import io.netty.buffer.ByteBuf;
@@ -33,7 +36,9 @@ import java.util.concurrent.TimeoutException;
  *       走 Raft（多数派 commit + apply），阻塞至完成，返回 apply 产生的响应字节直写客户端 Channel。
  *       非 Leader 时 propose 以 {@link MovedToLeaderException} 完成未来，本方法解包向上抛。</li>
  *   <li><b>读命令</b>：{@link #read(int, String[])} 走本地 {@link DefaultCommandHandler#handle} 直接读
- *       raw store。Leader + 租约有效时本地执行（DESIGN §5.7）；非 Leader 抛 {@link MovedToLeaderException}。</li>
+ *       raw store。Leader + 租约有效时本地执行（DESIGN §5.7）；非 Leader 抛 {@link MovedToLeaderException}；
+ *       租约失效按 {@link MeshConfig#getReadConsistency()} 切换：lease 模式被动等续租（超时抛
+ *       {@link LeaseInvalidException}），read-index 模式主动确认（同步等当前心跳续租）后才读。</li>
  * </ul>
  *
  * <h3>读写判定（{@link #isWriteCommand(String)}）</h3>
@@ -46,10 +51,12 @@ import java.util.concurrent.TimeoutException;
  *
  * <h3>阶段说明</h3>
  * <ul>
- *   <li>阶段 5（本类）：write/read/redirectResponse 接口 + isWriteCommand 判定。
- *       读路径租约校验先简化（Leader 本地读，租约失效做短时 awaitValid）；阶段 7 完善严格租约/read-index。</li>
+ *   <li>阶段 5：write/read/redirectResponse 接口 + isWriteCommand 判定（读路径为简化版）。</li>
  *   <li>阶段 6 完善 {@link #redirectResponse(String)}：用 nodeId→serviceAddr 映射给出真实 ip:port
  *       （当前阶段 5 用 leaderId 作地址占位，slot 已用真实 CRC16）。</li>
+ *   <li><b>阶段 7（本类读路径）</b>：完善严格 Leader Lease + read-index 退化。读路径按
+ *       {@link MeshConfig#getReadConsistency()}（LEASE / READ_INDEX）切换；租约失效不再宽松放行，
+ *       改抛 {@link LeaseInvalidException} 让客户端重试（防旧 Leader 分区后陈旧读）。</li>
  *   <li>阶段 12 集成进 {@code RedisServerHandler}（本阶段不改 RedisServerHandler）。</li>
  * </ul>
  *
@@ -66,8 +73,15 @@ public class MeshWriteGate {
 
     /** 默认 propose 阻塞超时（ms）；阶段 5 常量，后续可由配置覆盖。 */
     private static final long DEFAULT_WRITE_TIMEOUT_MS = 5_000L;
-    /** 读路径租约失效时的等待上限（ms）；阶段 7 用配置替换。 */
-    private static final long READ_LEASE_AWAIT_MS = 1_000L;
+    /** lease 模式租约失效时的 awaitValid 等待上限（ms），无 config 注入时用此默认。 */
+    private static final long DEFAULT_READ_LEASE_WAIT_MS = 1_000L;
+    /**
+     * read-index 模式主动确认的等待上限（ms）。
+     * <p>简化策略：等当前心跳完成续租，timeout 设为 {@code heartbeatInterval × 2 + 一点抖动余量}。
+     * 区别于 lease 模式的被动 awaitValid（等「下一轮」更长时间）——read-index 表示「主动等当前心跳」，
+     * 故设较短 timeout；超时说明当前心跳 RTT 内多数派未 ACK，退化为抛异常让客户端重试。</p>
+     */
+    private static final long DEFAULT_READ_INDEX_WAIT_MS = 300L;
 
     private final MeshNode meshNode;
     /** 真实 DefaultMemoryStore——apply 唯一目标、读路径直接读。 */
@@ -78,6 +92,11 @@ public class MeshWriteGate {
     private final RedisProtocolParser protocolParser;
     /** 写路径 propose 阻塞超时（ms）。 */
     private final long writeTimeoutMs;
+    /**
+     * 读一致性配置（DESIGN §5.7）。null 时按默认 LEASE 行为：租约有效本地读、
+     * 失效 awaitValid({@link #DEFAULT_READ_LEASE_WAIT_MS})。
+     */
+    private final MeshConfig config;
 
     // ==================== 读写命令集合 ====================
 
@@ -125,7 +144,7 @@ public class MeshWriteGate {
     // ==================== 构造 ====================
 
     public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler) {
-        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS);
+        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, null);
     }
 
     /**
@@ -139,6 +158,29 @@ public class MeshWriteGate {
      */
     public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
                          RedisProtocolParser protocolParser, long writeTimeoutMs) {
+        this(meshNode, rawStore, handler, protocolParser, writeTimeoutMs, null);
+    }
+
+    /**
+     * 阶段 7 构造器：注入 {@link MeshConfig} 以驱动读一致性模式（DESIGN §5.7）。
+     *
+     * @param meshNode       集群节点
+     * @param rawStore       真实存储
+     * @param handler        命令处理器
+     * @param config         集群配置（读一致性模式 / 租约等待时长）；null 时按默认 LEASE 行为
+     */
+    public MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
+                         MeshConfig config) {
+        this(meshNode, rawStore, handler, new RedisProtocolParser(), DEFAULT_WRITE_TIMEOUT_MS, config);
+    }
+
+    /**
+     * 全参构造器。
+     *
+     * @param config 集群配置（读一致性模式 / 租约等待时长）；null 时按默认 LEASE 行为
+     */
+    private MeshWriteGate(MeshNode meshNode, MemoryStore rawStore, DefaultCommandHandler handler,
+                          RedisProtocolParser protocolParser, long writeTimeoutMs, MeshConfig config) {
         if (meshNode == null) {
             throw new IllegalArgumentException("meshNode 不能为 null");
         }
@@ -156,6 +198,7 @@ public class MeshWriteGate {
         this.handler = handler;
         this.protocolParser = protocolParser;
         this.writeTimeoutMs = writeTimeoutMs;
+        this.config = config;
     }
 
     // ==================== 写路径 ====================
@@ -212,19 +255,25 @@ public class MeshWriteGate {
     /**
      * 读命令：Leader + 租约有效则本地执行并返回响应字节；非 Leader 走 MOVED（DESIGN §5.7）。
      * <p>
-     * 阶段 5 策略（先简单）：
+     * 阶段 7 完整读路径，按 {@link MeshConfig#getReadConsistency()} 切换：
      * <ol>
-     *   <li>非 Leader → 抛 {@link MovedToLeaderException}（阶段 7 完善严格 lease 校验）；</li>
-     *   <li>Leader + 租约有效 → {@code handler.handle(commandName, dbIndex, args, rawStore)} → 序列化响应字节；</li>
-     *   <li>Leader + 租约失效 → {@code lease.awaitValid(READ_LEASE_AWAIT_MS)} 阻塞至下一轮续租后读
-     *       （阶段 7 完善 read-index / 严格租约；阶段 5 先简单 await 或直接读）。</li>
+     *   <li>非 Leader → 抛 {@link MovedToLeaderException}（上层生成 MOVED/MESHDOWN）。</li>
+     *   <li><b>lease 模式（默认）</b>：租约有效直接本地读；失效则
+     *       {@code lease.awaitValid(config.getReadLeaseWaitMs())} 被动等下一轮心跳续租，
+     *       仍失效抛 {@link LeaseInvalidException} 让客户端重试（<b>不再放行陈旧读</b>，
+     *       修正阶段 5 的宽松放行行为，防旧 Leader 分区后服务陈旧读）。</li>
+     *   <li><b>read-index 模式</b>（时钟不可靠）：调 {@link #ensureReadIndex()} 主动确认
+     *       （同步等当前心跳多数派 ACK 续租）后才本地读；确认失败抛
+     *       {@link LeaseInvalidException}。</li>
+     *   <li>本地执行：{@code handler.handle(commandName, dbIndex, args, rawStore)} → 序列化响应字节。</li>
      * </ol>
      * </p>
      *
      * @param dbIndex 命令作用的 db
      * @param args    命令参数（{@code args[0]=}命令名，含 key 用于本地读）
      * @return 响应字节（本地读结果序列化）
-     * @throws MovedToLeaderException  非 Leader 时
+     * @throws MovedToLeaderException 非 Leader 时
+     * @throws LeaseInvalidException  lease 模式租约续租等待超时 / read-index 模式主动确认失败
      * @throws IllegalArgumentException args 为空
      */
     public byte[] read(int dbIndex, String[] args) {
@@ -232,23 +281,32 @@ public class MeshWriteGate {
             throw new IllegalArgumentException("read: args 不能为空");
         }
 
-        // 1. 非 Leader → MOVED（阶段 7 完善 lease 校验）
+        // 1. 非 Leader → MOVED
         if (!meshNode.isLeader()) {
             throw new MovedToLeaderException(meshNode.getLeaderId());
         }
 
-        // 2. Leader + 租约失效 → 短时等待续租（阶段 7 完善严格策略，阶段 5 先 await）
-        long now = System.currentTimeMillis();
-        if (!meshNode.lease().isValid(now)) {
-            try {
-                boolean valid = meshNode.lease().awaitValid(READ_LEASE_AWAIT_MS);
-                if (!valid) {
-                    // 租约仍未恢复：阶段 5 保守放行本地读（Leader 身份仍在），阶段 7 改为拒绝/读 index
-                    logger.debug("read: 租约等待超时仍失效，阶段 5 放行本地读 cmd={}", args[0]);
+        // 2. 按读一致性模式切换
+        if (getEffectiveReadConsistency() == ReadConsistency.READ_INDEX) {
+            // read-index：主动确认（等当前心跳多数派 ACK 续租）后才读
+            ensureReadIndex();
+        } else {
+            // lease 模式：租约有效直接读；失效被动等续租，超时抛异常（不放行陈旧读）
+            long now = System.currentTimeMillis();
+            if (!meshNode.lease().isValid(now)) {
+                boolean valid;
+                try {
+                    valid = meshNode.lease().awaitValid(getReadLeaseWaitMs());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new LeaseInvalidException("read: 等待租约续租被中断", e);
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("read: 等待租约续租被中断", e);
+                if (!valid) {
+                    // 续租等待超时仍失效：抛异常让客户端重试（避免陈旧读，DESIGN §5.7）
+                    logger.debug("read: lease 模式租约等待超时仍失效，拒绝读 cmd={}", args[0]);
+                    throw new LeaseInvalidException(
+                            "mesh leader lease expired (lease mode), please retry");
+                }
             }
         }
 
@@ -263,6 +321,63 @@ public class MeshWriteGate {
             response = "-ERR read command error: " + safeMsg(e) + "\r\n";
         }
         return serializeResponse(response);
+    }
+
+    /**
+     * read-index 模式主动确认：同步等当前心跳完成多数派 ACK 续租后才读。
+     * <p>
+     * <b>阶段 7 简化策略</b>（DESIGN §5.7 完整 read-index 需「读前记 commitIndex、发心跳、
+     * 等 commitIndex ≥ readIndex」机制，较复杂；本阶段先简化）：
+     * <ul>
+     *   <li>读前 {@code lease.awaitValid(heartbeatInterval × 2 + 余量)} 等当前心跳周期完成续租
+     *       （约 200-300ms）。区别于 lease 模式的被动 awaitValid（设更长 timeout 等「下一轮」）：
+     *       read-index 用较短 timeout 表示「主动等当前心跳」，超时即认定多数派未及时 ACK、退化为抛异常。</li>
+     *   <li>若 MeshNode 心跳定时器已在周期续租，awaitValid 会在当前心跳 ACK 后立即被唤醒返回 true，
+     *       语义等价于「主动确认了 Leader 仍是多数派认可的真 Leader」。</li>
+     *   <li>不引入额外的同步心跳发送机制（避免复杂化 raftExecutor 与心跳线程的交互），
+     *     也不主动校验 commitIndex ≥ lastApplied（Leader 的 apply 在 raftExecutor 串行推进，
+     *     心跳续租成功隐含 majority matchIndex 推进、commit 已稳定）。</li>
+     * </ul>
+     * </p>
+     * <p>超时（多数派未在当前心跳周期内 ACK）抛 {@link LeaseInvalidException} 让客户端重试。</p>
+     *
+     * @throws LeaseInvalidException 等待当前心跳续租超时
+     */
+    private void ensureReadIndex() {
+        long waitMs = resolveReadIndexWaitMs();
+        boolean valid;
+        try {
+            valid = meshNode.lease().awaitValid(waitMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new LeaseInvalidException("read-index: 等待心跳续租被中断", e);
+        }
+        if (!valid) {
+            logger.debug("read-index: 等待当前心跳续租超时 ({}ms)，拒绝读", waitMs);
+            throw new LeaseInvalidException(
+                    "mesh leader lease expired (read-index mode), please retry");
+        }
+    }
+
+    /** 读一致性模式：config 注入时取其配置，否则默认 LEASE。 */
+    private ReadConsistency getEffectiveReadConsistency() {
+        return config != null ? config.getReadConsistency() : ReadConsistency.LEASE;
+    }
+
+    /** lease 模式 awaitValid 等待上限：config 注入时取其配置，否则默认 1s。 */
+    private long getReadLeaseWaitMs() {
+        return config != null ? config.getReadLeaseWaitMs() : DEFAULT_READ_LEASE_WAIT_MS;
+    }
+
+    /**
+     * read-index 模式 awaitValid 等待上限：config 注入 heartbeatInterval 时取 {@code heartbeatInterval × 2 + 100ms}，
+     * 否则默认 {@link #DEFAULT_READ_INDEX_WAIT_MS}。
+     */
+    private long resolveReadIndexWaitMs() {
+        if (config != null && config.getHeartbeatIntervalMs() > 0) {
+            return config.getHeartbeatIntervalMs() * 2 + 100L;
+        }
+        return DEFAULT_READ_INDEX_WAIT_MS;
     }
 
     // ==================== MOVED / MESHDOWN 生成 ====================

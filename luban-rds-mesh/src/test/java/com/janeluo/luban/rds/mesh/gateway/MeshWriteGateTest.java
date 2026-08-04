@@ -8,9 +8,11 @@ import com.janeluo.luban.rds.mesh.MeshNode;
 import com.janeluo.luban.rds.mesh.bus.MeshBusClient;
 import com.janeluo.luban.rds.mesh.bus.MeshBusHandler;
 import com.janeluo.luban.rds.mesh.bus.MeshFrame;
+import com.janeluo.luban.rds.mesh.client.LeaseInvalidException;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
 import com.janeluo.luban.rds.mesh.core.MeshRole;
 import com.janeluo.luban.rds.mesh.core.MeshState;
+import com.janeluo.luban.rds.mesh.election.LeaseManager;
 import com.janeluo.luban.rds.mesh.replication.LogApplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -123,7 +125,7 @@ class MeshWriteGateTest {
 
         MeshNode node = mock(MeshNode.class);
         when(node.isLeader()).thenReturn(true);
-        when(node.lease()).thenReturn(new com.janeluo.luban.rds.mesh.election.LeaseManager());
+        when(node.lease()).thenReturn(freshValidLease());
 
         MeshWriteGate gate = new MeshWriteGate(node, rawStore, new DefaultCommandHandler());
 
@@ -142,7 +144,7 @@ class MeshWriteGateTest {
 
         MeshNode node = mock(MeshNode.class);
         when(node.isLeader()).thenReturn(true);
-        when(node.lease()).thenReturn(new com.janeluo.luban.rds.mesh.election.LeaseManager());
+        when(node.lease()).thenReturn(freshValidLease());
 
         MeshWriteGate gate = new MeshWriteGate(node, rawStore, new DefaultCommandHandler());
 
@@ -175,12 +177,40 @@ class MeshWriteGateTest {
 
         MeshNode node = mock(MeshNode.class);
         when(node.isLeader()).thenReturn(true);
-        when(node.lease()).thenReturn(new com.janeluo.luban.rds.mesh.election.LeaseManager());
+        when(node.lease()).thenReturn(freshValidLease());
 
         MeshWriteGate gate = new MeshWriteGate(node, rawStore, new DefaultCommandHandler());
         gate.read(0, new String[]{"GET", "k"});
         gate.read(0, new String[]{"HGET", "h", "f"});
 
+        verify(node, never()).propose(any(), anyInt(), any());
+    }
+
+    /**
+     * 阶段 7：lease 模式租约失效且 awaitValid 超时 → 抛 LeaseInvalidException（不放行陈旧读）。
+     * 修正阶段 5 宽松放行行为，防旧 Leader 分区后服务读。
+     */
+    @Test
+    void read_leaderLeaseExpired_awaitTimesOut_throwsLeaseInvalid() {
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        rawStore.set(0, "foo", "bar");
+
+        // 未续租的 LeaseManager → 失效；awaitValid 在短超时内返回 false
+        LeaseManager expired = new LeaseManager();
+        MeshNode node = mock(MeshNode.class);
+        when(node.isLeader()).thenReturn(true);
+        when(node.lease()).thenReturn(expired);
+
+        // 用极短 readLeaseWaitMs 让 awaitValid 快速超时（避免测试长时间阻塞）
+        MeshConfig config = MeshConfig.builder("n1")
+                .readLeaseWaitMs(40)
+                .build();
+        MeshWriteGate gate = new MeshWriteGate(node, rawStore, new DefaultCommandHandler(), config);
+
+        LeaseInvalidException ex = assertThrows(LeaseInvalidException.class,
+                () -> gate.read(0, new String[]{"GET", "foo"}));
+        assertTrue(ex.getMessage().contains("lease"), "msg=" + ex.getMessage());
+        // 读路径不调 propose、也不放行本地读（raw store 未被读，无法断言但语义已由异常保证）
         verify(node, never()).propose(any(), anyInt(), any());
     }
 
@@ -417,6 +447,13 @@ class MeshWriteGateTest {
     }
 
     // ==================== helpers ====================
+
+    /** 构造一个已续租（有效）的 LeaseManager，供读路径测试避免 awaitValid 阻塞。 */
+    private static LeaseManager freshValidLease() {
+        LeaseManager lm = new LeaseManager();
+        lm.refreshOnMajorityAck(System.currentTimeMillis());
+        return lm;
+    }
 
     /** 构造一个完整 RESP 命令帧的字节数组（与 LogApplierTest 同口径）。 */
     private static byte[] respFrame(String... parts) {
