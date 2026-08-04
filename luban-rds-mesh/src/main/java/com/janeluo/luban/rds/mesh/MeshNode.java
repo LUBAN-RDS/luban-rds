@@ -495,6 +495,12 @@ public class MeshNode {
 
         RequestVoteMessage msg = new RequestVoteMessage(term, nodeId, lastLogIndex, lastLogTerm, true);
         collector.start(config.getPeerNodeIds(), msg, busClient, term);
+
+        // ElectionTimer 是一次性 schedule（非 scheduleAtFixedRate），onElectionTimeout 触发后
+        // 该 future 即被消费。runRealElection 在 L516 有 reset()，runPreVote 此前漏了 →
+        // PreVote 未达多数派时 timer 不再排下一轮，节点永久静默，集群死锁无 leader（MESHDOWN）。
+        // 这里补一次 reset，使 PreVote 胜负都重排下一轮选举超时，与 runRealElection 对称。
+        electionTimer.reset();
     }
 
     /**
