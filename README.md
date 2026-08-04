@@ -43,6 +43,7 @@ Luban-RDS 是一款完全兼容 Redis 协议的轻量级高性能内存数据库
 - **集群一键搭建**：内置 `redis-cli --cluster create` 兼容的 CLI 工具 `RedisCliMain`，一行命令完成多节点集群创建与主从划分
 - **集群配置持久化与节点恢复（v1.0.4）**：`nodes.conf` 自动持久化、节点 ID 复用、槽位表重建、启动主动建连，避免全集群重启后节点成孤岛
 - **主从复制**：完整支持主从复制功能，包括全量同步和增量同步
+- **3 节点 Raft 强一致集群（mesh 模块，设计阶段）**：只需 3 台机器即可实现强一致高可用，MOVED 重定向兼容任意 Redis 客户端
 - **健壮的网络层**：NETTY 客户端与服务端协议解析器均修复了 TCP 半包/粘包问题，能够正确处理跨段 RESP 响应与多响应合包
 
 ## 🚀 快速开始
@@ -242,6 +243,11 @@ luban-rds/
 │       ├── MasterReplicationManager.java  # 主节点复制管理器
 │       ├── SlaveReplicationService.java   # 从节点复制服务
 │       └── ReplicationBacklog.java        # 复制积压缓冲区
+├── luban-rds-mesh/                # 3 节点 Raft 强一致集群模块（设计阶段）
+│   ├── README.md                                # 模块快速上手
+│   └── docs/
+│       ├── DESIGN.md                            # 完整协议设计文档
+│       └── IMPLEMENTATION_PLAN.md               # 11 阶段实施计划
 ├── luban-rds-sentinel/            # 哨兵模块
 │   └── src/main/java/.../sentinel/
 │       ├── SentinelManager.java   # 哨兵管理器

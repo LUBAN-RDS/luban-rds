@@ -30,5 +30,11 @@ data/
 
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+docs/superpowers
+
+.codebuddy/
+.trae/
+
+AGENTS.md
 
 node_modules/
