@@ -3,6 +3,8 @@ package com.janeluo.luban.rds.mesh;
 import com.janeluo.luban.rds.mesh.bus.MeshBusClient;
 import com.janeluo.luban.rds.mesh.bus.MeshFrame;
 import com.janeluo.luban.rds.mesh.bus.MessageType;
+import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
+import com.janeluo.luban.rds.mesh.core.LogEntry;
 import com.janeluo.luban.rds.mesh.core.MeshRole;
 import com.janeluo.luban.rds.mesh.core.MeshState;
 import com.janeluo.luban.rds.mesh.core.RaftStateMachine;
@@ -12,6 +14,8 @@ import com.janeluo.luban.rds.mesh.core.RaftStateMachine.VoteDecision;
 import com.janeluo.luban.rds.mesh.election.ElectionTimer;
 import com.janeluo.luban.rds.mesh.election.LeaseManager;
 import com.janeluo.luban.rds.mesh.election.VoteCollector;
+import com.janeluo.luban.rds.mesh.replication.LogApplier;
+import com.janeluo.luban.rds.mesh.replication.LogReplicator;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesResponse;
 import com.janeluo.luban.rds.mesh.rpc.MeshRpcMessage;
@@ -26,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -36,7 +41,9 @@ import java.util.concurrent.TimeUnit;
  * Mesh 节点主体（DESIGN.md §7.1）。
  * <p>
  * 阶段 3 实现：选举（ElectionTimer + VoteCollector + PreVote）、心跳广播、AppendEntries Follower 接收、
- * Leader Lease 续租。propose/LogReplicator/LogApplier 在阶段 4-5 补全。
+ * Leader Lease 续租。
+ * <b>阶段 4 补全</b>：{@link #propose(byte[], int, byte[])} 客户端写入口、{@link LogReplicator} 日志复制、
+ * {@link LogApplier} apply 到 raw store（不写 AOF）。当注入 {@link LogApplier} 后启用 propose/apply 能力。
  * </p>
  *
  * <h3>串行化模型（Raft 正确性前提）</h3>
@@ -86,17 +93,53 @@ public class MeshNode {
     /** 落盘 hook 占位（阶段 11 实现真实 fsync）；阶段 3 为 no-op。 */
     private volatile Runnable persistHook = () -> { };
 
+    // ==================== 阶段 4：日志复制与 apply ====================
+
+    /**
+     * Leader 侧日志复制器（nextIndex/matchIndex + 批量 AppendEntries + 多数派 commit + apply）。
+     * 可为 null（未注入 LogApplier/Handler/RawStore 时，阶段 3 行为：无 propose 能力）。
+     */
+    private final LogReplicator replicator;
+    /** apply 到 raw store 的应用器（仅用 raw store + handle，不写 AOF）。 */
+    private final LogApplier applier;
+
+    /**
+     * Leader 侧待响应的 propose：index → CompletableFuture。
+     * apply 完成后由 LogReplicator.appliedNotifier 回调，complete 对应 future。
+     * 仅 raftExecutor 线程读写（apply 串行保证），用 ConcurrentHashMap 仅作线程安全兜底。
+     */
+    private final Map<Long, CompletableFuture<byte[]>> pendingProposals = new ConcurrentHashMap<>();
+
     private volatile boolean started;
     private volatile boolean stopped;
 
     public MeshNode(MeshConfig config, MeshState state, MeshBusClient busClient) {
-        this(config, state, busClient, new RaftStateMachine());
+        this(config, state, busClient, new RaftStateMachine(), null, null);
     }
 
     /**
      * 测试与定制构造器：可注入自定义 {@link RaftStateMachine}（如 mock 裁决逻辑）。
      */
     public MeshNode(MeshConfig config, MeshState state, MeshBusClient busClient, RaftStateMachine stateMachine) {
+        this(config, state, busClient, stateMachine, null, null);
+    }
+
+    /**
+     * 阶段 4 完整构造器：注入 apply 所需的 {@link LogApplier}（含 raw store + handler）。
+     * <p>
+     * applier 非 null 时启用 propose / apply 能力（Leader 侧 commit 后 apply + complete future；
+     * Follower 侧 leaderCommit 推进后 apply）。applier 为 null 时保持阶段 3 行为（无 propose）。
+     * </p>
+     *
+     * @param config       集群配置
+     * @param state        Raft 状态
+     * @param busClient    总线客户端
+     * @param stateMachine 状态机裁决器
+     * @param applier      apply 应用器（null=不启用 propose/apply）
+     * @param rawStoreRef  原始存储引用（当前未直接使用，保留供阶段 7 读路径；apply 走 applier）
+     */
+    public MeshNode(MeshConfig config, MeshState state, MeshBusClient busClient,
+                    RaftStateMachine stateMachine, LogApplier applier, Object rawStoreRef) {
         this.config = config;
         this.nodeId = config.getSelfNodeId();
         this.state = state;
@@ -115,6 +158,18 @@ public class MeshNode {
                 config.getElectionTimeoutMaxMs(),
                 this::onElectionTimeout,
                 this.scheduler);
+
+        this.applier = applier;
+        if (applier != null) {
+            this.replicator = new LogReplicator(nodeId, config, state, busClient, applier);
+            // apply 完成回调：complete 对应 pendingProposals future（携带 apply 响应对象；序列化为字节）
+            this.replicator.setAppliedNotifier(this::onEntryApplied);
+            // 多数派 ACK 续租回调（Leader Lease，DESIGN §5.7）
+            this.replicator.setLeaseRefresher(() ->
+                    lease.refreshOnMajorityAck(System.currentTimeMillis()));
+        } else {
+            this.replicator = null;
+        }
     }
 
     // ==================== 生命周期 ====================
@@ -177,6 +232,122 @@ public class MeshNode {
     /** 注入落盘 hook（阶段 11 替换为真实 fsync）。 */
     public void setPersistHook(Runnable hook) {
         this.persistHook = hook == null ? () -> { } : hook;
+    }
+
+    // ==================== 阶段 4：propose（客户端写入口）====================
+
+    /**
+     * 客户端写入口（gate 调用，DESIGN §5.1 / §7.1）：propose 后阻塞，apply 完成后 future 携带响应字节。
+     * <p>
+     * 流程（DESIGN §5.1 步骤 1-2）：
+     * <ol>
+     *   <li>校验 {@code role==LEADER}，否则抛 {@link MovedToLeaderException}（阶段 4 占位：leader 地址未知）。</li>
+     *   <li>{@code index = lastIncludedIndex + log.size() + 1}（含快照偏移）。</li>
+     *   <li>构造 {@link LogEntry}(currentTerm, index, respPayload, dbIndex, extra)，state.appendEntry。</li>
+     *   <li><b>持久化</b>（自身日志落盘）：调 persistHook（阶段 11 实现真实 fsync，阶段 4 no-op）。
+     *       落盘在 raftExecutor 线程同步等待（future 在落盘后注册）。</li>
+     *   <li>创建 {@link CompletableFuture}，注册到 pendingProposals。</li>
+     *   <li>触发 {@link LogReplicator#replicate}（异步给 Follower 发 AppendEntries）。</li>
+     *   <li>返回 future（调用方阻塞等待）。</li>
+     * </ol>
+     * </p>
+     * <p><b>线程模型</b>：propose 的状态访问（校验 role / appendEntry / persistHook / 注册 future）
+     * 必须在 raftExecutor 单线程上执行，避免与 AppendEntries 响应处理并发改 state。
+     * 本方法把核心逻辑提交到 raftExecutor，返回的 future 在 apply 完成后被 complete。</p>
+     *
+     * @param respPayload 完整 RESP 命令帧（事务时为 MULTI 帧）
+     * @param dbIndex     apply 时传给 handler 的 database 参数
+     * @param extra       事务：命令帧序列 + WATCH 版本快照；普通写为 {@code null}
+     * @return CompletableFuture，apply 完成后携带客户端响应字节
+     * @throws MovedToLeaderException 当前不是 Leader
+     */
+    public CompletableFuture<byte[]> propose(byte[] respPayload, int dbIndex, byte[] extra) {
+        if (applier == null || replicator == null) {
+            CompletableFuture<byte[]> f = new CompletableFuture<>();
+            f.completeExceptionally(new IllegalStateException("MeshNode 未启用 apply 能力（applier 未注入）"));
+            return f;
+        }
+
+        // 提交到 raftExecutor 串行执行状态访问；返回的 future 由 apply 回调 complete
+        CompletableFuture<byte[]> future = new CompletableFuture<>();
+        raftExecutor.execute(() -> {
+            try {
+                doPropose(respPayload, dbIndex, extra, future);
+            } catch (Throwable t) {
+                // 异常路径：complete future 让调用方收到错误，不悬挂
+                future.completeExceptionally(t);
+                // 移除可能已注册的 pending（避免泄漏）
+                // 注：index 此时未知，无法精确移除；doPropose 内部已处理正常移除
+            }
+        });
+        return future;
+    }
+
+    /**
+     * propose 核心逻辑（在 raftExecutor 上执行）。
+     */
+    private void doPropose(byte[] respPayload, int dbIndex, byte[] extra, CompletableFuture<byte[]> future) {
+        // 1. 校验 Leader
+        if (state.role != MeshRole.LEADER) {
+            future.completeExceptionally(new MovedToLeaderException(state.leaderId));
+            return;
+        }
+
+        // 2. 计算 index（含快照偏移：lastIncludedIndex + log.size() + 1）
+        long index = state.getLastLogIndex() + 1;
+        long term = state.currentTerm;
+
+        // 3. 构造 LogEntry 并追加
+        LogEntry entry = new LogEntry(term, index, respPayload, dbIndex, extra);
+        state.appendEntry(entry);
+        logger.debug("propose: append entry index={}, term={}, dbIndex={}", index, term, dbIndex);
+
+        // 4. 持久化（自身日志落盘，fsync 完成后才继续；阶段 4 为 persistHook no-op）
+        //    DESIGN §5.1：Leader 必须在自身日志落盘后才 complete future 回客户端。
+        try {
+            persistHook.run();
+        } catch (Exception e) {
+            logger.error("propose: 自身日志落盘失败, index={}", index, e);
+            future.completeExceptionally(new IllegalStateException("leader persist failed", e));
+            // 回滚刚追加的 entry（避免未落盘日志被 commit）
+            state.truncateAfter(index - 1);
+            return;
+        }
+
+        // 5. 注册 pending future（apply 完成后由 onEntryApplied complete）
+        pendingProposals.put(index, future);
+
+        // 6. 触发复制（异步给 Follower 发 AppendEntries）
+        replicator.replicate(entry, false);
+
+        // 7. 单节点集群：无 peer，propose 后立即自检 commit + apply（future 由 onEntryApplied complete）
+        //    （replicate 内部已处理单节点 case，这里无需重复）
+    }
+
+    /**
+     * apply 完成回调（由 LogReplicator.appliedNotifier 调用，在 raftExecutor 上）。
+     * <p>
+     * complete 对应 index 的 pending propose future。响应字节 = LogApplier 已 apply 产出的响应对象
+     * （{@code responseObject}）序列化为 RESP 字节。这里<b>不再重复 apply</b>——LogReplicator.applyCommittedEntries
+     * 已经把 entry 作用于 raw store 一次，此处的 responseObject 即那次 apply 的返回值，直接序列化即可。
+     * 避免对 INCR 等非幂等命令的双写。
+     * </p>
+     *
+     * @param index         已 apply 的日志 index
+     * @param responseObject apply 返回的响应对象（handle 的返回值；Follower 侧无 future 时丢弃）
+     */
+    private void onEntryApplied(long index, Object responseObject) {
+        CompletableFuture<byte[]> future = pendingProposals.remove(index);
+        if (future == null || future.isDone()) {
+            // 非 Leader 或该 index 无 pending propose（如 Follower 侧 apply），忽略
+            return;
+        }
+        try {
+            byte[] respBytes = applier.serializeResponse(responseObject);
+            future.complete(respBytes);
+        } catch (Throwable t) {
+            future.completeExceptionally(t);
+        }
     }
 
     // ==================== 选举：ElectionTimer 回调（在 raftExecutor 上执行）====================
@@ -264,11 +435,14 @@ public class MeshNode {
             return;
         }
         Transition t = stateMachine.becomeLeader(state, nodeId, config.getPeerNodeIds());
-        // 应用 nextIndex/matchIndex
+        // 应用 nextIndex/matchIndex（阶段 3 map + 阶段 4 replicator map）
         nextIndex.clear();
         matchIndex.clear();
         nextIndex.putAll(t.nextIndex);
         matchIndex.putAll(t.matchIndex);
+        if (replicator != null) {
+            replicator.initOnBecomeLeader(config.getOtherNodeIds());
+        }
         logger.info("转为 LEADER: term={}，nextIndex={}", t.newTerm, nextIndex);
 
         // 启动心跳 + 首轮空 AppendEntries（建立权威 + 续租）
@@ -312,10 +486,19 @@ public class MeshNode {
     }
 
     /**
-     * 向所有 peer 广播空 AppendEntries（心跳），收集多数派 ACK 续租。
-     * <p>阶段 4 会扩展为按 nextIndex 发送真实 entries（LogReplicator）。</p>
+     * 向所有 peer 广播 AppendEntries（心跳 + 积压日志补发），收集多数派 ACK 续租。
+     * <p>阶段 4：注入 replicator 时，按 nextIndex 携带真实 entries（含积压补发）；
+     * 否则发空 entries（阶段 3 行为）。</p>
      */
     private void broadcastHeartbeat() {
+        if (replicator != null) {
+            // 阶段 4：心跳同时复用为「积压补发 + 续租」，携带真实 entries
+            replicator.replicate(null, true);
+            // 单节点集群：无 peer，replicate 内已处理 commit/apply/续租
+            return;
+        }
+
+        // 阶段 3 回退：空 entries 心跳
         long term = state.currentTerm;
         long leaderCommit = state.commitIndex;
         for (String peer : config.getOtherNodeIds()) {
@@ -433,6 +616,8 @@ public class MeshNode {
     // ==================== AppendEntries 处理（Follower 侧接收）====================
 
     void handleAppendEntries(String fromNodeId, AppendEntriesMessage msg) {
+        long commitBefore = state.commitIndex;
+        long appliedBefore = state.lastApplied;
         AppendDecision decision = stateMachine.decideAppendEntries(state, msg, persistHook);
         if (decision.transition.kind == Transition.Kind.TO_FOLLOWER) {
             applyFollowerSideEffects(decision.transition);
@@ -440,6 +625,18 @@ public class MeshNode {
         if (decision.resetElectionTimer) {
             electionTimer.reset();
         }
+
+        // 阶段 4：Follower 侧——commitIndex 被 leaderCommit 推进后，apply 已提交条目到 raw store。
+        // DESIGN §5.1 步骤5：Follower apply 到 raw store，响应对象丢弃（仅推进 lastApplied）。
+        if (replicator != null && state.commitIndex > appliedBefore) {
+            try {
+                replicator.applyCommittedEntriesFollower();
+            } catch (Exception e) {
+                logger.error("Follower apply 异常: commit {}→{}",
+                        commitBefore, state.commitIndex, e);
+            }
+        }
+
         sendResponse(fromNodeId, MessageType.APPEND_ENTRIES_RESP, decision.response);
         logger.debug("回复 AppendEntries: from={}, success={}, match={}",
                 abbrev(fromNodeId), decision.response.isSuccess(), decision.response.getMatchIndex());
@@ -458,6 +655,17 @@ public class MeshNode {
         if (state.role != MeshRole.LEADER) {
             return;
         }
+
+        // 阶段 4：注入 replicator 时，委托给 replicator 处理（matchIndex/nextIndex/commit/apply）
+        if (replicator != null) {
+            replicator.onAppendEntriesResponse(fromNodeId, resp, true);
+            // 同步 MeshNode 的 nextIndex/matchIndex 视图（供 broadcastHeartbeat 兼容读取；阶段 3 map）
+            nextIndex.putAll(replicator.getNextIndexView());
+            matchIndex.putAll(replicator.getMatchIndexView());
+            return;
+        }
+
+        // 阶段 3 回退路径（无 replicator）
         if (resp.isSuccess()) {
             long prevMatch = matchIndex.getOrDefault(fromNodeId, 0L);
             if (resp.getMatchIndex() > prevMatch) {
@@ -507,7 +715,29 @@ public class MeshNode {
         stopHeartbeat();
         lease.invalidate();
         cancelCurrentCollector();
+        // 阶段 4：失去 Leader 身份时，清空 replicator 复制状态 + fail 所有未完成的 pending propose
+        if (replicator != null) {
+            replicator.clearOnLoseLeadership();
+        }
+        failPendingProposalsOnLeadershipLoss();
         logger.info("转为 FOLLOWER: term={}, leader={}", t.newTerm, t.newLeaderId);
+    }
+
+    /**
+     * 失去 Leader 身份时，把所有未完成的 pending propose future 以异常 complete。
+     * <p>
+     * 这些 propose 的 entry 可能尚未 commit，按 Raft 语义新 Leader 不会复制它们（未提交写入被覆盖）。
+     * 调用方（gate）收到异常后向客户端报错，符合「一致性 &gt; 可用性」。</p>
+     */
+    private void failPendingProposalsOnLeadershipLoss() {
+        if (pendingProposals.isEmpty()) {
+            return;
+        }
+        IllegalStateException cause = new IllegalStateException("leadership lost; propose aborted");
+        for (Map.Entry<Long, CompletableFuture<byte[]>> e : pendingProposals.entrySet()) {
+            e.getValue().completeExceptionally(cause);
+        }
+        pendingProposals.clear();
     }
 
     // ==================== 发送响应 ====================
@@ -552,6 +782,21 @@ public class MeshNode {
 
     VoteCollector getCurrentVoteCollector() {
         return currentVoteCollector;
+    }
+
+    /** 阶段 4：取 replicator（测试用，可能为 null）。 */
+    LogReplicator getReplicator() {
+        return replicator;
+    }
+
+    /** 阶段 4：取 applier（测试用，可能为 null）。 */
+    LogApplier getApplier() {
+        return applier;
+    }
+
+    /** 阶段 4：取 pending propose 数量（测试用）。 */
+    int pendingProposalsCount() {
+        return pendingProposals.size();
     }
 
     private static String abbrev(String id) {
