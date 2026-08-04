@@ -1009,6 +1009,10 @@ public class NettyRedisServer implements RedisServer {
      * 从 config.mesh-peers 解析 peer 端点映射（nodeId → PeerEndpoint），过滤自身。
      * <p>复用 {@link com.janeluo.luban.rds.mesh.lifecycle.MeshBootstrap} 的解析逻辑，
      * 这里仅提取 nodeId→(host,busPort) 给 {@link com.janeluo.luban.rds.mesh.bus.MeshBusClient#start}。</p>
+     * <p>格式 {@code nodeId@host:busPort[:servicePort]}：host 取第一段，busPort 取第二段，
+     * 可选第三段 servicePort 这里不用（busClient 只关心总线端口）。此前用 {@code lastIndexOf(':')}
+     * 切分，三段格式下会把 {@code host:busPort} 整体当 host、servicePort 当 busPort →
+     * {@code UnknownHostException: invalid IPv6}。改用 split 取前两段，与 parsePeers 对齐。</p>
      */
     private java.util.Map<String, com.janeluo.luban.rds.mesh.bus.MeshBusClient.PeerEndpoint>
             resolveMeshPeerEndpoints() {
@@ -1033,16 +1037,20 @@ public class NettyRedisServer implements RedisServer {
                 continue;
             }
             String nodeId = e.substring(0, atIdx).trim();
-            String hostPort = e.substring(atIdx + 1).trim();
-            int colonIdx = hostPort.lastIndexOf(':');
-            if (colonIdx <= 0) {
+            String hostPorts = e.substring(atIdx + 1).trim();
+            // host:busPort[:servicePort] —— host=parts[0]，busPort=parts[1]，可选 servicePort 忽略
+            String[] parts = hostPorts.split(":");
+            if (parts.length < 2) {
                 continue;
             }
-            String host = hostPort.substring(0, colonIdx).trim();
+            String host = parts[0].trim();
             int busPort;
             try {
-                busPort = Integer.parseInt(hostPort.substring(colonIdx + 1).trim());
+                busPort = Integer.parseInt(parts[1].trim());
             } catch (NumberFormatException nfe) {
+                continue;
+            }
+            if (host.isEmpty() || busPort <= 0) {
                 continue;
             }
             if (idx == 0 && (selfNodeId == null || selfNodeId.isEmpty())) {
