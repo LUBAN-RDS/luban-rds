@@ -3,6 +3,7 @@ package com.janeluo.luban.rds.cluster.config;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 
+import java.util.Map;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -29,6 +30,17 @@ public class ClusterStateManager {
     private final LongAdder messagesReceived = new LongAdder();
 
     /**
+     * 分类型已发送消息计数（类型展示名 -> 计数，N-26 输出补全）。
+     * 供 CLUSTER INFO 输出 Redis 风格的 cluster_stats_messages_<type>_sent 字段。
+     */
+    private final Map<String, LongAdder> messagesSentByType = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * 分类型已接收消息计数（类型展示名 -> 计数，N-26 输出补全）。
+     */
+    private final Map<String, LongAdder> messagesReceivedByType = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
      * 构造方法
      *
      * @param config 集群配置
@@ -41,25 +53,25 @@ public class ClusterStateManager {
     }
 
     /**
-     * 检查集群是否健康
+     * 检查集群是否健康（N-26：全网唯一 cluster_state 公式，对齐 Redis 7.2 clusterUpdateState）。
      * <p>
-     * 集群健康的条件：
-     * 1. 所有16384个槽位都已分配
-     * 2. 所有负责槽位的主节点都可用（未下线）
+     * 集群 fail 当且仅当满足以下任一条件（require_full_coverage=yes 语义）：
+     * <ol>
+     *   <li><b>全槽覆盖</b>：任一槽位未分配，或槽位 owner 处于 FAIL 状态
+     *       （PFAIL owner 容忍——宽容期，避免网络抖动误判集群下线；对齐 Redis
+     *       {@code slots[j] == NULL || slots[j]->flags & CLUSTER_NODE_FAIL}）。</li>
+     *   <li><b>多数可达</b>：reachable_masters（持槽且非 FAIL/PFAIL 的 master 数）
+     *       &lt; size/2+1。size = 持槽 master 总数（<b>含</b> FAIL/PFAIL，对齐 Redis
+     *       getClusterSize：{@code nodeIsMaster(node) && node->numslots}）。</li>
+     * </ol>
+     * 注意：size 只统计"持槽"master（Redis cluster size 语义），不含无槽 master；
+     * 旧实现（GossipTask）按全部 master 计数，会在空 master 加入时错误改变 quorum。
      * </p>
      *
      * @return 集群是否健康
      */
     public boolean isClusterOk() {
-        // 检查所有槽位是否都已分配
-        if (!config.areAllSlotsAssigned()) {
-            return false;
-        }
-
-        // 检查所有负责槽位的主节点是否可用。
-        // 注意：Redis 语义中 slot 的 owner 只能是 master；slave 接管 slot 前必须先提权为 master。
-        // PFAIL 不计入 fail（宽容期，避免网络抖动误判集群下线），仅 FAIL master 持有的 slot 使集群 fail。
-        // 此处有意简化：未实现 Redis 的"多数 master 不可达才 fail"quorum 机制。
+        // ① 全槽覆盖：所有槽位已分配且 owner 非 FAIL
         for (int slot = 0; slot < ClusterNode.CLUSTER_SLOTS; slot++) {
             ClusterNode node = config.getSlotOwnerNode(slot);
             if (node == null) {
@@ -70,7 +82,18 @@ public class ClusterStateManager {
             }
         }
 
-        return true;
+        // ② 多数可达：reachable_masters >= size/2 + 1（size 含 FAIL/PFAIL 持槽 master）
+        int size = 0;
+        int reachableMasters = 0;
+        for (ClusterNode node : config.getAllNodes()) {
+            if (node.isMaster() && node.getSlotCount() > 0) {
+                size++;
+                if (!node.isFail() && !node.isPfail()) {
+                    reachableMasters++;
+                }
+            }
+        }
+        return reachableMasters >= size / 2 + 1;
     }
 
     /**
@@ -125,9 +148,26 @@ public class ClusterStateManager {
         stats.setKnownNodes(knownNodes);
         stats.setSize(masterCount);
 
-        // 设置纪元信息
+        // 设置纪元信息。N-26：cluster_my_epoch 使用 MYSELF 节点的实际 configEpoch——
+        // ClusterConfig 级别独立字段只在 restoreClusterFromConfig 时从 header 恢复、
+        // 其余时间恒为 0（陈旧死字段），输出会误导监控（与 nodes.conf 持久化的
+        // "My Config Epoch" 修复同源）。
+        ClusterNode myNode = config.getMyNode();
+        long myEpoch = myNode != null ? myNode.getConfigEpoch() : config.getConfigEpoch();
         stats.setCurrentEpoch(config.getCurrentEpoch());
-        stats.setMyEpoch(config.getConfigEpoch());
+        stats.setMyEpoch(myEpoch);
+
+        // N-26：分类型消息计数（CLUSTER INFO per-type 字段）
+        Map<String, Long> sentByType = new java.util.HashMap<>();
+        for (Map.Entry<String, LongAdder> e : messagesSentByType.entrySet()) {
+            sentByType.put(e.getKey(), e.getValue().sum());
+        }
+        Map<String, Long> receivedByType = new java.util.HashMap<>();
+        for (Map.Entry<String, LongAdder> e : messagesReceivedByType.entrySet()) {
+            receivedByType.put(e.getKey(), e.getValue().sum());
+        }
+        stats.setMessagesSentByType(sentByType);
+        stats.setMessagesReceivedByType(receivedByType);
 
         // 设置消息计数
         stats.setMessagesSent(messagesSent.sum());
@@ -146,6 +186,19 @@ public class ClusterStateManager {
     }
 
     /**
+     * 增加已发送消息计数（分类型，N-26）。
+     *
+     * @param type  消息类型展示名（GossipMessageType.getDisplayName()）
+     * @param count 增加的数量
+     */
+    public void incrementMessagesSent(String type, long count) {
+        this.messagesSent.add(count);
+        if (type != null) {
+            this.messagesSentByType.computeIfAbsent(type, k -> new LongAdder()).add(count);
+        }
+    }
+
+    /**
      * 增加已接收消息计数
      *
      * @param count 增加的数量
@@ -155,11 +208,26 @@ public class ClusterStateManager {
     }
 
     /**
+     * 增加已接收消息计数（分类型，N-26）。
+     *
+     * @param type  消息类型展示名（GossipMessageType.getDisplayName()）
+     * @param count 增加的数量
+     */
+    public void incrementMessagesReceived(String type, long count) {
+        this.messagesReceived.add(count);
+        if (type != null) {
+            this.messagesReceivedByType.computeIfAbsent(type, k -> new LongAdder()).add(count);
+        }
+    }
+
+    /**
      * 重置消息计数
      */
     public void resetMessageCounters() {
         this.messagesSent.reset();
         this.messagesReceived.reset();
+        this.messagesSentByType.clear();
+        this.messagesReceivedByType.clear();
     }
 
     /**

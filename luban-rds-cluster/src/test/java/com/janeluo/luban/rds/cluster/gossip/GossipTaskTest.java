@@ -276,6 +276,16 @@ class GossipTaskTest {
         GossipTask task = new GossipTask(proto, proto.getFailureDetector(), 5000);
         proto.start();
 
+        // 消除调度器竞态：start() 以 delay=0 调度首轮 GossipTask，该轮与测试线程的手动
+        // task.run() 并发时（CPU 负载下 scheduler 线程可能晚于测试线程执行）会产生两轮
+        // PING——首轮 PING 掉 older 后，手动轮因 older 变新鲜改选 newer，使 never() 断言
+        // 偶发失败。等待首轮在空节点集上完成（无节点可 PING），再注入节点做单轮确定性验证。
+        try {
+            Thread.sleep(100L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
         // 两个候选节点：newer 较新 pong，older 较老 pong，且都已超 nodeTimeout/2 未 ping
         ClusterNode newer = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
         newer.addState(ClusterNodeState.MASTER);

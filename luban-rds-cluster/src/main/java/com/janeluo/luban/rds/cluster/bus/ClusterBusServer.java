@@ -68,14 +68,28 @@ public class ClusterBusServer {
     private volatile boolean running;
 
     /**
-     * 构造方法
+     * 构造方法（向后兼容：总线端口 = 服务端口 + 10000）。
      *
      * @param servicePort   服务端口
      * @param clusterConfig 集群配置
      * @param gossipProtocol Gossip 协议处理器
      */
     public ClusterBusServer(int servicePort, ClusterConfig clusterConfig, GossipProtocol gossipProtocol) {
-        this.port = servicePort + BUS_PORT_OFFSET;
+        this(servicePort, servicePort + BUS_PORT_OFFSET, clusterConfig, gossipProtocol);
+    }
+
+    /**
+     * 完整构造方法（N-37）。
+     *
+     * @param servicePort   服务端口（仅用于日志/默认值计算）
+     * @param busPort       实际监听的总线端口——消费 cluster-announce-bus-port 配置，
+     *                      否则该配置仅被通告、不被监听（NAT/防火墙自定义总线端口场景
+     *                      集群无法组建）
+     * @param clusterConfig 集群配置
+     * @param gossipProtocol Gossip 协议处理器
+     */
+    public ClusterBusServer(int servicePort, int busPort, ClusterConfig clusterConfig, GossipProtocol gossipProtocol) {
+        this.port = busPort;
         this.clusterConfig = clusterConfig;
         this.gossipProtocol = gossipProtocol;
         this.running = false;

@@ -413,4 +413,75 @@ class GossipProtocolTest {
         node.setBusPort(busPort);
         return node;
     }
+
+    @Test
+    @DisplayName("N-10：针对本节点的 FAIL 消息被忽略（MYSELF 守卫）")
+    void testFailAboutMyselfIgnored() {
+        // 发送方须为已知节点（handleFail 的既有发送方校验）
+        ClusterNode sender = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        sender.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(sender);
+
+        FailMessage fail = new FailMessage();
+        fail.setSenderNodeId(sender.getNodeId());
+        fail.setFailedNodeId(myNode.getNodeId()); // 声明本节点 FAIL
+
+        gossipProtocol.handleFail(fail);
+
+        assertFalse(myNode.isFail(), "MYSELF 守卫：本节点不应被 FAIL 消息标记");
+        assertTrue(myNode.isMaster(), "本节点角色不应被影响");
+    }
+
+    @Test
+    @DisplayName("N-2：伪造本节点 ID 的 PING 不删槽位、不降级")
+    void testPingWithForgedOwnNodeIdIgnored() {
+        // 本节点持有 slot 0
+        clusterConfig.setSlotOwner(0, myNode.getNodeId());
+        assertTrue(myNode.hasSlot(0), "前置条件：本节点持有 slot 0");
+
+        // 伪造发送方为本节点的 PING：空位图 + SLAVE 角色 + 更高纪元，
+        // 旧实现会经 syncSlotsFromNode 删光本节点槽位、经 syncSenderRole 降级
+        PingMessage ping = new PingMessage(myNode.getNodeId(), System.currentTimeMillis());
+        ping.setSenderSlots(new java.util.BitSet());
+        ping.setSenderConfigEpoch(myNode.getConfigEpoch() + 1);
+        ping.setSenderFlags(EnumSet.of(ClusterNodeState.SLAVE));
+        ping.setSenderMasterNodeId("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+        PongMessage pong = gossipProtocol.handlePing(ping);
+
+        assertNotNull(pong, "仍应回复 PONG（仅忽略对 MYSELF 的状态更新）");
+        assertTrue(myNode.hasSlot(0), "MYSELF 守卫：本节点槽位不应被伪造 PING 删除");
+        assertTrue(myNode.isMaster(), "MYSELF 守卫：本节点不应被降级为 slave");
+    }
+
+    @Test
+    @DisplayName("N-2：伪造本节点 ID 的 PONG 被忽略")
+    void testPongWithForgedOwnNodeIdIgnored() {
+        // 伪造发送方为本节点的 PONG：空位图 + SLAVE 角色
+        PongMessage pong = new PongMessage(myNode.getNodeId(), System.currentTimeMillis());
+        pong.setSenderSlots(new java.util.BitSet());
+        pong.setSenderConfigEpoch(myNode.getConfigEpoch() + 1);
+        pong.setSenderFlags(EnumSet.of(ClusterNodeState.SLAVE));
+        pong.setSenderMasterNodeId("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+
+        gossipProtocol.handlePong(pong);
+
+        assertTrue(myNode.isMaster(), "MYSELF 守卫：本节点不应被降级为 slave");
+        assertEquals(0, clusterConfig.getAssignedSlotCount(), "本节点不应持有（空位图也不应产生影响）");
+    }
+
+    @Test
+    @DisplayName("N-2：伪造本节点 ID 的 MEET 被忽略（不覆盖本节点地址）")
+    void testMeetWithForgedOwnNodeIdIgnored() {
+        MeetMessage meet = new MeetMessage();
+        meet.setSenderNodeId(myNode.getNodeId());
+        meet.setSenderIp("192.168.99.99");
+        meet.setSenderPort(9999);
+        meet.setSenderBusPort(19999);
+
+        gossipProtocol.handleMeet(meet);
+
+        assertEquals("127.0.0.1", myNode.getIp(), "本节点通告地址不应被伪造 MEET 覆盖");
+        assertEquals(6379, myNode.getPort());
+    }
 }

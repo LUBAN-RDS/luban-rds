@@ -388,6 +388,115 @@ public class ClusterStateManagerTest {
         new ClusterStateManager(null);
     }
 
+    // ==================== N-26：cluster_state 单公式（对齐 Redis clusterUpdateState） ====================
+
+    /**
+     * 辅助：创建持槽 master 并登记槽位归属。
+     */
+    private ClusterNode addSlotMaster(String id, int slotStart, int slotEnd, long configEpoch) {
+        ClusterNode master = new ClusterNode(id);
+        master.addState(ClusterNodeState.MASTER);
+        master.setConfigEpoch(configEpoch);
+        config.addNode(master);
+        for (int i = slotStart; i <= slotEnd; i++) {
+            config.setSlotOwner(i, id);
+        }
+        return master;
+    }
+
+    @Test
+    public void testN26SinglePfailMasterBreaksQuorum() {
+        // 单 master PFAIL：覆盖率通过（PFAIL owner 容忍），但 reachable(0) < size/2+1(1) → fail。
+        // 对齐 Redis：不可达的持槽 master 使集群处于 minority，状态 fail。
+        ClusterNode master = addSlotMaster("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 0, 16383, 1);
+        master.addState(ClusterNodeState.PFAIL);
+
+        assertFalse("PFAIL 持槽 master 不满足多数可达 → 集群 fail", stateManager.isClusterOk());
+    }
+
+    @Test
+    public void testN26FailMasterWithoutSlotsKeepsClusterOk() {
+        // 3 master：1 个 FAIL 且无槽位（槽位已被接管），2 个健康持槽 master 覆盖全部槽位。
+        // 覆盖率通过（owner 非 FAIL）；quorum：size=2（FAIL master 无槽不计入），reachable=2 >= 2 → ok。
+        ClusterNode m1 = addSlotMaster("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 0, 8191, 1);
+        ClusterNode m2 = addSlotMaster("b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 8192, 16383, 1);
+        ClusterNode failed = new ClusterNode("c1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0");
+        failed.addState(ClusterNodeState.MASTER);
+        failed.addState(ClusterNodeState.FAIL);
+        config.addNode(failed);
+
+        assertTrue("FAIL 但无槽位的 master 不参与 size/覆盖率，集群应保持 ok", stateManager.isClusterOk());
+    }
+
+    @Test
+    public void testN26FailMasterHoldingSlotsFailsCoverage() {
+        // 3 master，1 个 FAIL 仍持有槽位 → 覆盖率检查失败（owner FAIL）→ 集群 fail。
+        // 旧 GossipTask 公式（可用 master 过半 + 全槽已分配）在此场景判 ok，两公式结论相反——
+        // 统一后以 Redis 覆盖率语义为准。
+        ClusterNode m1 = addSlotMaster("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 0, 5460, 1);
+        ClusterNode m2 = addSlotMaster("b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 5461, 10922, 1);
+        ClusterNode m3 = addSlotMaster("c1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 10923, 16383, 1);
+        m3.addState(ClusterNodeState.FAIL);
+
+        assertFalse("FAIL master 持槽 → 覆盖率失败 → 集群 fail", stateManager.isClusterOk());
+    }
+
+    @Test
+    public void testN26EmptyMasterNotCountedInQuorum() {
+        // 2 个健康持槽 master 覆盖全部槽位 + 1 个无槽空 master：
+        // quorum 只按持槽 master 计（size=2, reachable=2），空 master 不稀释集群规模。
+        addSlotMaster("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 0, 8191, 1);
+        addSlotMaster("b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 8192, 16383, 1);
+        ClusterNode empty = new ClusterNode("c1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0");
+        empty.addState(ClusterNodeState.MASTER);
+        config.addNode(empty);
+
+        assertTrue("无槽 master 不应参与 cluster size（Redis getClusterSize 语义）", stateManager.isClusterOk());
+    }
+
+    @Test
+    public void testN26HalfMastersFailedBreaksQuorum() {
+        // 3 个持槽 master，2 个 FAIL 且持有槽位：覆盖率已失败；即便槽位被接管，
+        // reachable(1) < size/2+1(2) 也使 quorum 失败 → fail。
+        ClusterNode m1 = addSlotMaster("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 0, 5460, 1);
+        ClusterNode m2 = addSlotMaster("b1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 5461, 10922, 1);
+        ClusterNode m3 = addSlotMaster("c1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0", 10923, 16383, 1);
+        m2.addState(ClusterNodeState.FAIL);
+        m3.addState(ClusterNodeState.FAIL);
+
+        assertFalse("多数持槽 master 不可达 → 集群 fail", stateManager.isClusterOk());
+    }
+
+    @Test
+    public void testN26MyEpochFromMyselfNode() {
+        // cluster_my_epoch 应来自 MYSELF 节点的实际 configEpoch（ClusterConfig 级别
+        // 独立字段为陈旧死字段，恒为 0）。
+        ClusterNode myNode = new ClusterNode("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0");
+        myNode.addState(ClusterNodeState.MASTER);
+        myNode.addState(ClusterNodeState.MYSELF);
+        myNode.setConfigEpoch(7L);
+        config.addNode(myNode);
+        config.setMyNodeId(myNode.getNodeId());
+        config.setConfigEpoch(0L);  // 独立字段保持 0（死字段）
+
+        ClusterStats stats = stateManager.getStats();
+        assertEquals("cluster_my_epoch 应取 MYSELF 节点 configEpoch", 7L, stats.getMyEpoch());
+    }
+
+    @Test
+    public void testN26PerTypeMessageCounters() {
+        stateManager.incrementMessagesSent("ping", 3);
+        stateManager.incrementMessagesSent("auth-req", 2);
+        stateManager.incrementMessagesReceived("pong", 5);
+
+        ClusterStats stats = stateManager.getStats();
+        assertEquals(5L, stats.getMessagesSent());
+        assertEquals(5L, stats.getMessagesReceived());
+        assertEquals(Long.valueOf(3L), stats.getMessagesSentByType().get("ping"));
+        assertEquals(Long.valueOf(2L), stats.getMessagesSentByType().get("auth-req"));
+        assertEquals(Long.valueOf(5L), stats.getMessagesReceivedByType().get("pong"));
+    }
+
     @Test
     public void testGetConfig() {
         assertEquals(config, stateManager.getConfig());

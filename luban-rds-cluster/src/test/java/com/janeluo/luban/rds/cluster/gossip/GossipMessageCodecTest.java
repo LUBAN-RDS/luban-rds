@@ -195,7 +195,7 @@ class GossipMessageCodecTest {
     @DisplayName("P1-20: MigrateKeyMessage requestId encode/decode 往返不丢失")
     void testMigrateKeyMessageRequestIdRoundTrip() {
         byte[] value = "v".getBytes();
-        MigrateKeyMessage msg = new MigrateKeyMessage(SENDER_ID, "mykey", value, 1000L, true);
+        MigrateKeyMessage msg = new MigrateKeyMessage(SENDER_ID, "mykey", value, 1000L, true, 0);
         msg.setRequestId(123456789L);
 
         byte[] encoded = msg.encode();
@@ -231,7 +231,7 @@ class GossipMessageCodecTest {
         // 构造完整消息后裁掉尾部 8 字节（requestId 为消息体最后 8 字节），
         // 并同步修正头部 bodyLength，模拟旧版本无 requestId 字段的报文。
         byte[] value = "v".getBytes();
-        MigrateKeyMessage msg = new MigrateKeyMessage(SENDER_ID, "mykey", value, 1000L, true);
+        MigrateKeyMessage msg = new MigrateKeyMessage(SENDER_ID, "mykey", value, 1000L, true, 0);
         msg.setRequestId(0L);
         byte[] fullEncoded = msg.encode();
 
@@ -256,6 +256,57 @@ class GossipMessageCodecTest {
         decoded.decode(truncated);
 
         assertEquals(0L, decoded.getRequestId(), "旧版本消息解码后 requestId 应为默认值 0");
+        assertEquals("mykey", decoded.getKey(), "其他字段应正常解码");
+    }
+
+    @Test
+    @DisplayName("N-30: MigrateKeyMessage destDb encode/decode 往返不丢失")
+    void testMigrateKeyMessageDestDbRoundTrip() {
+        byte[] value = "v".getBytes();
+        MigrateKeyMessage msg = new MigrateKeyMessage(SENDER_ID, "mykey", value, 1000L, true, 3);
+        msg.setRequestId(123L);
+
+        byte[] encoded = msg.encode();
+        GossipMessage decoded = GossipMessage.parseMessage(encoded);
+
+        assertInstanceOf(MigrateKeyMessage.class, decoded);
+        MigrateKeyMessage decodedMsg = (MigrateKeyMessage) decoded;
+        assertEquals(3, decodedMsg.getDestDb(), "destDb 往返应不丢失");
+        assertEquals("mykey", decodedMsg.getKey());
+        assertTrue(decodedMsg.isReplace());
+        assertEquals(1000L, decodedMsg.getTtl());
+        assertEquals(123L, decodedMsg.getRequestId(), "requestId 不应受 destDb 追加影响");
+    }
+
+    @Test
+    @DisplayName("N-30: 旧版本 MigrateKeyMessage（无 destDb 字段）解码兼容默认 db0")
+    void testMigrateKeyMessageBackwardCompatibleWithoutDestDb() {
+        // 构造完整消息后裁掉尾部 4 字节（destDb 为消息体最后 4 字节），
+        // 并同步修正头部 bodyLength，模拟旧版本无 destDb 字段的报文。
+        byte[] value = "v".getBytes();
+        MigrateKeyMessage msg = new MigrateKeyMessage(SENDER_ID, "mykey", value, 1000L, true, 5);
+        msg.setRequestId(0L);
+        byte[] fullEncoded = msg.encode();
+
+        int bodyLengthOffset = GossipMessage.NODE_ID_LENGTH + 1;
+        int originalBodyLength = ((fullEncoded[bodyLengthOffset] & 0xFF) << 24)
+                | ((fullEncoded[bodyLengthOffset + 1] & 0xFF) << 16)
+                | ((fullEncoded[bodyLengthOffset + 2] & 0xFF) << 8)
+                | (fullEncoded[bodyLengthOffset + 3] & 0xFF);
+        int truncatedBodyLength = originalBodyLength - 4;
+
+        byte[] truncated = new byte[GossipMessage.HEADER_LENGTH + truncatedBodyLength];
+        System.arraycopy(fullEncoded, 0, truncated, 0, truncated.length);
+        truncated[bodyLengthOffset] = (byte) (truncatedBodyLength >> 24);
+        truncated[bodyLengthOffset + 1] = (byte) (truncatedBodyLength >> 16);
+        truncated[bodyLengthOffset + 2] = (byte) (truncatedBodyLength >> 8);
+        truncated[bodyLengthOffset + 3] = (byte) truncatedBodyLength;
+
+        // 不应抛异常，destDb 保持默认值 0
+        MigrateKeyMessage decoded = new MigrateKeyMessage();
+        decoded.decode(truncated);
+
+        assertEquals(0, decoded.getDestDb(), "旧版本消息解码后 destDb 应为默认值 0");
         assertEquals("mykey", decoded.getKey(), "其他字段应正常解码");
     }
 }

@@ -246,7 +246,7 @@ class SlotMigrationManagerTest {
         // 状态源为 SlotManager（由 CLUSTER SETSLOT IMPORTING 写入生产路径）
         when(slotManager.isSlotImporting(slot)).thenReturn(true);
 
-        boolean success = migrationManager.importKey(key, value, 1000L, false).isSuccess();
+        boolean success = migrationManager.importKey(key, value, 1000L, false, 0).isSuccess();
 
         assertTrue(success);
         verify(memoryStore).setWithExpireMs(eq(0), eq(key), any(), eq(1000L));
@@ -258,7 +258,7 @@ class SlotMigrationManagerTest {
         String key = "test-key";
         byte[] value = "test-value".getBytes();
 
-        boolean success = migrationManager.importKey(key, value, 1000L, false).isSuccess();
+        boolean success = migrationManager.importKey(key, value, 1000L, false, 0).isSuccess();
 
         assertFalse(success);
         verify(memoryStore, never()).setWithExpireMs(anyInt(), anyString(), any(), anyLong());
@@ -281,14 +281,36 @@ class SlotMigrationManagerTest {
         when(memoryStore.exists(0, key)).thenReturn(true);
 
         // 无 REPLACE：拒绝覆盖，返回 BUSYKEY，不写入
-        ImportResult rejected = migrationManager.importKey(key, value, 1000L, false);
+        ImportResult rejected = migrationManager.importKey(key, value, 1000L, false, 0);
         assertEquals(ImportResult.Status.BUSYKEY, rejected.getStatus());
         verify(memoryStore, never()).setWithExpireMs(anyInt(), anyString(), any(), anyLong());
 
         // 带 REPLACE：允许覆盖
-        boolean replaced = migrationManager.importKey(key, value, 1000L, true).isSuccess();
+        boolean replaced = migrationManager.importKey(key, value, 1000L, true, 0).isSuccess();
         assertTrue(replaced);
         verify(memoryStore).setWithExpireMs(eq(0), eq(key), any(), eq(1000L));
+    }
+
+    @Test
+    @DisplayName("N-30：导入到指定 destDb（非 db0）落库正确")
+    void testImportKeyToNonDefaultDatabase() throws IOException {
+        String key = "test-key";
+        int slot = SlotUtils.keyHashSlot(key);
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ObjectOutputStream oos = new ObjectOutputStream(baos)) {
+            oos.writeObject("test-value");
+        }
+        byte[] value = baos.toByteArray();
+
+        when(slotManager.isSlotImporting(slot)).thenReturn(true);
+
+        boolean success = migrationManager.importKey(key, value, 1000L, false, 2).isSuccess();
+
+        assertTrue(success);
+        // 落库应为 destDb=2 而非硬编码 db0
+        verify(memoryStore).setWithExpireMs(eq(2), eq(key), any(), eq(1000L));
+        verify(memoryStore, never()).setWithExpireMs(eq(0), eq(key), any(), anyLong());
     }
 
     @Test

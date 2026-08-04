@@ -201,6 +201,65 @@ class ManualFailoverStateMachineTest {
         assertFalse(writePauseGate.paused, "提升完成后写暂停应被解除");
     }
 
+    @Test
+    @DisplayName("P0-新1：master 侧写暂停超时自动恢复（接管未完成时写不永久冻结）")
+    void testMasterWritePauseAutoResumedOnTimeout() {
+        ClusterNode master = createMasterNode(MASTER_ID, 7000);
+        master.addState(ClusterNodeState.MYSELF);
+        ClusterNode slave = createSlaveNode(SLAVE_ID, 7001, MASTER_ID);
+        config.addNode(master);
+        config.addNode(slave);
+        config.setMyNodeId(MASTER_ID);
+
+        // 缩短自动恢复阈值：2×nodeTimeout=30s 对测试太慢，覆盖为 50ms
+        failoverManager.setMasterPauseAutoResumeMsForTest(50L);
+
+        // master 收到 MFStart → 暂停写
+        ManualFailoverStartMessage mfStart = new ManualFailoverStartMessage(SLAVE_ID);
+        failoverManager.onManualFailoverStart(mfStart);
+        assertTrue(writePauseGate.paused, "收到 MFStart 后 master 应暂停写");
+
+        // 模拟 slave 追平失败/消息丢失：超过阈值后 tick 应自动恢复写
+        try {
+            Thread.sleep(80L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        failoverManager.tick();
+        assertFalse(writePauseGate.paused, "超过自动恢复阈值后 master 写应自动恢复");
+        // 幂等：再次 tick 不应报错（已恢复状态）
+        failoverManager.tick();
+        assertFalse(writePauseGate.paused);
+    }
+
+    @Test
+    @DisplayName("P0-新1：重复 MFStart 不重置暂停计时（防止无限延长写冻结）")
+    void testRepeatedMfStartDoesNotExtendPause() {
+        ClusterNode master = createMasterNode(MASTER_ID, 7000);
+        master.addState(ClusterNodeState.MYSELF);
+        ClusterNode slave = createSlaveNode(SLAVE_ID, 7001, MASTER_ID);
+        config.addNode(master);
+        config.addNode(slave);
+        config.setMyNodeId(MASTER_ID);
+
+        failoverManager.setMasterPauseAutoResumeMsForTest(50L);
+        failoverManager.onManualFailoverStart(new ManualFailoverStartMessage(SLAVE_ID));
+        try {
+            Thread.sleep(30L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        // 第二个 slave 再次发 MFStart：不应重置暂停计时（仍按首个 MFStart 计时）
+        failoverManager.onManualFailoverStart(new ManualFailoverStartMessage(SLAVE_ID));
+        try {
+            Thread.sleep(40L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        failoverManager.tick();
+        assertFalse(writePauseGate.paused, "重复 MFStart 不应重置暂停计时，超时后仍应自动恢复");
+    }
+
     // ==================== 辅助类 ====================
 
     private ClusterNode createMasterNode(String id, int port) {

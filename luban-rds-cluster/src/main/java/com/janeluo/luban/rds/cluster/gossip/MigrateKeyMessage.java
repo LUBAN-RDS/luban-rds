@@ -42,6 +42,15 @@ public class MigrateKeyMessage extends GossipMessage {
     private boolean replace;
 
     /**
+     * 目标数据库号（N-30：MIGRATE host port key db timeout 的 db 参数透传）。
+     * <p>
+     * 修复：旧实现解析出 destDb 后未进消息，目标节点 importKey 硬编码 db0，
+     * 源 db3 键被删、目标 db0 出现键——数据可达性错乱。默认 0 兼容旧消息。
+     * </p>
+     */
+    private int destDb;
+
+    /**
      * 默认构造方法
      */
     public MigrateKeyMessage() {
@@ -56,13 +65,15 @@ public class MigrateKeyMessage extends GossipMessage {
      * @param value        序列化后的键值
      * @param ttl          过期时间（毫秒）
      * @param replace      是否替换目标键
+     * @param destDb       目标数据库号
      */
-    public MigrateKeyMessage(String senderNodeId, String key, byte[] value, long ttl, boolean replace) {
+    public MigrateKeyMessage(String senderNodeId, String key, byte[] value, long ttl, boolean replace, int destDb) {
         super(senderNodeId, GossipMessageType.MIGRATE_KEY);
         this.key = key;
         this.value = value;
         this.ttl = ttl;
         this.replace = replace;
+        this.destDb = destDb;
     }
 
     public String getKey() {
@@ -97,12 +108,21 @@ public class MigrateKeyMessage extends GossipMessage {
         this.replace = replace;
     }
 
+    public int getDestDb() {
+        return destDb;
+    }
+
+    public void setDestDb(int destDb) {
+        this.destDb = destDb;
+    }
+
     @Override
     protected byte[] encodeBody() {
         byte[] keyBytes = key != null ? key.getBytes(StandardCharsets.UTF_8) : new byte[0];
         byte[] valueBytes = value != null ? value : new byte[0];
-        // 末尾追加 8 字节 requestId（P1-20），向后兼容：旧节点忽略多余字节
-        int totalLength = 4 + keyBytes.length + 4 + valueBytes.length + 8 + 1 + 8;
+        // 末尾追加 8 字节 requestId（P1-20）与 4 字节 destDb（N-30），向后兼容：
+        // 旧节点忽略多余字节（requestId 之前布局保持不变）
+        int totalLength = 4 + keyBytes.length + 4 + valueBytes.length + 8 + 1 + 8 + 4;
         byte[] data = new byte[totalLength];
         int offset = 0;
 
@@ -148,6 +168,12 @@ public class MigrateKeyMessage extends GossipMessage {
         data[offset++] = (byte) (requestId >> 16);
         data[offset++] = (byte) (requestId >> 8);
         data[offset++] = (byte) requestId;
+
+        // 写入 destDb（4 字节大端序，N-30）
+        data[offset++] = (byte) (destDb >> 24);
+        data[offset++] = (byte) (destDb >> 16);
+        data[offset++] = (byte) (destDb >> 8);
+        data[offset++] = (byte) destDb;
 
         return data;
     }
@@ -221,6 +247,14 @@ public class MigrateKeyMessage extends GossipMessage {
                     ((long) (body[offset++] & 0xFF) << 24) |
                     ((long) (body[offset++] & 0xFF) << 16) |
                     ((long) (body[offset++] & 0xFF) << 8) |
+                    (body[offset++] & 0xFF);
+        }
+
+        // 读取 destDb（N-30，末尾追加，长度守卫向后兼容旧消息；缺省为 db0）
+        if (offset + 4 <= body.length) {
+            this.destDb = ((body[offset++] & 0xFF) << 24) |
+                    ((body[offset++] & 0xFF) << 16) |
+                    ((body[offset++] & 0xFF) << 8) |
                     (body[offset++] & 0xFF);
         }
     }

@@ -1,5 +1,9 @@
 package com.janeluo.luban.rds.cluster.gossip;
 
+import com.janeluo.luban.rds.cluster.node.ClusterNode;
+
+import java.util.BitSet;
+
 /**
  * FAILOVER_AUTH_REQUEST 消息
  * <p>
@@ -10,11 +14,17 @@ package com.janeluo.luban.rds.cluster.gossip;
  * - 配置纪元（8 字节，大端序）
  * - 当前纪元（8 字节，大端序）
  * - 复制偏移量（8 字节，大端序）
+ * - 声明槽位 BitSet（2048 字节 = 16384 位，N-15 追加，向后兼容：旧消息无此字段时解码为空）
  * </p>
  */
 public class FailoverAuthRequestMessage extends GossipMessage {
 
     private static final long serialVersionUID = 1L;
+
+    /**
+     * 16384 位槽位图占用的字节数
+     */
+    private static final int SLOTS_BYTES = ClusterNode.CLUSTER_SLOTS / 8;
 
     /**
      * 配置纪元
@@ -30,6 +40,16 @@ public class FailoverAuthRequestMessage extends GossipMessage {
      * 复制偏移量
      */
     private long replicationOffset;
+
+    /**
+     * 声明槽位集合（N-15）。
+     * <p>
+     * 对齐 Redis clusterBuildMessageHdr：slave 广播时声明其 master 的槽位位图
+     * （"If this node is a slave we send the master's information instead"），
+     * 供投票方与槽位当前 owner 的 configEpoch 比较裁决陈旧候选。
+     * </p>
+     */
+    private BitSet claimedSlots;
 
     /**
      * 默认构造方法
@@ -80,11 +100,29 @@ public class FailoverAuthRequestMessage extends GossipMessage {
         this.replicationOffset = replicationOffset;
     }
 
+    /**
+     * 获取声明槽位集合（N-15）。
+     *
+     * @return 声明槽位 BitSet，旧版本消息（无此字段）返回空 BitSet
+     */
+    public BitSet getClaimedSlots() {
+        return claimedSlots;
+    }
+
+    /**
+     * 设置声明槽位集合（N-15）。
+     *
+     * @param claimedSlots 声明槽位 BitSet
+     */
+    public void setClaimedSlots(BitSet claimedSlots) {
+        this.claimedSlots = claimedSlots != null ? (BitSet) claimedSlots.clone() : null;
+    }
+
     // ==================== 编解码方法 ====================
 
     @Override
     protected byte[] encodeBody() {
-        byte[] data = new byte[24];
+        byte[] data = new byte[24 + SLOTS_BYTES];
         int offset = 0;
 
         // 写入配置纪元（大端序）
@@ -116,6 +154,12 @@ public class FailoverAuthRequestMessage extends GossipMessage {
         data[offset++] = (byte) (replicationOffset >> 16);
         data[offset++] = (byte) (replicationOffset >> 8);
         data[offset++] = (byte) replicationOffset;
+
+        // 写入声明槽位（2048 字节位图，BitSet.toByteArray 只含最高 set bit 之前的字节）
+        if (claimedSlots != null) {
+            byte[] slotBytes = claimedSlots.toByteArray();
+            System.arraycopy(slotBytes, 0, data, offset, Math.min(slotBytes.length, SLOTS_BYTES));
+        }
 
         return data;
     }
@@ -158,6 +202,14 @@ public class FailoverAuthRequestMessage extends GossipMessage {
                 ((long) (body[offset++] & 0xFF) << 16) |
                 ((long) (body[offset++] & 0xFF) << 8) |
                 ((long) (body[offset++] & 0xFF));
+
+        // 读取声明槽位（N-15）：尾部追加，兼容旧消息（不足 2048 字节时剩余位补 0）
+        int slotLen = Math.min(SLOTS_BYTES, body.length - offset);
+        if (slotLen > 0) {
+            byte[] slotBytes = new byte[SLOTS_BYTES];
+            System.arraycopy(body, offset, slotBytes, 0, slotLen);
+            this.claimedSlots = BitSet.valueOf(slotBytes);
+        }
     }
 
     @Override
@@ -168,6 +220,7 @@ public class FailoverAuthRequestMessage extends GossipMessage {
                 ", configEpoch=" + configEpoch +
                 ", currentEpoch=" + currentEpoch +
                 ", replicationOffset=" + replicationOffset +
+                ", claimedSlotCount=" + (claimedSlots != null ? claimedSlots.cardinality() : 0) +
                 '}';
     }
 }

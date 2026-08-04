@@ -769,62 +769,19 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             }
             
             // ==================== 集群重定向检查 ====================
-            // 在命令执行前检查是否需要重定向
+            // 在命令执行前检查是否需要重定向。
+            // 裁决逻辑收敛在 clusterRedirectForCommand（普通命令与 EXEC 事务内命令
+            // 共用同一套检查，保证行为一致，N-16）：
+            //   ① cluster_state 门控（P1-13：state=fail 拒绝所有键命令，仅
+            //      cluster-allow-reads-when-down 下放行只读命令）
+            //   ② slave 角色路由（P1-14：slave+写 → -READONLY；slave+读+未 READONLY → MOVED）
+            //   ③ CROSSSLOT（多键命令全键同槽）
+            //   ④ MOVED / ASK 重定向（以首键判定）
             if (clusterEnabled && commandRequiresKey(commandName)) {
-                List<String> keys = extractKeysFromCommand(commandName, args);
-                if (keys != null && !keys.isEmpty()) {
-                    // ---- P1-13：cluster_state 门控 ----
-                    // state=fail 时拒绝所有键命令（-CLUSTERDOWN）；仅在开启
-                    // cluster-allow-reads-when-down 时放行只读命令。对齐 Redis 7
-                    // getNodeByQuery：cluster in FAIL state 时默认 CLUSTERDOWN，
-                    // unless (allow reads when down && read command)。
-                    String stateGate = checkClusterStateGate(commandName);
-                    if (stateGate != null) {
-                        writeRedirect(ctx, stateGate);
-                        return;
-                    }
-
-                    // ---- P1-14：slave 角色路由 ----
-                    // 对齐 Redis getNodeByQuery：
-                    //   ① slave + 读命令 + 未声明 READONLY → MOVED 到 master（slave 不擅自服务读）
-                    //   ② slave + 写命令 → -READONLY（无论 READONLY 标志，slave 永不可写）
-                    // 仅当键首槽属于本 slave 的 master 关联槽位时才进入此分支，否则
-                    // 留给后续 checkSlotAndRedirect 处理 MOVED。
-                    String slaveGate = checkSlaveRedirect(commandName, keys.get(0), clientInfo);
-                    if (slaveGate != null) {
-                        writeRedirect(ctx, slaveGate);
-                        return;
-                    }
-
-                    // EVAL/EVALSHA 的 CROSSSLOT 校验仍由 checkCrossSlotForScript 处理
-                    // （向后兼容，task 3.6）；其余命令在此处统一做 CROSSSLOT 校验。
-                    if ("EVAL".equalsIgnoreCase(commandName) || "EVALSHA".equalsIgnoreCase(commandName)) {
-                        String scriptCross = checkCrossSlotForScript(commandName, args);
-                        if (scriptCross != null) {
-                            writeRedirect(ctx, scriptCross);
-                            return;
-                        }
-                    } else {
-                        String crossSlot = checkCrossSlot(keys);
-                        if (crossSlot != null) {
-                            writeRedirect(ctx, crossSlot);
-                            return;
-                        }
-                    }
-
-                    // 以首键判定 MOVED / ASK 重定向
-                    String key = keys.get(0);
-                    String redirect = checkSlotAndRedirect(key);
-                    if (redirect != null) {
-                        writeRedirect(ctx, redirect);
-                        return;
-                    }
-
-                    redirect = checkAskRedirect(key, clientInfo);
-                    if (redirect != null) {
-                        writeRedirect(ctx, redirect);
-                        return;
-                    }
+                String redirect = clusterRedirectForCommand(commandName, args, clientInfo);
+                if (redirect != null) {
+                    writeRedirect(ctx, redirect);
+                    return;
                 }
             }
 
@@ -1503,6 +1460,9 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         switch (upper) {
             case "GET":
             case "MGET":
+            case "SUNION":
+            case "SINTER":
+            case "SDIFF":
             case "HGET":
             case "HGETALL":
             case "HMGET":
@@ -1577,6 +1537,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             case "XRANGE":
             case "XREVRANGE":
             case "XREAD":
+            case "XREADGROUP":
             case "XINFO":
             case "XPENDING":
                 return true;
@@ -1661,6 +1622,28 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 if (b != null && b.isReadable()) ctx.writeAndFlush(b);
                 else if (b != null) b.release();
                 return;
+            }
+
+            // N-16：集群模式下 WATCH 键的路由校验（对齐 Redis 7.2 watchCommand：
+            // 每个被监视键经 getNodeByQuery 校验，键归属非本节点即 MOVED/ASK 重定向，
+            // cluster 状态异常即 -CLUSTERDOWN，均不注册监视）。修复：在错误节点
+            // WATCH 不存在的键导致 EXEC 永不中止。
+            if (clusterEnabled && clusterConfig != null) {
+                String stateGate = checkClusterStateGate("WATCH");
+                if (stateGate != null) {
+                    writeRedirect(ctx, stateGate);
+                    return;
+                }
+                for (int i = 1; i < args.length; i++) {
+                    String redirect = checkSlotAndRedirect(args[i]);
+                    if (redirect == null) {
+                        redirect = checkAskRedirect(args[i], clientInfo);
+                    }
+                    if (redirect != null) {
+                        writeRedirect(ctx, redirect);
+                        return;
+                    }
+                }
             }
             
             // 处理要监视的键
@@ -1809,6 +1792,25 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 else if (b != null) b.release();
                 clientInfo.resetTransaction();
                 return;
+            }
+
+            // N-16：集群模式下事务执行前的路由裁决（对齐 Redis 7 execCommand：
+            // 事务内任一命令需重定向（CLUSTERDOWN/READONLY/MOVED/ASK/CROSSSLOT）时，
+            // 整个事务以该错误中止并丢弃）。修复：跨槽事务在错误节点静默执行
+            // （写后键"消失"）、多键命令跨槽不校验、slave 上事务写被绕过。
+            // 与普通命令共用 clusterRedirectForCommand，保证事务内外行为一致。
+            if (clusterEnabled && clusterConfig != null) {
+                for (Command cmd : txQueue) {
+                    String cmdName = cmd.getName() != null ? cmd.getName().trim().toUpperCase() : "";
+                    String redirect = clusterRedirectForCommand(cmdName, cmd.getArgs(), clientInfo);
+                    if (redirect != null) {
+                        logger.debug("[EXEC] 事务命令需集群重定向，中止整个事务: cmd={}, redirect={}",
+                                cmdName, redirect.trim());
+                        writeRedirect(ctx, redirect);
+                        clientInfo.resetTransaction();
+                        return;
+                    }
+                }
             }
             
             java.util.List<Object> results = new ArrayList<>(txQueueSize);
@@ -2622,6 +2624,22 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             return scriptKeys(args);
         }
 
+        // XREAD/XREADGROUP: [COUNT n] [BLOCK ms] [NOACK] STREAMS key [key...] id [id...]
+        // 键位于 STREAMS 关键字之后的"前半段"（键与 ID 各占一半，键在前）。
+        // 修复：默认单键分支取 args[1]（"COUNT"/"GROUP"/"STREAMS" 等关键字）作路由键，
+        // 导致集群中已实现命令被 MOVED 到无关节点静默返回空、多流 CROSSSLOT 不校验。
+        // 对齐 Redis xreadGetKeys。
+        if ("XREAD".equals(cmd) || "XREADGROUP".equals(cmd)) {
+            return streamsKeys(args);
+        }
+
+        // XINFO: XINFO [STREAM key] [GROUPS key] [CONSUMERS key group] [HELP]
+        // STREAM/GROUPS/CONSUMERS 子命令的键为 args[2]；HELP 无键。
+        // 修复：默认分支取 args[1]（子命令名）作路由键。对齐 Redis xinfoGetKeys。
+        if ("XINFO".equals(cmd)) {
+            return xinfoKeys(args);
+        }
+
         // 默认单键命令：args[1]
         List<String> keys = new ArrayList<>();
         keys.add(args[1]);
@@ -2688,6 +2706,55 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         }
         for (int i = 3; i < args.length && i < 3 + numkeys; i++) {
             keys.add(args[i]);
+        }
+        return keys;
+    }
+
+    /**
+     * XREAD/XREADGROUP：提取 STREAMS 关键字之后的键。
+     * <p>
+     * 语法：XREAD [COUNT n] [BLOCK ms] STREAMS key [key ...] id [id ...]。
+     * STREAMS 之后的参数键与 ID 各占一半且键在前，因此取前半段为键。
+     * 与 Redis 的 xreadGetKeys 语义一致（按参数位置切分，不解析 ID 值）。
+     * STREAMS 关键字缺失或参数个数为奇数（语法错误）时返回空列表，
+     * 由命令处理器后续报语法错误。
+     * </p>
+     */
+    private List<String> streamsKeys(String[] args) {
+        List<String> keys = new ArrayList<>();
+        int streamsIdx = -1;
+        for (int i = 1; i < args.length; i++) {
+            if ("STREAMS".equalsIgnoreCase(args[i])) {
+                streamsIdx = i;
+                break;
+            }
+        }
+        if (streamsIdx < 0) {
+            return keys;
+        }
+        int streamArgs = args.length - streamsIdx - 1;
+        int numKeys = streamArgs / 2;
+        for (int i = 0; i < numKeys; i++) {
+            keys.add(args[streamsIdx + 1 + i]);
+        }
+        return keys;
+    }
+
+    /**
+     * XINFO：按子命令提取键（对齐 Redis xinfoGetKeys）。
+     * <p>
+     * XINFO STREAM key / XINFO GROUPS key / XINFO CONSUMERS key group → 键为 args[2]；
+     * XINFO HELP 无键。
+     * </p>
+     */
+    private List<String> xinfoKeys(String[] args) {
+        List<String> keys = new ArrayList<>();
+        if (args.length < 3) {
+            return keys;
+        }
+        String sub = args[1].toUpperCase();
+        if ("STREAM".equals(sub) || "GROUPS".equals(sub) || "CONSUMERS".equals(sub)) {
+            keys.add(args[2]);
         }
         return keys;
     }
@@ -3015,6 +3082,69 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             clientInfo.setAsking(false);
         }
         return null;
+    }
+
+    /**
+     * 对单条键命令做集群路由裁决（N-16：普通命令与 EXEC 事务内命令共用）。
+     * <p>
+     * 对齐 Redis 7 getNodeByQuery 的裁决顺序：
+     * <ol>
+     *   <li>cluster_state 门控：state=fail 时拒绝所有键命令（-CLUSTERDOWN）；仅在开启
+     *       cluster-allow-reads-when-down 时放行只读命令。</li>
+     *   <li>slave 角色路由：slave + 写命令 → -READONLY（slave 永不可写）；
+     *       slave + 读命令 + 未声明 READONLY → MOVED 到 master。</li>
+     *   <li>CROSSSLOT：多键命令全键须落在同一 slot（EVAL/EVALSHA 走脚本专用校验）。</li>
+     *   <li>MOVED / ASK：以首键判定槽位归属与迁移状态重定向。</li>
+     * </ol>
+     * 任一检查失败即返回需写回客户端的错误/重定向响应；全部通过返回 null。
+     * </p>
+     *
+     * @param commandName 命令名称
+     * @param args        命令参数（包含命令名）
+     * @param clientInfo  客户端信息
+     * @return null 表示放行；否则返回 -CLUSTERDOWN/-READONLY/-MOVED/-ASK/-CROSSSLOT 响应字符串
+     */
+    private String clusterRedirectForCommand(String commandName, String[] args, ClientInfo clientInfo) {
+        if (!clusterEnabled || clusterConfig == null || !commandRequiresKey(commandName)) {
+            return null;
+        }
+        List<String> keys = extractKeysFromCommand(commandName, args);
+        if (keys == null || keys.isEmpty()) {
+            return null;
+        }
+
+        // ① cluster_state 门控
+        String stateGate = checkClusterStateGate(commandName);
+        if (stateGate != null) {
+            return stateGate;
+        }
+
+        // ② slave 角色路由
+        String slaveGate = checkSlaveRedirect(commandName, keys.get(0), clientInfo);
+        if (slaveGate != null) {
+            return slaveGate;
+        }
+
+        // ③ CROSSSLOT 校验
+        if ("EVAL".equalsIgnoreCase(commandName) || "EVALSHA".equalsIgnoreCase(commandName)) {
+            String scriptCross = checkCrossSlotForScript(commandName, args);
+            if (scriptCross != null) {
+                return scriptCross;
+            }
+        } else {
+            String crossSlot = checkCrossSlot(keys);
+            if (crossSlot != null) {
+                return crossSlot;
+            }
+        }
+
+        // ④ MOVED / ASK 重定向（以首键判定）
+        String key = keys.get(0);
+        String redirect = checkSlotAndRedirect(key);
+        if (redirect != null) {
+            return redirect;
+        }
+        return checkAskRedirect(key, clientInfo);
     }
     
     /**

@@ -48,13 +48,22 @@ public class FailoverManager {
     private static final long JITTER_BOUND_MS = 500L;
 
     /**
-     * rank 退避步长（毫秒，P1-6）。
+     * 固定退避基数（毫秒，N-11）。
      * <p>
-     * delay = gracePeriod + rank * RANK_DELAY_MS + jitter，
-     * rank=0 为同 master 中 replOffset 最大的 slave，对齐 Redis {@code CLUSTER_MF_RETRY_MULT} 量级。
+     * 对齐 Redis 7 clusterHandleSlaveFailover：{@code delay = 500 + random()%500 + rank*1000}，
+     * 固定 500ms 用于等待 FAIL 消息传播，之后再叠加 rank 退避与抖动。
      * </p>
      */
-    private static final long RANK_DELAY_MS = 500L;
+    private static final long FIXED_BASE_MS = 500L;
+
+    /**
+     * rank 退避步长（毫秒，P1-6 + N-11）。
+     * <p>
+     * delay = gracePeriod + FIXED_BASE_MS + rank * RANK_DELAY_MS + jitter，
+     * rank=0 为同 master 中 replOffset 最大的 slave。步长对齐 Redis {@code rank * 1000}。
+     * </p>
+     */
+    private static final long RANK_DELAY_MS = 1000L;
 
     private final ClusterConfig clusterConfig;
     private final SlotManager slotManager;
@@ -118,6 +127,28 @@ public class FailoverManager {
      */
     private long votedReplOffset;
 
+    /**
+     * 各 master 最近一次获票时刻（masterId -> 毫秒时间戳，N-14）。
+     * <p>
+     * 对齐 Redis clusterSendFailoverAuthIfNeeded 的 {@code node->slaveof->voted_time}：
+     * 同一 master 的候选在 2×nodeTimeout 冷却期内不再获票（"We did not vote for a slave
+     * about this master for two times the node timeout"），防止选举风暴下反复投票。
+     * 按 master 维度（而非全局）记录，不同 master 的选举互不阻塞。
+     * </p>
+     */
+    private final Map<String, Long> votedTimeByMasterId = new HashMap<>();
+
+    /**
+     * 选举失败后的重试冷却截止时刻（毫秒时间戳，0 = 无冷却，N-11）。
+     * <p>
+     * 对齐 Redis clusterHandleSlaveFailover 的 auth_retry_time：选举超时
+     * （2×nodeTimeout 未获多数票）后置为 {@code now + 4×nodeTimeout}（auth_retry_time
+     * = 2×auth_timeout = 4×node_timeout），冷却期内 tryStartElection 保持 IDLE，
+     * 防止超时→下一轮 tick 立即重开选举形成选举风暴（重复广播 AUTH_REQUEST）。
+     * </p>
+     */
+    private long retryCooldownUntil;
+
     // ==================== 手动 failover 状态机（P1-12，独立于自动选举） ====================
     /**
      * 手动 failover 状态（候选 slave 侧）。
@@ -143,6 +174,21 @@ public class FailoverManager {
      * slave offset 追平判定的轮询间隔内容忍的微小落后（字节），避免精确相等才放行的死锁。
      */
     private static final long OFFSET_CATCHUP_TOLERANCE = 0L;
+
+    /**
+     * master 侧写暂停自动恢复阈值（毫秒，P0-新1）。
+     * <p>
+     * master 收到 MFStart 暂停写后，若 2×nodeTimeout 内接管未完成（slave 追平失败、
+     * 消息丢失、slave 宕机等），自动恢复写，避免集群级写永久冻结。
+     * 默认 2×nodeTimeout（默认 15s 时与 slave 侧 {@link #MANUAL_FAILOVER_TIMEOUT_MS} 对齐）。
+     * </p>
+     */
+    private volatile long masterPauseAutoResumeMs;
+    /**
+     * 本节点（作为被接管 master）暂停写的起始时刻（P0-新1）。
+     * 0 表示本节点当前未因手动 failover 暂停写。
+     */
+    private volatile long masterPauseStartTime;
 
     /**
      * 构造方法（向后兼容，等价于 slaveValidityFactor=0，即禁用有效性校验）。
@@ -186,6 +232,7 @@ public class FailoverManager {
         this.nodeTimeout = nodeTimeout;
         this.gracePeriod = gracePeriod;
         this.slaveValidityFactor = slaveValidityFactor;
+        this.masterPauseAutoResumeMs = 2L * nodeTimeout;
     }
 
     /**
@@ -219,6 +266,11 @@ public class FailoverManager {
      */
     public synchronized void tick() {
         try {
+            // P0-新1：master 侧写暂停超时自动恢复。本节点作为被接管 master 暂停写后，
+            // 若接管未在阈值内完成（slave 追平失败/消息丢失/slave 宕机），自动 resume，
+            // 避免写永久冻结。正常完成后由角色变更点（onFailoverResult/applySelfDemotion）兜底 resume。
+            autoResumeMasterWritePauseIfTimedOut();
+
             switch (state) {
                 case IDLE:
                     tryStartElection();
@@ -251,6 +303,19 @@ public class FailoverManager {
         if (me.isFail() || me.isPfail()) {
             return;
         }
+        // N-11：选举失败重试冷却。上次选举超时后须等待 4×nodeTimeout 才能重开，
+        // 否则"超时→IDLE→下一轮 tick 立即重入 REQUESTING"形成选举风暴（重复广播
+        // AUTH_REQUEST 且票数分散）。冷却期由 handleRequestingState 的超时分支设置。
+        if (retryCooldownUntil > 0L && System.currentTimeMillis() < retryCooldownUntil) {
+            return;
+        }
+        // P0-新2：回填 MYSELF 的真实复制偏移量。
+        // gossip 只更新远端节点的 replOffset（GossipProtocol 各 setReplOffset 调用点均为
+        // 远端节点），MYSELF 的 replOffset 全库无写入方，恒为 0。若不加回填：
+        // ① rank 退避全部反转（offset=0 的陈旧 slave rank 最小、最新鲜 slave rank 最大）；
+        // ② 默认 cluster-slave-validity-factor=10 下 validity 校验恒失败，所有选举被永久阻止，
+        //    主节点宕机后集群不可写（高可用整体失效）。
+        me.setReplOffset(replicationLifecycleListener.getReplicationOffset());
         String masterId = me.getMasterNodeId();
         if (masterId == null) {
             return;
@@ -279,18 +344,21 @@ public class FailoverManager {
 
         // 满足触发条件
         state = FailoverState.REQUESTING;
+        // 能走到此处说明冷却已过期（或从未设置），清除冷却标记保持不变量
+        retryCooldownUntil = 0L;
         electionStartTime = System.currentTimeMillis();
 
-        // rank 退避（P1-6，对齐 Redis 7：delay = gracePeriod + rank * RANK_DELAY_MS + jitter）。
+        // rank 退避（P1-6 + N-11，对齐 Redis 7：delay = gracePeriod + 500 + rank*1000 + jitter）。
         // rank = 同 master 中 replOffset 严格大于本节点的 slave 个数（offset 最大者 rank=0）。
         // offset 全 0（未装配复制，或 ClusterNode.replOffset 未被 gossip 填充）时所有 slave
-        // 等价于 rank=0，退化为 gracePeriod + jitter（向后兼容旧行为）。
+        // 等价于 rank=0，退化为 gracePeriod + 500 + jitter（向后兼容旧行为）。
         int rank = computeFailoverRank(me, masterId);
         computedRank = rank;
         // 退避抖动：不同 slave 的 nodeId hashCode 不同以错峰广播，降低同纪元多候选同时
         // 发起导致票数分散的概率。修复 Math.abs(Integer.MIN_VALUE) 仍为负的 bug：先取模再取绝对值
         long jitter = Math.abs(me.getNodeId().hashCode() % JITTER_BOUND_MS);
-        requestDeadline = electionStartTime + gracePeriod + rank * RANK_DELAY_MS + jitter;
+        requestDeadline = electionStartTime + gracePeriod + FIXED_BASE_MS
+                + rank * RANK_DELAY_MS + jitter;
         failedMasterId = masterId;
         authVotes.clear();
         requestBroadcasted = false;
@@ -375,13 +443,19 @@ public class FailoverManager {
                 failedMasterId != null ? clusterConfig.getNode(failedMasterId) : null;
         if (master != null && !master.isFail()) {
             logger.info("原 master 已恢复，取消选举: masterId={}", failedMasterId);
+            // N-11：master 恢复说明导致选举失败的条件已消失，清除重试冷却
+            retryCooldownUntil = 0L;
             resetElectionState();
             return;
         }
 
-        // 选举超时（2 * nodeTimeout 未过半授权）→ 回 IDLE
+        // 选举超时（2 * nodeTimeout 未过半授权）→ 回 IDLE，并进入重试冷却（N-11）。
+        // 对齐 Redis：auth_timeout = MAX(2×nodeTimeout, 2000)，
+        // auth_retry_time = 2×auth_timeout = 4×nodeTimeout，冷却期满才可重开选举。
         if (System.currentTimeMillis() - electionStartTime > 2L * nodeTimeout) {
-            logger.warn("选举超时，回退 IDLE: failedMasterId={}", failedMasterId);
+            logger.warn("选举超时，回退 IDLE 并进入 {}ms 重试冷却: failedMasterId={}",
+                    4L * nodeTimeout, failedMasterId);
+            retryCooldownUntil = System.currentTimeMillis() + 4L * nodeTimeout;
             resetElectionState();
             return;
         }
@@ -399,6 +473,11 @@ public class FailoverManager {
      * 比较数据新鲜度择优（对齐 Redis 7）。偏移量由 {@link ReplicationLifecycleListener}
      * 提供，未装配复制组件时返回 0（保守值，等价旧行为）。
      * </p>
+     * <p>
+     * N-15：对齐 Redis clusterBuildMessageHdr——slave 广播时声明其 master 的 configEpoch
+     * 与槽位位图（"If this node is a slave we send the master's information instead"）。
+     * 投票方据此比较候选声明纪元与槽位当前 owner 的纪元，拒绝陈旧候选。
+     * </p>
      */
     private void broadcastAuthRequest() {
         ClusterNode me = clusterConfig.getMyNode();
@@ -413,14 +492,23 @@ public class FailoverManager {
         // 替换原硬编码 0L，使投票方可按偏移量择优，避免陈旧数据 slave 抢先胜选。
         long myReplOffset = replicationLifecycleListener.getReplicationOffset();
 
+        // N-15：声明纪元 = 被接管的 master 的 configEpoch（slave 自身 configEpoch 恒为 0，
+        // 不能反映其声明的槽位配置版本）；被接管的 master 缺失时回退到自身 configEpoch。
+        ClusterNode master = failedMasterId != null ? clusterConfig.getNode(failedMasterId) : null;
+        long claimConfigEpoch = master != null ? master.getConfigEpoch() : me.getConfigEpoch();
+        BitSet claimedSlots = master != null ? master.getSlots() : null;
+
         FailoverAuthRequestMessage req = new FailoverAuthRequestMessage(
                 me.getNodeId(),
-                me.getConfigEpoch(),
+                claimConfigEpoch,
                 electionEpoch,
                 myReplOffset);
+        if (claimedSlots != null) {
+            req.setClaimedSlots(claimedSlots);
+        }
         busClient.broadcast(req);
-        logger.warn("广播选举请求: candidate={}, epoch={}, replOffset={}",
-                me.getNodeId(), electionEpoch, myReplOffset);
+        logger.warn("广播选举请求: candidate={}, epoch={}, replOffset={}, claimConfigEpoch={}",
+                me.getNodeId(), electionEpoch, myReplOffset, claimConfigEpoch);
     }
 
     private void resetElectionState() {
@@ -460,6 +548,13 @@ public class FailoverManager {
             // 仅健康 master 投票（FAIL master 视为不可达，对齐 Redis 行为）
             return;
         }
+        // N-14：投票者必须持有至少一个槽位（对齐 Redis clusterSendFailoverAuthIfNeeded：
+        // "if (nodeIsSlave(myself) || myself->numslots == 0) return;"——集群大小按"持槽
+        // master 数"计，无槽 master 无投票权）。防止仅持空主身份的节点参与选举决策。
+        if (me.getSlotCount() == 0) {
+            logger.debug("拒绝 AUTH_REQUEST：本节点未持槽，无投票权: myNodeId={}", me.getNodeId());
+            return;
+        }
 
         long reqEpoch = req.getCurrentEpoch();
         long myEpoch = clusterConfig.getCurrentEpoch();
@@ -488,6 +583,33 @@ public class FailoverManager {
         logger.debug("AUTH_REQUEST 候选校验通过: candidate={}, configEpoch={}, replOffset={}",
                 candidateId, req.getConfigEpoch(), candidateReplOffset);
 
+        // (1.6) N-15：候选 configEpoch 与槽位 owner 裁决（对齐 Redis
+        // clusterSendFailoverAuthIfNeeded：遍历候选声明的槽位，若任一槽位当前 owner 的
+        // configEpoch 严格大于候选声明纪元，说明该槽位已被更高纪元的接管者持有——
+        // 候选为陈旧候选（可能来自分区恢复的旧 slave），拒绝投票）。
+        long candidateConfigEpoch = req.getConfigEpoch();
+        BitSet claimedSlots = req.getClaimedSlots();
+        if (claimedSlots == null || claimedSlots.isEmpty()) {
+            // 旧版本消息无槽位声明（24 字节线格式），回退到本地对候选 master 槽位的视图
+            claimedSlots = candidateMaster.getSlots();
+        }
+        if (claimedSlots != null) {
+            for (int i = claimedSlots.nextSetBit(0); i >= 0; i = claimedSlots.nextSetBit(i + 1)) {
+                String ownerId = clusterConfig.getSlotOwner(i);
+                if (ownerId == null || ownerId.equals(candidateId)) {
+                    continue;
+                }
+                ClusterNode owner = clusterConfig.getNode(ownerId);
+                if (owner != null && owner.getConfigEpoch() > candidateConfigEpoch) {
+                    logger.warn("拒绝 AUTH_REQUEST：候选 configEpoch 陈旧（槽位 {} 由更高纪元节点 {} 持有）: "
+                                    + "candidate={}, claimEpoch={}, ownerEpoch={}",
+                            i, ownerId, candidateId, candidateConfigEpoch,
+                            owner.getConfigEpoch());
+                    return;
+                }
+            }
+        }
+
         // (2) 落后则追平 currentEpoch，新纪元清旧票。
         //     注：lastVoteEpoch 不在此推进——它只在真正投出票后更新（见 step 5），保证语义为"最后投出的票"。
         if (reqEpoch > myEpoch) {
@@ -515,26 +637,63 @@ public class FailoverManager {
             return;
         }
 
+        // (4.5) N-14：voted_time 冷却（对齐 Redis clusterSendFailoverAuthIfNeeded：
+        //   "mstime() - node->slaveof->voted_time < node_timeout*2" 拒绝）。同一 master 的
+        //   候选在 2×nodeTimeout 内不再获票，即使新纪元请求到达也保持冷却（防止选举风暴
+        //   下反复投票）；不同 master 的选举互不阻塞（按 master 维度记录）。
+        long lastVotedTime = votedTimeByMasterId.getOrDefault(candidateMasterId, 0L);
+        if (lastVotedTime > 0L
+                && (System.currentTimeMillis() - lastVotedTime) < 2L * nodeTimeout) {
+            logger.debug("拒绝 AUTH_REQUEST：该 master 处于投票冷却期（2×nodeTimeout）: "
+                    + "master={}, candidate={}", candidateMasterId, candidateId);
+            return;
+        }
+
         // (5) 本纪元已投他 slave -> 拒绝（首投即定，不撤票）
         //     即使新候选 replOffset 更大也不改票：ACK 已广播，撤票重投会造成同纪元双投。
         //     数据新鲜度择优由 tryStartElection 的 rank 退避保证 offset 大者先发起。
         //     注：(4) 闸门在同纪元二次请求时也会拒绝，此处为防御性双保险。
         if (!votesCast.isEmpty()) {
-            logger.debug("本纪元已投他 slave，拒绝（首投即定，不撤票）: votedFor={}, votedReplOffset={}, candidate={}, candidateReplOffset={}",
-                    votesCast.keySet(), votedReplOffset, candidateId, candidateReplOffset);
-            return;
+            if (votesCast.containsValue(reqEpoch)) {
+                // 本纪元已有投票记录 -> 拒绝新候选
+                logger.debug("本纪元已投他 slave，拒绝（首投即定，不撤票）: votedFor={}, votedReplOffset={}, candidate={}, candidateReplOffset={}",
+                        votesCast.keySet(), votedReplOffset, candidateId, candidateReplOffset);
+                return;
+            }
+            // N-12：votesCast 仅剩旧纪元条目（gossip/结果消息抬升 currentEpoch 时未能及时
+            // 清理）→ 视为新纪元首投，清理旧记录后放行，避免新纪元首个合法投票被误拒。
+            votesCast.clear();
+            votedReplOffset = 0L;
         }
 
         // (6) 首投：记录候选及其偏移量，授权
         votesCast.put(candidateId, reqEpoch);
         votedReplOffset = candidateReplOffset;
+        // N-14：记录本 master 的获票时刻（voted_time），进入 2×nodeTimeout 冷却
+        votedTimeByMasterId.put(candidateMasterId, System.currentTimeMillis());
         // 记录投票纪元并持久化（P0-4：重启后仍拒绝同纪元重投）
         clusterConfig.recordVoteEpoch(reqEpoch);
         sendAuthAck(candidateId, reqEpoch);
     }
 
-    private void sendAuthAck(String candidateId, long epoch) {
-        ClusterNode me = clusterConfig.getMyNode();
+    /**
+     * N-12：集群 currentEpoch 被外部消息抬升时回调。
+     * <p>
+     * 调用点：GossipProtocol PING/PONG/MEET 的 setEpochIfGreater 返回 true 时、
+     * 以及 {@link #onFailoverResult} 应用更高纪元时。
+     * votesCast 记录"某纪元已投候选"的去重表，纪元被外部抬升后旧条目即失效：若不清理，
+     * 新纪元首个合法投票会被旧条目误拒（选举停滞 2×nodeTimeout+）。lastVoteEpoch 语义
+     * 不变，仍由 recordVoteEpoch 持久化兜底拒绝同纪元重投。
+     * </p>
+     */
+    public synchronized void onClusterEpochRaised() {
+        if (!votesCast.isEmpty()) {
+            votesCast.clear();
+            votedReplOffset = 0L;
+        }
+    }
+
+    private void sendAuthAck(String candidateId, long epoch) {        ClusterNode me = clusterConfig.getMyNode();
         if (me == null) {
             return;
         }
@@ -712,8 +871,14 @@ public class FailoverManager {
             logger.warn("收到非本节点 slave 的 MFStart，忽略: sender={}", msg.getSenderNodeId());
             return;
         }
-        // 暂停写并记录当前偏移量
-        writePauseGate.pause();
+        // 暂停写并记录当前偏移量（P0-新1）。
+        // 幂等：已处于暂停中（上一轮 MFStart 未完成）时不重置暂停计时，防止恶意/故障
+        // slave 反复重发 MFStart 无限延长 master 写冻结（自动恢复阈值见 tick 的
+        // autoResumeMasterWritePauseIfTimedOut）。
+        if (masterPauseStartTime == 0L) {
+            writePauseGate.pause();
+            masterPauseStartTime = System.currentTimeMillis();
+        }
         long currentOffset = replicationLifecycleListener.getReplicationOffset();
         logger.info("收到 MFStart，已暂停写并记录 offset={}，回传给 slave={}",
                 currentOffset, msg.getSenderNodeId());
@@ -785,7 +950,50 @@ public class FailoverManager {
         pendingManualMaster = null;
         mfTargetOffset = 0L;
         // 解除 master 写暂停（本节点可能是被请求接管的 master，暂停可能仍在生效）
-        writePauseGate.resume();
+        releaseWritePauseIfPaused();
+    }
+
+    /**
+     * P0-新1：master 侧写暂停超时自动恢复。
+     * <p>
+     * 旧实现中 master 收到 MFStart 后 {@code writePauseGate.pause()} 且不设置任何 master 侧
+     * 状态，唯一 resume 在 slave 侧状态机的 abortManualFailover 内（对 master 的 gate 是 no-op），
+     * 成功路径的 onFailoverResult 也不 resume → master 写永久冻结直到进程重启。
+     * 本方法由 tick 每轮调用：暂停超过 {@link #masterPauseAutoResumeMs} 未完成接管则自动恢复。
+     * </p>
+     */
+    private void autoResumeMasterWritePauseIfTimedOut() {
+        if (masterPauseStartTime > 0L
+                && (System.currentTimeMillis() - masterPauseStartTime) > masterPauseAutoResumeMs) {
+            logger.warn("master 写暂停超过 {}ms 未完成接管，自动恢复写", masterPauseAutoResumeMs);
+            releaseWritePauseIfPaused();
+        }
+    }
+
+    /**
+     * 解除本节点因手动 failover 暂停的写门控（P0-新1）。
+     * <p>
+     * 幂等：未暂停时无副作用（masterPauseStartTime==0 直接返回）。
+     * 调用点：① tick 超时自动恢复；② abortManualFailover（slave 侧中止）；③ 角色变更兜底
+     * （performFailover 自身被降级、onFailoverResult 应用完成、applySelfDemotion 自降级）。
+     * </p>
+     */
+    private void releaseWritePauseIfPaused() {
+        if (masterPauseStartTime > 0L) {
+            masterPauseStartTime = 0L;
+            writePauseGate.resume();
+            logger.warn("手动 failover 已结束/中止/超时，解除本节点写暂停");
+        }
+    }
+
+    /**
+     * 测试辅助：覆盖 master 侧写暂停自动恢复阈值（默认 2×nodeTimeout）。
+     * 仅供同包测试缩短自动恢复等待时间。
+     *
+     * @param ms 自动恢复阈值（毫秒）
+     */
+    synchronized void setMasterPauseAutoResumeMsForTest(long ms) {
+        this.masterPauseAutoResumeMs = ms;
     }
 
     /**
@@ -833,6 +1041,9 @@ public class FailoverManager {
         }
         if (masterNode.isMyself()) {
             replicationLifecycleListener.demoteToSlave(slaveNode);
+            // P0-新1：本节点作为被接管 master 被降级，手动 failover 已生效，解除写暂停兜底。
+            // （正常路径下 resume 由 onFailoverResult 完成，此处覆盖直接降级调用路径）
+            releaseWritePauseIfPaused();
         }
     }
 
@@ -875,6 +1086,15 @@ public class FailoverManager {
     public synchronized void onFailoverResult(FailoverResultMessage msg) {
         long myEpoch = clusterConfig.getCurrentEpoch();
 
+        // N-9：sender==winner 校验。FailoverResult 只能由胜选者本人广播（广播方构造时
+        // sender=winner），拒绝"代发"或伪造他人胜选的声明，防止任意节点冒充他人接管槽位。
+        if (msg.getSenderNodeId() == null
+                || !msg.getSenderNodeId().equals(msg.getWinnerNodeId())) {
+            logger.warn("忽略 FailoverResult：sender≠winner（疑似伪造）: sender={}, winner={}",
+                    msg.getSenderNodeId(), msg.getWinnerNodeId());
+            return;
+        }
+
         // 纪元裁决：旧纪元忽略（防回放）
         if (msg.getNewConfigEpoch() < myEpoch) {
             logger.debug("忽略旧纪元 FailoverResult: msgEpoch={}, myEpoch={}",
@@ -905,11 +1125,34 @@ public class FailoverManager {
             }
         }
 
+        // N-9：槽位来源交叉校验。声明的继承槽位必须"应属被降级旧 master"——即当前 owner
+        // 的 configEpoch 严格低于声明纪元（对齐 Redis clusterUpdateSlotsConfigWith：
+        // 声明方只能接管 configEpoch 严格低于自己的 owner 的槽位；相等纪元的冲突已由
+        // 上方 nodeId 字典序决胜处理）。任一被声明槽位被 configEpoch 不低于声明纪元的
+        // 节点持有，说明声明与本地已知的更新配置冲突，整体拒绝（防止伪造
+        // {winner=自己, epoch=当前+1, slots=全 16384} 盗取其他 master 的槽位）。
+        BitSet inherited = msg.getInheritedSlots();
+        if (inherited != null) {
+            for (int i = inherited.nextSetBit(0); i >= 0; i = inherited.nextSetBit(i + 1)) {
+                String ownerId = clusterConfig.getSlotOwner(i);
+                if (ownerId == null || ownerId.equals(msg.getWinnerNodeId())) {
+                    continue;
+                }
+                ClusterNode owner = clusterConfig.getNode(ownerId);
+                if (owner != null && owner.getConfigEpoch() > msg.getNewConfigEpoch()) {
+                    logger.warn("忽略 FailoverResult：槽位来源校验失败（槽位 {} 由更高纪元节点 {} 持有）: "
+                                    + "winner={}, epoch={}, ownerEpoch={}",
+                            i, ownerId, msg.getWinnerNodeId(), msg.getNewConfigEpoch(),
+                            owner.getConfigEpoch());
+                    return;
+                }
+            }
+        }
+
         // 槽位转移在前：清 winner 历史 slot 残留，逐 slot 赋给 winner（单一来源）。
         // 移除原 winner.setSlots(inherited.clone()) 整体覆写，消除 setSlots 与逐 slot setSlotOwner
         // 的双写路径——当 winner 已持部分 slot 时两路径结果可能短暂不一致。
         // clusterConfig.setSlotOwner 内部已清理 oldOwner.removeSlot + slotAssignment[slot]=winner + winner.addSlot。
-        BitSet inherited = msg.getInheritedSlots();
         if (inherited != null) {
             winner.clearSlots();
             for (int i = inherited.nextSetBit(0); i >= 0; i = inherited.nextSetBit(i + 1)) {
@@ -928,19 +1171,16 @@ public class FailoverManager {
         winner.setConfigEpoch(msg.getNewConfigEpoch());
 
         // 原 master（持有这些槽位且非 winner 的旧 master）降级为 winner 的 slave。
-        // 双路径覆盖：
-        // ① sharesAnySlot：旧 master 仍持有槽位时直接匹配（正常时序）。
-        // ② 备选路径 (staleMaster)：先到的 gossip 同步已将槽位移交给 winner，
-        //    sharesAnySlot 返回 false 导致降级被跳过。此时检测 MASTER 且无槽位
-        //    且 configEpoch 低于 winner epoch，判定为旧 master 并补偿降级。
+        // 仅降级与 inherited slots 有交集的旧 master（N-13，对齐 Redis）：删除旧实现
+        // 的 "无槽位+低纪元即降级" 备选路径——那会把新建空 master、reshard 迁空者等
+        // 无关 master 误降级为 winner 的 slave。gossip 先于 FailoverResult 把槽位移交
+        // 给 winner 导致 sharesAnySlot 为 false 的时序缺口，由 gossip section 的角色
+        // 传播（processGossipNodes 对第三方节点按纪元门控同步 MASTER/SLAVE 标志）自愈。
         for (ClusterNode node : clusterConfig.getAllNodes()) {
             boolean isOldMaster = node.isMaster() && !node.getNodeId().equals(winner.getNodeId())
                     && sharesAnySlot(node, inherited);
-            boolean isStaleMaster = node.isMaster() && !node.getNodeId().equals(winner.getNodeId())
-                    && node.getSlotCount() == 0
-                    && node.getConfigEpoch() < msg.getNewConfigEpoch();
 
-            if (isOldMaster || isStaleMaster) {
+            if (isOldMaster) {
                 node.clearSlots();
                 node.removeState(ClusterNodeState.MASTER);
                 node.addState(ClusterNodeState.SLAVE);
@@ -956,7 +1196,12 @@ public class FailoverManager {
             }
         }
 
-        clusterConfig.setCurrentEpoch(msg.getNewConfigEpoch());
+        // N-9：setCurrentEpoch 改为 setEpochIfGreater——FailoverResult 只允许抬升、
+        // 不允许回退 currentEpoch（防回放/投票门控被削弱，与 applySelfDemotion 的
+        // N-25 修复保持一致）。抬升后同时清理 votesCast 中已过期的投票记录（N-12）。
+        if (clusterConfig.setEpochIfGreater(msg.getNewConfigEpoch())) {
+            onClusterEpochRaised();
+        }
 
         // 通知复制生命周期：本节点角色因 FailoverResult 广播而变更。
         // 必须在 notifyTopologyChanged 之前完成角色判定，确保 winner 已是 master、
@@ -968,6 +1213,8 @@ public class FailoverManager {
             } else if (myNode.isSlave() && myNode.getMasterNodeId() != null
                     && myNode.getMasterNodeId().equals(winner.getNodeId())) {
                 replicationLifecycleListener.demoteToSlave(winner);
+                // P0-新1：本节点作为被接管 master 已被降级，手动 failover 完成，解除写暂停兜底。
+                releaseWritePauseIfPaused();
             }
         }
 
@@ -1037,10 +1284,14 @@ public class FailoverManager {
         myNode.removeState(ClusterNodeState.FAIL);
         myNode.removeState(ClusterNodeState.PFAIL);
         myNode.setConfigEpoch(newConfigEpoch);
-        clusterConfig.setCurrentEpoch(newConfigEpoch);
+        // N-25：对齐 onFailoverResult 的 setEpochIfGreater，防止自降级把已被
+        // ADDSLOTS/选举推高的 currentEpoch 回退（防回放/投票门控被削弱）。
+        clusterConfig.setEpochIfGreater(newConfigEpoch);
 
         // 切换复制方向：向新主发起同步
         replicationLifecycleListener.demoteToSlave(newMaster);
+        // P0-新1：MYSELF 已被降级为 slave，手动 failover 的写暂停兜底解除。
+        releaseWritePauseIfPaused();
         notifyTopologyChanged();
         logger.warn("MYSELF 经 gossip 自降级为 slave: newMaster={}, configEpoch={}",
                 newMasterNodeId, newConfigEpoch);
@@ -1103,6 +1354,62 @@ public class FailoverManager {
         this.state = FailoverState.REQUESTING;
         this.electionEpoch = epoch;
         this.requestBroadcasted = true;
+    }
+
+    /**
+     * 测试辅助：获取当前选举重试冷却截止时刻（N-11）。0 表示无冷却。
+     * 仅供同包测试观察重试冷却逻辑。
+     *
+     * @return 重试冷却截止时刻（毫秒时间戳）
+     */
+    synchronized long getRetryCooldownUntilForTest() {
+        return retryCooldownUntil;
+    }
+
+    /**
+     * 测试辅助：获取最近一次进入选举的时刻（N-11 退避公式校验用）。
+     * 仅供同包测试观察退避窗口。
+     *
+     * @return 进入 REQUESTING 的时刻（毫秒时间戳）
+     */
+    synchronized long getElectionStartTimeForTest() {
+        return electionStartTime;
+    }
+
+    /**
+     * 测试辅助：获取当前选举的退避到期时刻（N-11 退避公式校验用）。
+     * 仅供同包测试观察退避窗口。
+     *
+     * @return 退避到期时刻（毫秒时间戳）
+     */
+    synchronized long getRequestDeadlineForTest() {
+        return requestDeadline;
+    }
+
+    /**
+     * 测试辅助：获取指定 master 的最近获票时刻（N-14）。0 表示从未投票。
+     * 仅供同包测试观察 voted_time 冷却逻辑。
+     *
+     * @param masterId 候选 master 的节点ID
+     * @return 最近获票时刻（毫秒时间戳）
+     */
+    synchronized long getLastVoteTimeForTest(String masterId) {
+        return votedTimeByMasterId.getOrDefault(masterId, 0L);
+    }
+
+    /**
+     * 测试辅助：覆写指定 master 的最近获票时刻（N-14）。
+     * 仅供同包测试模拟冷却期流逝（t<=0 时清除记录）。
+     *
+     * @param masterId 候选 master 的节点ID
+     * @param t        获票时刻（毫秒时间戳），<=0 表示清除
+     */
+    synchronized void setLastVoteTimeForTest(String masterId, long t) {
+        if (t <= 0L) {
+            votedTimeByMasterId.remove(masterId);
+        } else {
+            votedTimeByMasterId.put(masterId, t);
+        }
     }
 
     /**

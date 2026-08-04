@@ -1,19 +1,21 @@
 package com.janeluo.luban.rds.cluster.migration;
 
 import com.janeluo.luban.rds.cluster.bus.ClusterBusClient;
+import com.janeluo.luban.rds.cluster.bus.ClusterBusCodec;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.gossip.GossipMessage;
 import com.janeluo.luban.rds.cluster.gossip.MigrateKeyAckMessage;
 import com.janeluo.luban.rds.cluster.gossip.MigrateKeyMessage;
+import com.janeluo.luban.rds.cluster.lifecycle.ClusterWritePropagator;
+import com.janeluo.luban.rds.cluster.lifecycle.PropagationFrames;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.slot.SlotUtils;
 import com.janeluo.luban.rds.core.store.MemoryStore;
+import com.janeluo.luban.rds.core.store.ValueSerialization;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.ObjectOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -85,6 +87,17 @@ public class MigrateCommandHandler {
     private final ClusterConfig clusterConfig;
 
     /**
+     * 源键删除的复制/AOF 传播回调（P0-新3）。
+     * <p>
+     * MIGRATE 分发在 RedisServerHandler 中提前 return，源端删除（{@code memoryStore.del}）
+     * 不经过普通命令传播链；若不补传播，源 master 删除已迁移键后其 slave 仍保留该键
+     * （幽灵键），failover 后副本数据分叉。由 server 模块注入，将 DEL 帧写入复制与 AOF。
+     * 未注入（null）时跳过传播，保持单测/未装配场景向后兼容。
+     * </p>
+     */
+    private volatile ClusterWritePropagator writePropagator;
+
+    /**
      * 构造方法
      *
      * @param migrationManager 迁移管理器
@@ -100,6 +113,15 @@ public class MigrateCommandHandler {
         this.memoryStore = memoryStore;
         this.busClient = busClient;
         this.clusterConfig = clusterConfig;
+    }
+
+    /**
+     * 设置源键删除的复制/AOF 传播回调（P0-新3，由 NettyRedisServer 注入）。
+     *
+     * @param propagator 传播回调，null 时跳过传播
+     */
+    public void setWritePropagator(ClusterWritePropagator propagator) {
+        this.writePropagator = propagator;
     }
 
     /**
@@ -227,6 +249,15 @@ public class MigrateCommandHandler {
             return "-ERR error dumping key\r\n";
         }
 
+        // N-38：单键序列化载荷超过总线单帧上限时拒绝迁移——直接发送会被对端解码器
+        // 判为非法帧并关闭整条总线连接（该连接上的心跳/其他迁移全部中断 + 重连 churn）。
+        // Redis MIGRATE 走客户端端口流式传输无此限制；本实现走总线帧，须在发送前预检。
+        if (valueBytes.length > ClusterBusCodec.Decoder.MAX_BODY_LENGTH) {
+            logger.warn("键 {} 序列化大小 {} 超过总线单帧上限 {}，拒绝迁移",
+                    key, valueBytes.length, ClusterBusCodec.Decoder.MAX_BODY_LENGTH);
+            return "-ERR key value too large for cluster migration\r\n";
+        }
+
         // 获取 TTL
         long ttl = memoryStore.pttl(DEFAULT_DATABASE, key);
         if (ttl < 0) {
@@ -234,12 +265,14 @@ public class MigrateCommandHandler {
         }
 
         // 发送键到目标节点（真正通过总线传输，等待目标节点 ACK）
-        SendResult result = sendKeyToTarget(host, port, key, valueBytes, ttl, timeout, replace);
+        SendResult result = sendKeyToTarget(host, port, key, valueBytes, ttl, timeout, replace, destDb);
 
         if (result == SendResult.SUCCESS) {
             // 如果不是 COPY 模式，删除源键
             if (!copy) {
                 memoryStore.del(DEFAULT_DATABASE, key);
+                // P0-新3：源键删除进入复制/AOF 流，避免从节点保留已迁移键（幽灵键）
+                propagateKeyDelete(key);
             }
             logger.info("成功迁移键 {} 到 {}:{}", key, host, port);
             return "+OK\r\n";
@@ -278,6 +311,8 @@ public class MigrateCommandHandler {
         List<String> dumpFailedKeys = new ArrayList<>();
         long totalSize = 0L;
         boolean sizeExceeded = false;
+        // N-38：单键超过总线单帧上限时中止整批（与累计超限同语义，避免连接被对端拔掉）
+        String oversizeKey = null;
 
         // 阶段 1a：dump 所有键并校验累计大小
         for (String key : keys) {
@@ -290,6 +325,11 @@ public class MigrateCommandHandler {
                 if (valueBytes == null) {
                     dumpFailedKeys.add(key);
                     continue;
+                }
+                // N-38：单键帧级预检（总线解码器对超限帧关闭连接）
+                if (valueBytes.length > ClusterBusCodec.Decoder.MAX_BODY_LENGTH) {
+                    oversizeKey = key;
+                    break;
                 }
                 long ttl = memoryStore.pttl(DEFAULT_DATABASE, key);
                 if (ttl < 0) {
@@ -314,13 +354,19 @@ public class MigrateCommandHandler {
             return "-ERR command keys batch too large\r\n";
         }
 
+        if (oversizeKey != null) {
+            logger.warn("批量迁移中止：键 {} 序列化大小超过总线单帧上限 {}",
+                    oversizeKey, ClusterBusCodec.Decoder.MAX_BODY_LENGTH);
+            return "-ERR key value too large for cluster migration\r\n";
+        }
+
         // 阶段 1b：逐键发送到目标节点，记录每个键的 ACK 结果（此阶段不删除源键）
         int successCount = 0;
         List<String> sendFailedKeys = new ArrayList<>();
 
         for (KeyDump kd : dumped) {
             try {
-                SendResult result = sendKeyToTarget(host, port, kd.key, kd.value, kd.ttl, timeout, replace);
+                SendResult result = sendKeyToTarget(host, port, kd.key, kd.value, kd.ttl, timeout, replace, destDb);
                 if (result == SendResult.SUCCESS) {
                     successCount++;
                 } else {
@@ -340,6 +386,8 @@ public class MigrateCommandHandler {
             if (!copy) {
                 for (KeyDump kd : dumped) {
                     memoryStore.del(DEFAULT_DATABASE, kd.key);
+                    // P0-新3：源键删除进入复制/AOF 流，避免从节点保留已迁移键（幽灵键）
+                    propagateKeyDelete(kd.key);
                 }
             }
             logger.info("批量迁移完成: 成功 {}", successCount);
@@ -420,11 +468,12 @@ public class MigrateCommandHandler {
      * @param ttl     过期时间
      * @param timeout 超时时间（毫秒）；0 时使用内部默认值，避免 Netty await(0) 必失败
      * @param replace 是否替换
+     * @param destDb  目标数据库号（N-30 透传，目标节点导入到该 db）
      * @return 发送结果
      */
     public SendResult sendKeyToTarget(String host, int port, String key,
                                      byte[] value, long ttl, long timeout,
-                                     boolean replace) {
+                                     boolean replace, int destDb) {
         if (busClient == null || clusterConfig == null) {
             logger.error("无法迁移键 {}: busClient 或 clusterConfig 未注入", key);
             return SendResult.FAILED;
@@ -446,7 +495,7 @@ public class MigrateCommandHandler {
         }
 
         try {
-            MigrateKeyMessage message = new MigrateKeyMessage(senderNodeId, key, value, ttl, replace);
+            MigrateKeyMessage message = new MigrateKeyMessage(senderNodeId, key, value, ttl, replace, destDb);
             logger.debug("发送键 {} 到目标节点 {}:{} (nodeId={})", key, host, port, targetNodeId);
 
             // P1-17：timeout=0 时用内部默认值，避免 Netty await(0) 立即返回必失败
@@ -478,6 +527,28 @@ public class MigrateCommandHandler {
         } catch (Exception e) {
             logger.error("发送键 {} 到目标节点 {}:{} 失败", key, host, port, e);
             return SendResult.FAILED;
+        }
+    }
+
+    /**
+     * 将单键删除传播到复制 backlog、在线从节点与 AOF（P0-新3）。
+     * <p>
+     * 对齐 Redis 7：MIGRATE 成功（非 COPY）后向副本/AOF 传播 DEL，保证源 master 的
+     * slave 也删除已迁移键，任意 failover 后不复活"幽灵键"。传播失败仅告警，不影响
+     * 已完成的迁移（与普通命令传播失败的处理一致）。
+     * </p>
+     *
+     * @param key 已从源端删除的键名
+     */
+    private void propagateKeyDelete(String key) {
+        ClusterWritePropagator propagator = writePropagator;
+        if (propagator == null) {
+            return;
+        }
+        try {
+            propagator.propagate(PropagationFrames.delFrame(key));
+        } catch (Exception e) {
+            logger.warn("迁移源键删除传播失败（键 {} 已删除，副本可能残留）", key, e);
         }
     }
 
@@ -561,15 +632,7 @@ public class MigrateCommandHandler {
      * @throws IOException 序列化失败
      */
     private byte[] serializeValue(Object value) throws IOException {
-        if (value == null) {
-            return new byte[0];
-        }
-
-            try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
-             ObjectOutputStream oos = new ObjectOutputStream(baos)) {
-            oos.writeObject(value);
-            oos.flush();
-            return baos.toByteArray();
-        }
+        // 统一委托 core 模块 ValueSerialization（与目标端 RESTORE 传播帧共用同一序列化实现）
+        return ValueSerialization.serialize(value);
     }
 }

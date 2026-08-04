@@ -66,6 +66,8 @@ public class DefaultCommandHandler {
         // 注册 Stream 命令处理器
         registerHandler(new StreamCommandHandler());
         registerHandler(new StreamGroupCommandHandler());
+        // 注册 RESTORE 命令处理器（P0-新3：MIGRATE 目标端导入的复制/AOF 传播还原）
+        registerHandler(new RestoreCommandHandler());
         // 注册AUTH命令处理器
         registerHandler(new AuthCommandHandler(requirepass));
     }

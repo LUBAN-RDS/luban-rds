@@ -12,6 +12,8 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -77,6 +79,23 @@ class MigrateCommandHandlerTest {
     }
 
     @Test
+    @DisplayName("N-38：序列化载荷超过总线单帧上限时拒绝迁移（不发送、不删源键）")
+    void testMigrateSingleKeyOversizeRejected() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "big-key", "0", "5000"};
+
+        when(memoryStore.exists(0, "big-key")).thenReturn(true);
+        // 16MB+1 的载荷：超过总线解码器单帧上限（16MB）
+        when(memoryStore.get(0, "big-key")).thenReturn(new byte[16 * 1024 * 1024 + 1]);
+        when(memoryStore.pttl(0, "big-key")).thenReturn(1000L);
+
+        String result = handler.handle(args);
+        assertEquals("-ERR key value too large for cluster migration\r\n", result);
+        // 未发送到目标节点、不删除源键（避免连接被对端解码器拔掉 + 数据丢失）
+        verify(busClient, never()).sendAndWait(anyString(), any(GossipMessage.class), anyLong());
+        verify(memoryStore, never()).del(0, "big-key");
+    }
+
+    @Test
     @DisplayName("测试单键迁移 - 成功")
     void testMigrateSingleKeySuccess() {
         String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000"};
@@ -130,6 +149,70 @@ class MigrateCommandHandlerTest {
         assertEquals("+OK\r\n", result);
 
         // COPY 模式下不应删除源键
+        verify(memoryStore, never()).del(0, "test-key");
+    }
+
+    @Test
+    @DisplayName("P0-新3：迁移成功后源键删除进入复制/AOF 流（DEL 帧传播）")
+    void testMigrateSingleKeySuccessPropagatesDel() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000"};
+
+        // 注入传播回调并捕获传播帧
+        List<byte[]> propagatedFrames = new java.util.ArrayList<>();
+        handler.setWritePropagator(propagatedFrames::add);
+
+        when(memoryStore.exists(0, "test-key")).thenReturn(true);
+        when(memoryStore.get(0, "test-key")).thenReturn("test-value");
+        when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", true, null);
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong())).thenReturn(ack);
+        when(memoryStore.del(0, "test-key")).thenReturn(true);
+
+        String result = handler.handle(args);
+        assertEquals("+OK\r\n", result);
+
+        // 应传播一条 DEL 帧，且帧内容为 RESP 编码的 "DEL test-key"
+        assertEquals(1, propagatedFrames.size(), "成功迁移（非 COPY）应传播 DEL 帧");
+        String frame = new String(propagatedFrames.get(0), java.nio.charset.StandardCharsets.ISO_8859_1);
+        assertTrue(frame.contains("DEL") && frame.contains("test-key"),
+                "传播帧应为 DEL 命令，实际: " + frame);
+    }
+
+    @Test
+    @DisplayName("P0-新3：COPY 模式不删除源键也不传播 DEL")
+    void testMigrateSingleKeyCopyDoesNotPropagateDel() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000", "COPY"};
+
+        List<byte[]> propagatedFrames = new java.util.ArrayList<>();
+        handler.setWritePropagator(propagatedFrames::add);
+
+        when(memoryStore.exists(0, "test-key")).thenReturn(true);
+        when(memoryStore.get(0, "test-key")).thenReturn("test-value");
+        when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", true, null);
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong())).thenReturn(ack);
+
+        handler.handle(args);
+        assertEquals(0, propagatedFrames.size(), "COPY 模式不应传播 DEL");
+        verify(memoryStore, never()).del(0, "test-key");
+    }
+
+    @Test
+    @DisplayName("P0-新3：迁移失败时不传播 DEL（源键未删除）")
+    void testMigrateSingleKeyFailureDoesNotPropagateDel() {
+        String[] args = {"MIGRATE", "127.0.0.1", "6379", "test-key", "0", "5000"};
+
+        List<byte[]> propagatedFrames = new java.util.ArrayList<>();
+        handler.setWritePropagator(propagatedFrames::add);
+
+        when(memoryStore.exists(0, "test-key")).thenReturn(true);
+        when(memoryStore.get(0, "test-key")).thenReturn("test-value");
+        when(memoryStore.pttl(0, "test-key")).thenReturn(1000L);
+        MigrateKeyAckMessage failAck = new MigrateKeyAckMessage(TARGET_NODE_ID, "test-key", false, "import failed");
+        when(busClient.sendAndWait(eq(TARGET_NODE_ID), any(GossipMessage.class), anyLong())).thenReturn(failAck);
+
+        handler.handle(args);
+        assertEquals(0, propagatedFrames.size(), "迁移失败不应传播 DEL");
         verify(memoryStore, never()).del(0, "test-key");
     }
 

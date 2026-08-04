@@ -80,8 +80,8 @@ class FailoverOffsetElectionTest {
         config.setMyNodeId(NODE_ID_2);
 
         failoverManager.tick();  // 进入 REQUESTING
-        // 等退避窗口（gracePeriod=0 + jitter ≤ 500ms）+ 余量
-        Thread.sleep(600);
+        // 等退避窗口（gracePeriod=0 + N-11 固定 500ms 基数 + rank*1000 + jitter ≤ 500ms）+ 余量
+        Thread.sleep(1100);
         failoverManager.tick();  // 退避到期，广播 AUTH_REQUEST
 
         ArgumentCaptor<FailoverAuthRequestMessage> captor =
@@ -114,7 +114,7 @@ class FailoverOffsetElectionTest {
         config.setMyNodeId(NODE_ID_2);
 
         failoverManager.tick();
-        Thread.sleep(600);
+        Thread.sleep(1100);
         failoverManager.tick();
 
         ArgumentCaptor<FailoverAuthRequestMessage> captor =
@@ -211,9 +211,14 @@ class FailoverOffsetElectionTest {
 
     // ==================== 辅助方法 ====================
 
+    /**
+     * 创建主节点。默认分配槽位 0——N-14 起投票者必须持槽（对齐 Redis
+     * "myself->numslots == 0 无投票权"），本文件多数测试以 master 身份投票，需满足该前置。
+     */
     private ClusterNode createMasterNode(String id, int port) {
         ClusterNode n = new ClusterNode(id, "127.0.0.1", port, port + 10000);
         n.addState(ClusterNodeState.MASTER);
+        n.addSlot(0);
         return n;
     }
 

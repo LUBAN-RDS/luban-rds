@@ -26,6 +26,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -228,6 +229,23 @@ public class ClusterCommandHandler {
                     return clusterSaveconfig();
                 case "REPLICAS":
                     return clusterSlaves(args);
+                case "SHARDS":
+                    return clusterShards();
+                case "LINKS":
+                    // 本实现无跨节点连接统计（总线连接不维护于此处），返回空数组（合法响应）
+                    return "*0\r\n";
+                case "RESET":
+                    return clusterReset(args);
+                case "COUNT-FAILURE-REPORTS":
+                    return clusterCountFailureReports(args);
+                case "ADDSLOTSRANGE":
+                    return clusterAddslotsRange(args);
+                case "DELSLOTSRANGE":
+                    return clusterDelslotsRange(args);
+                case "REFRESH":
+                    return clusterRefresh();
+                case "HELP":
+                    return clusterHelp();
                 default:
                     return "-ERR Unknown subcommand or wrong number of arguments for '" 
                             + subcommand + "'\r\n";
@@ -283,9 +301,26 @@ public class ClusterCommandHandler {
         sb.append("cluster_current_epoch:").append(stats.getCurrentEpoch()).append("\r\n");
         sb.append("cluster_my_epoch:").append(stats.getMyEpoch()).append("\r\n");
 
-        // 消息统计
+        // 消息统计：先按类型输出（仅非零类型，对齐 Redis clusterInfoCommand），再输出汇总。
+        // N-26：per-type 计数在总线层（ClusterBusHandler/ClusterBusClient）按消息类型记录。
+        for (Map.Entry<String, Long> e : stats.getMessagesSentByType().entrySet()) {
+            if (e.getValue() != null && e.getValue() > 0) {
+                sb.append("cluster_stats_messages_").append(e.getKey()).append("_sent:")
+                        .append(e.getValue()).append("\r\n");
+            }
+        }
         sb.append("cluster_stats_messages_sent:").append(stats.getMessagesSent()).append("\r\n");
+        for (Map.Entry<String, Long> e : stats.getMessagesReceivedByType().entrySet()) {
+            if (e.getValue() != null && e.getValue() > 0) {
+                sb.append("cluster_stats_messages_").append(e.getKey()).append("_received:")
+                        .append(e.getValue()).append("\r\n");
+            }
+        }
         sb.append("cluster_stats_messages_received:").append(stats.getMessagesReceived()).append("\r\n");
+
+        // N-26：对齐 Redis 7.2 的 total_cluster_links_buffer_limit_exceeded 字段
+        //（本实现总线发送缓冲暂不限流，恒为 0）。
+        sb.append("total_cluster_links_buffer_limit_exceeded:0").append("\r\n");
 
         return sb.toString();
     }
@@ -310,16 +345,24 @@ public class ClusterCommandHandler {
         });
 
         for (ClusterNode node : sortedNodes) {
-            if (node.hasState(ClusterNodeState.HANDSHAKE) || node.hasState(ClusterNodeState.NOADDR)) {
+            // N-26：仅跳过 HANDSHAKE 临时节点；NOADDR 节点不再跳过——
+            // 对齐 Redis clusterGenNodesDescription（filter=0 输出全部已知节点），
+            // NOADDR 节点以 :0@0 地址展示。
+            if (node.hasState(ClusterNodeState.HANDSHAKE)) {
                 continue;
             }
 
             // 节点ID
             sb.append(node.getNodeId());
 
-            // 地址信息 ip:port@cport
+            // 地址信息 ip:port@cport（NOADDR 节点无地址，对齐 Redis 输出 :0@0）
             sb.append(" ");
-            sb.append(node.getFullAddress());
+            if (node.hasState(ClusterNodeState.NOADDR)
+                    || node.getIp() == null || node.getIp().isEmpty()) {
+                sb.append(":0@0");
+            } else {
+                sb.append(node.getFullAddress());
+            }
 
             // 状态标志
             sb.append(" ");
@@ -341,9 +384,10 @@ public class ClusterCommandHandler {
             sb.append(" ");
             sb.append(node.getLastPongTime());
 
-            // 配置纪元
+            // 配置纪元（N-26：从节点输出其 master 的 configEpoch，对齐 Redis
+            // clusterGenNodeDescription 的 nodeEpoch = slaveof->configEpoch）
             sb.append(" ");
-            sb.append(node.getConfigEpoch());
+            sb.append(resolveNodeEpoch(node));
 
             // 连接状态
             sb.append(" ");
@@ -470,8 +514,38 @@ public class ClusterCommandHandler {
      * @param node 节点
      * @return 状态标志字符串
      */
+    /**
+     * N-26：解析节点的展示配置纪元——从节点显示其 master 的 configEpoch
+     * （对齐 Redis clusterGenNodeDescription：nodeEpoch = slaveof->configEpoch）。
+     *
+     * @param node 目标节点
+     * @return 展示纪元
+     */
+    private long resolveNodeEpoch(ClusterNode node) {
+        if (node.isSlave() && node.getMasterNodeId() != null) {
+            ClusterNode master = clusterConfig.getNode(node.getMasterNodeId());
+            if (master != null) {
+                return master.getConfigEpoch();
+            }
+        }
+        return node.getConfigEpoch();
+    }
+
     private String buildNodeFlags(ClusterNode node) {
         StringBuilder flags = new StringBuilder();
+
+        // N-26：角色互斥——角色切换（performFailover/applySelfDemotion）先改一个状态
+        // 再改另一个，并发读取 CLUSTER NODES 可能看到过渡态"master,slave"并存。
+        // 过渡态按 masterNodeId 判定最终角色：降级路径先设置 masterNodeId、提升路径先清除。
+        boolean master = node.isMaster();
+        boolean slave = node.isSlave();
+        if (master && slave) {
+            if (node.getMasterNodeId() != null) {
+                master = false;
+            } else {
+                slave = false;
+            }
+        }
 
         if (node.isMyself()) {
             if (flags.length() > 0) {
@@ -480,18 +554,27 @@ public class ClusterCommandHandler {
             flags.append("myself");
         }
 
-        if (node.isMaster()) {
+        if (master) {
             if (flags.length() > 0) {
                 flags.append(",");
             }
             flags.append("master");
         }
 
-        if (node.isSlave()) {
+        if (slave) {
             if (flags.length() > 0) {
                 flags.append(",");
             }
             flags.append("slave");
+        }
+
+        // N-26：对齐 Redis redisNodeFlagsTable 顺序（myself, master, slave, fail?, fail,
+        // handshake, noaddr）——旧实现 fail 先于 fail?，解析器按序匹配会误读。
+        if (node.isPfail()) {
+            if (flags.length() > 0) {
+                flags.append(",");
+            }
+            flags.append("fail?");
         }
 
         if (node.isFail()) {
@@ -499,13 +582,6 @@ public class ClusterCommandHandler {
                 flags.append(",");
             }
             flags.append("fail");
-        }
-
-        if (node.isPfail()) {
-            if (flags.length() > 0) {
-                flags.append(",");
-            }
-            flags.append("fail?");
         }
 
         if (node.hasState(ClusterNodeState.HANDSHAKE)) {
@@ -640,6 +716,9 @@ public class ClusterCommandHandler {
             clearSlotManagerForNode(nodeId);
             // P1-3：从节点也必须加入黑名单，否则 gossip 会立即重新引入它。
             clusterConfig.blacklistNode(nodeId);
+            // N-39：FORGET 后断开总线连接并清除重连端点——否则断线监听器会持续重连
+            // 已删除节点（僵尸重连循环，节点永远"杀不死"）。
+            disconnectBusForNode(nodeId);
             logger.info("CLUSTER FORGET: removed slave node {} (blacklisted)", nodeId);
             notifyTopologyChanged();
             return "+OK\r\n";
@@ -656,10 +735,27 @@ public class ClusterCommandHandler {
         clusterConfig.blacklistNode(nodeId);
         clusterConfig.removeNode(nodeId);
         clearSlotManagerForNode(nodeId);
+        // N-39：断开总线连接（同从节点分支，防僵尸重连）
+        disconnectBusForNode(nodeId);
 
         logger.info("CLUSTER FORGET: removed master node {} (blacklisted for 60000ms)", nodeId);
         notifyTopologyChanged();
         return "+OK\r\n";
+    }
+
+    /**
+     * N-39：断开被 FORGET 节点的总线连接并清除重连状态。
+     * <p>
+     * ClusterBusClient.disconnect 会先移除重连端点再关通道，使断线监听器
+     * （仅当端点仍在时才调度重连）不会把已删除节点复活。
+     * </p>
+     *
+     * @param nodeId 被移除的节点ID
+     */
+    private void disconnectBusForNode(String nodeId) {
+        if (gossipProtocol != null && gossipProtocol.getBusClient() != null) {
+            gossipProtocol.getBusClient().disconnect(nodeId);
+        }
     }
 
     /**
@@ -735,11 +831,60 @@ public class ClusterCommandHandler {
                 SlotUtils.validateSlot(slot);
                 slotSet.add(slot);
             } catch (NumberFormatException e) {
-                return "-ERR Invalid slot number: " + args[i] + "\r\n";
+                return "-ERR Invalid or out of range slot\r\n";
             } catch (IllegalArgumentException e) {
                 return "-ERR " + e.getMessage() + "\r\n";
             }
         }
+
+        return assignSlots(slotSet);
+    }
+
+    /**
+     * CLUSTER ADDSLOTSRANGE start end [start end ...] 命令（N-19）
+     * 按闭区间批量分配槽位，语义与 ADDSLOTS 相同。
+     *
+     * @param args 命令参数，成对的 start/end
+     * @return 响应
+     */
+    private String clusterAddslotsRange(String[] args) {
+        // 参数至少为 start end 一对（args[0]=ADDSLOTSRANGE），即 args.length >= 3 且为奇数
+        if (args.length < 3 || (args.length - 1) % 2 != 0) {
+            return "-ERR wrong number of arguments for 'cluster|addslotsrange' command\r\n";
+        }
+
+        java.util.Set<Integer> slotSet = new java.util.LinkedHashSet<>();
+        for (int i = 1; i < args.length; i += 2) {
+            int start;
+            int end;
+            try {
+                start = Integer.parseInt(args[i]);
+                end = Integer.parseInt(args[i + 1]);
+                SlotUtils.validateSlot(start);
+                SlotUtils.validateSlot(end);
+            } catch (NumberFormatException e) {
+                return "-ERR Invalid or out of range slot\r\n";
+            } catch (IllegalArgumentException e) {
+                return "-ERR " + e.getMessage() + "\r\n";
+            }
+            if (start > end) {
+                return "-ERR Invalid or out of range slot\r\n";
+            }
+            for (int slot = start; slot <= end; slot++) {
+                slotSet.add(slot);
+            }
+        }
+
+        return assignSlots(slotSet);
+    }
+
+    /**
+     * 槽位分配公共逻辑（ADDSLOTS / ADDSLOTSRANGE 共用）。
+     *
+     * @param slotSet 去重后的槽位集合
+     * @return 响应
+     */
+    private String assignSlots(java.util.Set<Integer> slotSet) {
         int[] slots = slotSet.stream().mapToInt(Integer::intValue).toArray();
 
         // 检查槽位是否已分配
@@ -804,12 +949,69 @@ public class ClusterCommandHandler {
                 SlotUtils.validateSlot(slot);
                 slots[i - 1] = slot;
             } catch (NumberFormatException e) {
-                return "-ERR Invalid slot number: " + args[i] + "\r\n";
+                return "-ERR Invalid or out of range slot\r\n";
             } catch (IllegalArgumentException e) {
                 return "-ERR " + e.getMessage() + "\r\n";
             }
         }
 
+        // 检查槽位是否由当前节点负责
+        for (int slot : slots) {
+            if (!slotManager.isSlotLocal(slot)) {
+                return "-ERR Slot " + slot + " is not my slot\r\n";
+            }
+        }
+
+        // 移除槽位
+        return removeSlots(slots);
+    }
+
+    /**
+     * CLUSTER DELSLOTSRANGE start end [start end ...] 命令（N-19）
+     * 按闭区间批量移除槽位，语义与 DELSLOTS 相同。
+     *
+     * @param args 命令参数，成对的 start/end
+     * @return 响应
+     */
+    private String clusterDelslotsRange(String[] args) {
+        // 参数至少为 start end 一对（args[0]=DELSLOTSRANGE），即 args.length >= 3 且为奇数
+        if (args.length < 3 || (args.length - 1) % 2 != 0) {
+            return "-ERR wrong number of arguments for 'cluster|delslotsrange' command\r\n";
+        }
+
+        java.util.Set<Integer> slotSet = new java.util.LinkedHashSet<>();
+        for (int i = 1; i < args.length; i += 2) {
+            int start;
+            int end;
+            try {
+                start = Integer.parseInt(args[i]);
+                end = Integer.parseInt(args[i + 1]);
+                SlotUtils.validateSlot(start);
+                SlotUtils.validateSlot(end);
+            } catch (NumberFormatException e) {
+                return "-ERR Invalid or out of range slot\r\n";
+            } catch (IllegalArgumentException e) {
+                return "-ERR " + e.getMessage() + "\r\n";
+            }
+            if (start > end) {
+                return "-ERR Invalid or out of range slot\r\n";
+            }
+            for (int slot = start; slot <= end; slot++) {
+                slotSet.add(slot);
+            }
+        }
+
+        int[] slots = slotSet.stream().mapToInt(Integer::intValue).toArray();
+        return removeSlots(slots);
+    }
+
+    /**
+     * 槽位移除公共逻辑（DELSLOTS / DELSLOTSRANGE 共用）。
+     *
+     * @param slots 去重后的槽位数组
+     * @return 响应
+     */
+    private String removeSlots(int[] slots) {
         // 检查槽位是否由当前节点负责
         for (int slot : slots) {
             if (!slotManager.isSlotLocal(slot)) {
@@ -863,7 +1065,7 @@ public class ClusterCommandHandler {
             slot = Integer.parseInt(args[1]);
             SlotUtils.validateSlot(slot);
         } catch (NumberFormatException e) {
-            return "-ERR Invalid slot number: " + args[1] + "\r\n";
+            return "-ERR Invalid or out of range slot\r\n";
         } catch (IllegalArgumentException e) {
             return "-ERR " + e.getMessage() + "\r\n";
         }
@@ -884,6 +1086,8 @@ public class ClusterCommandHandler {
                 slotMigrationTarget.put(slot, sourceNodeId);
                 // 同步更新 SlotManager 的导入状态
                 slotManager.setSlotImporting(slot, sourceNodeId);
+                // N-29：同步到 ClusterConfig，使 nodes.conf 持久化迁移方括号
+                clusterConfig.setSlotImporting(slot, sourceNodeId);
                 logger.info("CLUSTER SETSLOT: slot {} set to IMPORTING from {}", slot, sourceNodeId);
                 return "+OK\r\n";
 
@@ -904,6 +1108,8 @@ public class ClusterCommandHandler {
                 slotMigrationTarget.put(slot, targetNodeId);
                 // 同步更新 SlotManager 的迁移状态
                 slotManager.setSlotMigrating(slot, targetNodeId);
+                // N-29：同步到 ClusterConfig，使 nodes.conf 持久化迁移方括号
+                clusterConfig.setSlotMigrating(slot, targetNodeId);
                 logger.info("CLUSTER SETSLOT: slot {} set to MIGRATING to {}", slot, targetNodeId);
                 return "+OK\r\n";
 
@@ -914,6 +1120,9 @@ public class ClusterCommandHandler {
                 // 同步清除 SlotManager 的迁移/导入状态
                 slotManager.setSlotImporting(slot, null);
                 slotManager.setSlotMigrating(slot, null);
+                // N-29：同步清除 ClusterConfig 迁移状态（nodes.conf 方括号不再输出）
+                clusterConfig.setSlotImporting(slot, null);
+                clusterConfig.setSlotMigrating(slot, null);
                 logger.info("CLUSTER SETSLOT: slot {} set to STABLE", slot);
                 return "+OK\r\n";
 
@@ -949,6 +1158,9 @@ public class ClusterCommandHandler {
                 // 源节点 migrating 残留 → ASK 回目标，形成迁移完成后的永久互指循环。
                 slotManager.setSlotImporting(slot, null);
                 slotManager.setSlotMigrating(slot, null);
+                // N-29：同步清除 ClusterConfig 迁移状态
+                clusterConfig.setSlotImporting(slot, null);
+                clusterConfig.setSlotMigrating(slot, null);
 
                 // 增加配置纪元，并提升新 owner 的 per-node configEpoch（P1-2A）。
                 // 不提升则 Gossip 经 syncSlotsFromNode 的 epoch 仲裁会因新 owner 纪元偏低
@@ -1007,7 +1219,7 @@ public class ClusterCommandHandler {
             slot = Integer.parseInt(args[1]);
             SlotUtils.validateSlot(slot);
         } catch (NumberFormatException e) {
-            return "-ERR Invalid slot number: " + args[1] + "\r\n";
+            return "-ERR Invalid or out of range slot\r\n";
         } catch (IllegalArgumentException e) {
             return "-ERR " + e.getMessage() + "\r\n";
         }
@@ -1052,7 +1264,7 @@ public class ClusterCommandHandler {
             slot = Integer.parseInt(args[1]);
             SlotUtils.validateSlot(slot);
         } catch (NumberFormatException e) {
-            return "-ERR Invalid slot number: " + args[1] + "\r\n";
+            return "-ERR Invalid or out of range slot\r\n";
         } catch (IllegalArgumentException e) {
             return "-ERR " + e.getMessage() + "\r\n";
         }
@@ -1434,6 +1646,306 @@ public class ClusterCommandHandler {
     }
 
     /**
+     * CLUSTER SHARDS 命令（N-19）
+     * 返回槽位分片信息（Redis 7 引入，redis-cli --cluster 与现代客户端使用）。
+     * RESP2 格式：每个 shard 条目为 [slots, nodes]，
+     * slots 为 [start, end] 整数对，nodes 为节点 map 列表
+     * （id/port/ip/endpoint/role/replication-offset/health），master 在前。
+     *
+     * @return RESP 格式的分片信息
+     */
+    private String clusterShards() {
+        List<SlotRange> ranges = buildSlotRanges();
+
+        if (ranges.isEmpty()) {
+            return "*0\r\n";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(ranges.size()).append("\r\n");
+        for (SlotRange range : ranges) {
+            ClusterNode master = clusterConfig.getNode(range.ownerId);
+            if (master == null) {
+                continue;
+            }
+
+            List<ClusterNode> replicas = new ArrayList<>();
+            for (ClusterNode node : clusterConfig.getAllNodes()) {
+                if (node.isSlave() && range.ownerId.equals(node.getMasterNodeId())
+                        && !node.hasState(ClusterNodeState.HANDSHAKE)
+                        && !node.isFail() && !node.isPfail()) {
+                    replicas.add(node);
+                }
+            }
+
+            // 每个 shard 条目：[slots, nodes]
+            sb.append("*2\r\n");
+            // slots: [start, end]
+            sb.append("*2\r\n");
+            sb.append(":").append(range.start).append("\r\n");
+            sb.append(":").append(range.end).append("\r\n");
+            // nodes: master 在前，replicas 在后
+            sb.append("*").append(1 + replicas.size()).append("\r\n");
+            appendShardNode(sb, master, "master");
+            for (ClusterNode replica : replicas) {
+                appendShardNode(sb, replica, "slave");
+            }
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * 追加 SHARDS 节点条目（RESP2 中 map 展开为 7 组 key-value 共 14 个元素）。
+     */
+    private void appendShardNode(StringBuilder sb, ClusterNode node, String role) {
+        sb.append("*14\r\n");
+        appendRespPair(sb, "id", node.getNodeId());
+        appendRespPair(sb, "port", String.valueOf(node.getPort()));
+        appendRespPair(sb, "ip", node.getIp());
+        appendRespPair(sb, "endpoint", node.getIp());
+        appendRespPair(sb, "role", role);
+        appendRespPair(sb, "replication-offset", "0");
+        String health = node.isFail() ? "fail" : (node.isPfail() ? "fail?" : "ok");
+        appendRespPair(sb, "health", health);
+    }
+
+    /**
+     * 追加一组 RESP bulk string 键值对。
+     */
+    private void appendRespPair(StringBuilder sb, String key, String value) {
+        sb.append("$").append(key.length()).append("\r\n").append(key).append("\r\n");
+        sb.append("$").append(value.length()).append("\r\n").append(value).append("\r\n");
+    }
+
+    /**
+     * CLUSTER RESET [HARD|SOFT] 命令（N-19）
+     * 重置节点为未配置状态，对齐 Redis clusterCommand reset / clusterReset：
+     * <ul>
+     * <li>SOFT（默认）：清空全部槽位与迁移状态，本节点变为无槽 master，epoch 归零</li>
+     * <li>HARD：在 SOFT 基础上移除所有其他节点，并生成新的节点 ID</li>
+     * </ul>
+     * 与 Redis 一致：master 且持有槽位时拒绝执行。
+     *
+     * @param args 命令参数
+     * @return 响应
+     */
+    private String clusterReset(String[] args) {
+        boolean hard;
+        if (args.length == 1) {
+            hard = false;
+        } else if (args.length == 2 && "HARD".equalsIgnoreCase(args[1])) {
+            hard = true;
+        } else if (args.length == 2 && "SOFT".equalsIgnoreCase(args[1])) {
+            hard = false;
+        } else {
+            return "-ERR CLUSTER RESET [HARD|SOFT]\r\n";
+        }
+
+        ClusterNode myNode = clusterConfig.getMyNode();
+        // 对齐 Redis：master 且持有槽位（即可能含键）时拒绝
+        if (myNode != null && myNode.isMaster() && myNode.getSlotCount() > 0) {
+            return "-ERR CLUSTER RESET can't be called with master nodes containing keys\r\n";
+        }
+
+        // 清空全部槽位（slotManager + clusterConfig + 本节点）
+        for (int i = 0; i < SlotUtils.CLUSTER_SLOTS; i++) {
+            clusterConfig.clearSlot(i);
+            slotManager.setSlotOwner(i, null);
+            slotManager.setSlotImporting(i, null);
+            slotManager.setSlotMigrating(i, null);
+            clusterConfig.setSlotImporting(i, null);
+            clusterConfig.setSlotMigrating(i, null);
+        }
+        slotManager.clearMySlots();
+        slotMigrationState.clear();
+        slotMigrationTarget.clear();
+        if (myNode != null) {
+            myNode.clearSlots();
+        }
+
+        if (hard) {
+            // 移除所有其他节点
+            for (ClusterNode node : new ArrayList<>(clusterConfig.getAllNodes())) {
+                if (myNode != null && node.getNodeId().equals(myNode.getNodeId())) {
+                    continue;
+                }
+                clusterConfig.removeNode(node.getNodeId());
+            }
+            // 生成新节点 ID 并重建 myself 节点（保留监听地址）
+            String newId = ClusterConfigPersister.generateNodeId();
+            if (myNode != null) {
+                clusterConfig.removeNode(myNode.getNodeId());
+            }
+            ClusterNode newNode = new ClusterNode(newId);
+            if (myNode != null) {
+                newNode.setIp(myNode.getIp());
+                newNode.setPort(myNode.getPort());
+                newNode.setBusPort(myNode.getBusPort());
+            }
+            newNode.addState(ClusterNodeState.MYSELF);
+            newNode.addState(ClusterNodeState.MASTER);
+            clusterConfig.addNode(newNode);
+            clusterConfig.setMyNodeId(newId);
+            myNode = newNode;
+        }
+
+        // 重置本节点为无槽 master、纪元归零（对齐 clusterReset：configEpoch/currentEpoch/lastVoteEpoch 全清零）
+        if (myNode != null) {
+            myNode.removeState(ClusterNodeState.SLAVE);
+            myNode.addState(ClusterNodeState.MASTER);
+            myNode.setMasterNodeId(null);
+            myNode.setConfigEpoch(0);
+        }
+        clusterConfig.setCurrentEpoch(0);
+        clusterConfig.setLastVoteEpoch(0);
+
+        stateManager.updateClusterState();
+        logger.info("CLUSTER RESET: {} reset completed, new nodeId={}", hard ? "HARD" : "SOFT",
+                clusterConfig.getMyNodeId());
+        notifyTopologyChanged();
+        return "+OK\r\n";
+    }
+
+    /**
+     * CLUSTER COUNT-FAILURE-REPORTS nodeid 命令（N-19）
+     * 返回针对指定节点的 PFAIL 投票（failure report）数量。
+     *
+     * @param args 命令参数
+     * @return 失败报告数量
+     */
+    private String clusterCountFailureReports(String[] args) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'cluster|count-failure-reports' command\r\n";
+        }
+
+        String nodeId = args[1];
+        if (clusterConfig.getNode(nodeId) == null) {
+            return "-ERR Unknown node " + nodeId + "\r\n";
+        }
+
+        int count = 0;
+        if (gossipProtocol != null && gossipProtocol.getFailureDetector() != null) {
+            count = gossipProtocol.getFailureDetector().getPfailVoteCount(nodeId);
+        }
+        return ":" + count + "\r\n";
+    }
+
+    /**
+     * CLUSTER REFRESH 命令（N-19）
+     * 从 nodes.conf 重新加载集群配置（对齐 Redis 7 CLUSTER REFRESH：
+     * 重新读取磁盘上的集群配置文件并应用）。
+     * <p>
+     * 磁盘配置为权威：槽位归属、currentEpoch/lastVoteEpoch 以磁盘为准，
+     * 磁盘中新增的节点并入节点列表；运行时状态（FAIL/PFAIL、连接等）不受影响。
+     * </p>
+     *
+     * @return 响应
+     */
+    private String clusterRefresh() {
+        if (clusterConfigFilePath == null || clusterConfigFilePath.isEmpty()) {
+            return "-ERR cluster-config-file not configured\r\n";
+        }
+        try {
+            ClusterConfigPersister persister = new ClusterConfigPersister();
+            ClusterConfig diskConfig = persister.load(clusterConfigFilePath);
+            if (diskConfig.getMyNodeId() == null) {
+                return "-ERR Invalid cluster config file\r\n";
+            }
+
+            // 应用纪元（只升不降，避免重载陈旧文件回退运行时已抬高的 epoch）
+            clusterConfig.setEpochIfGreater(diskConfig.getCurrentEpoch());
+            if (diskConfig.getLastVoteEpoch() > clusterConfig.getLastVoteEpoch()) {
+                clusterConfig.setLastVoteEpoch(diskConfig.getLastVoteEpoch());
+            }
+
+            // 槽位归属以磁盘为权威重建（含槽位清空）
+            for (int i = 0; i < SlotUtils.CLUSTER_SLOTS; i++) {
+                String owner = diskConfig.getSlotOwner(i);
+                if (owner != null) {
+                    clusterConfig.setSlotOwner(i, owner);
+                    ClusterNode node = clusterConfig.getNode(owner);
+                    if (node != null) {
+                        node.addSlot(i);
+                    }
+                } else {
+                    clusterConfig.clearSlot(i);
+                }
+            }
+
+            // 并入磁盘有而内存无的节点
+            for (ClusterNode diskNode : diskConfig.getAllNodes()) {
+                if (clusterConfig.getNode(diskNode.getNodeId()) == null) {
+                    clusterConfig.addNode(diskNode);
+                }
+            }
+
+            // 同步 slotManager 本节点槽位
+            slotManager.clearMySlots();
+            ClusterNode myNode = clusterConfig.getMyNode();
+            if (myNode != null) {
+                String myId = myNode.getNodeId();
+                for (int i = myNode.getSlots().nextSetBit(0); i >= 0; i = myNode.getSlots().nextSetBit(i + 1)) {
+                    slotManager.setSlotOwner(i, myId);
+                }
+            }
+
+            stateManager.updateClusterState();
+            logger.info("CLUSTER REFRESH: reloaded cluster config from {}", clusterConfigFilePath);
+            return "+OK\r\n";
+        } catch (IOException e) {
+            logger.error("CLUSTER REFRESH: failed to reload config", e);
+            return "-ERR " + e.getMessage() + "\r\n";
+        }
+    }
+
+    /**
+     * CLUSTER HELP 命令（N-19）
+     * 返回支持的全部子命令用法说明（对齐 Redis CLUSTER HELP 的数组响应格式）。
+     *
+     * @return RESP 格式的帮助信息
+     */
+    private String clusterHelp() {
+        String[] helpLines = {
+                "CLUSTER <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+                "ADDSLOTS <slot> [<slot> ...]",
+                "ADDSLOTSRANGE <start> <end> [<start> <end> ...]",
+                "BUMPEPOCH",
+                "COUNT-FAILURE-REPORTS <node-id>",
+                "COUNTKEYSINSLOT <slot>",
+                "DELSLOTS <slot> [<slot> ...]",
+                "DELSLOTSRANGE <start> <end> [<start> <end> ...]",
+                "FAILOVER [FORCE|TAKEOVER]",
+                "FLUSHSLOTS",
+                "FORGET <node-id>",
+                "GETKEYSINSLOT <slot> <count>",
+                "HELP",
+                "INFO",
+                "KEYSLOT <key>",
+                "LINKS",
+                "MEET <ip> <port>",
+                "MYID",
+                "NODES",
+                "REFRESH",
+                "REPLICAS <node-id>",
+                "REPLICATE <node-id>",
+                "RESET [HARD|SOFT]",
+                "SAVECONFIG",
+                "SET-CONFIG-EPOCH <epoch>",
+                "SETSLOT <slot> (IMPORTING <node-id> | MIGRATING <node-id> | NODE <node-id> | STABLE)",
+                "SHARDS",
+                "SLAVES <node-id>",
+                "SLOTS"
+        };
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(helpLines.length).append("\r\n");
+        for (String line : helpLines) {
+            sb.append("$").append(line.length()).append("\r\n").append(line).append("\r\n");
+        }
+        return sb.toString();
+    }
+
+    /**
      * CLUSTER SAVECONFIG 命令
      * 保存集群配置到 nodes.conf 文件
      *
@@ -1452,8 +1964,11 @@ public class ClusterCommandHandler {
             if (parentDir != null && !parentDir.exists()) {
                 parentDir.mkdirs();
             }
+            // N-27：保存前快照脏版本号，保存完成后仅当期间无新变更才清脏
+            //（与 NettyRedisServer.saveClusterConfig 同一竞态修复）。
+            long dirtyVersion = clusterConfig.getDirtyVersion();
             persister.save(clusterConfig, clusterConfigFilePath);
-            clusterConfig.clearDirty();
+            clusterConfig.clearDirtyIfUnchanged(dirtyVersion);
             logger.info("CLUSTER SAVECONFIG: configuration saved to {}", clusterConfigFilePath);
             return "+OK\r\n";
         } catch (IOException e) {

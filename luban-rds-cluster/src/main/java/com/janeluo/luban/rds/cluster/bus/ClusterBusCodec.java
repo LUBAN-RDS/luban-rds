@@ -38,8 +38,20 @@ public class ClusterBusCodec {
 
             try {
                 byte[] data = msg.encode();
+
+                // N-38：编码预检——超过对端解码器单帧上限的消息直接拒绝写出（不写帧、
+                // 不关闭连接）。旧实现无条件写出，对端解码器判为非法帧后关闭整条连接，
+                // 该连接上所有心跳/迁移中断 + 重连 churn。消息发送方（如 MIGRATE 的
+                // sendAndWait）会因收不到 ACK 超时，得到明确错误而非连接被拔。
+                int bodyLength = data.length - GossipMessage.HEADER_LENGTH;
+                if (bodyLength > Decoder.MAX_BODY_LENGTH) {
+                    logger.error("拒绝发送超限消息: type={}, bodyLength={}, 上限={}，本帧丢弃（连接保持）",
+                            msg.getType(), bodyLength, Decoder.MAX_BODY_LENGTH);
+                    return;
+                }
+
                 out.writeBytes(data);
-                
+
                 if (logger.isDebugEnabled()) {
                     logger.debug("编码消息: type={}, length={}, sender={}",
                             msg.getType(), data.length, msg.getSenderNodeId());
@@ -67,9 +79,13 @@ public class ClusterBusCodec {
         private static final int HEADER_LENGTH = GossipMessage.HEADER_LENGTH;
 
         /**
-         * 单条消息体最大长度（16MB），超过视为非法并关闭连接
+         * 单条消息体最大长度（16MB），超过视为非法并关闭连接。
+         * <p>
+         * N-38：public 供编码预检（Encoder）与 MIGRATE 载荷预检（MigrateCommandHandler）
+         * 共享同一上限，避免"编码端无预检、解码端超限断连"的不对称。
+         * </p>
          */
-        private static final int MAX_BODY_LENGTH = 16 * 1024 * 1024;
+        public static final int MAX_BODY_LENGTH = 16 * 1024 * 1024;
 
         @Override
         protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {

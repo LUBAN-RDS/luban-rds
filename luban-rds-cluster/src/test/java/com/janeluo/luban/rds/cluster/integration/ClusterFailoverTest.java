@@ -478,11 +478,15 @@ class ClusterFailoverTest {
         cluster.addNode(m3);
         cluster.addNode(s1);
 
+        // N-14：投票者必须持槽（对齐 Redis myself->numslots > 0），为其余两个 master 分配槽位
+        assignSlotRange(m2, 5000, 9999);
+        assignSlotRange(m3, 10000, 16383);
+
         // M1 宕机
         m1.addState(ClusterNodeState.FAIL);
 
-        // 驱动若干轮 tick，让选举收敛（含退避抖动 ≤ 500ms）
-        for (int i = 0; i < 8; i++) {
+        // 驱动若干轮 tick，让选举收敛（退避窗口含 N-11 固定 500ms 基数 + jitter ≤ 500ms）
+        for (int i = 0; i < 12; i++) {
             cluster.tickAll();
             try {
                 Thread.sleep(120);
@@ -516,6 +520,10 @@ class ClusterFailoverTest {
         cluster.addNode(m3);
         cluster.addNode(s1);
         cluster.addNode(s2);
+
+        // N-14：投票者必须持槽（对齐 Redis myself->numslots > 0），为其余两个 master 分配槽位
+        assignSlotRange(m2, 5000, 9999);
+        assignSlotRange(m3, 10000, 16383);
 
         m1.addState(ClusterNodeState.FAIL);
 

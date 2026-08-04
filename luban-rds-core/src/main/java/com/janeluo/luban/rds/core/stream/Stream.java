@@ -3,6 +3,8 @@ package com.janeluo.luban.rds.core.stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ObjectStreamException;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -35,7 +37,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @author janeluo
  * @since 1.0.0
  */
-public class Stream {
+public class Stream implements Serializable {
+
+    private static final long serialVersionUID = 1L;
 
     private static final Logger logger = LoggerFactory.getLogger(Stream.class);
 
@@ -118,6 +122,88 @@ public class Stream {
     public Stream(long maxLen) {
         this();
         this.maxLen = maxLen;
+    }
+
+    // ==================== 序列化支持（N-31：MIGRATE 跨节点迁移） ====================
+
+    /**
+     * 序列化替换（N-31）。
+     * <p>
+     * Stream 含锁、等待条件与阻塞等待队列（ReentrantLock/Condition/StreamWaiter），
+     * 均不可序列化。Java 序列化时经 {@code writeReplace} 替换为纯数据的
+     * {@link StreamSnapshot}（消息条目、ID 生成游标、maxLen、消费者组），
+     * 反序列化时由快照的 {@code readResolve} 重建 Stream 并重新初始化锁与等待队列。
+     * 等待中的阻塞读者（waiters）是连接级状态，迁移后自然失效，不进入快照。
+     * </p>
+     *
+     * @return 序列化替代对象
+     * @throws ObjectStreamException 序列化异常
+     */
+    private Object writeReplace() throws ObjectStreamException {
+        return new StreamSnapshot(this);
+    }
+
+    /**
+     * 从快照重建（N-31，供 {@link StreamSnapshot#readResolve()} 使用）。
+     * <p>
+     * 与默认构造器相同的锁/等待队列初始化，数据直接取自快照。
+     * </p>
+     *
+     * @param snapshot 序列化快照
+     */
+    private Stream(StreamSnapshot snapshot) {
+        this.entries = snapshot.entries;
+        this.lastMillisecondsTime = new AtomicLong(snapshot.lastMillisecondsTime);
+        this.lastSequenceNumber = new AtomicLong(snapshot.lastSequenceNumber);
+        this.idGenerationLock = new ReentrantReadWriteLock();
+        this.entryCount = new AtomicLong(snapshot.entryCount);
+        this.lastGeneratedId = snapshot.lastGeneratedId;
+        this.maxLen = snapshot.maxLen;
+        this.consumerGroupManager = snapshot.consumerGroupManager;
+        this.waiters = new ArrayList<>();
+        this.waiterLock = new ReentrantLock();
+        this.waiterCondition = waiterLock.newCondition();
+    }
+
+    /**
+     * Stream 序列化快照（N-31）：仅携带可序列化的纯数据状态。
+     * <p>
+     * 反序列化白名单按包前缀 {@code com.janeluo.luban.rds.core.stream.*} 放行本类；
+     * 其字段（ConcurrentSkipListMap/StreamId/StreamEntry/StreamConsumerGroupManager 等）
+     * 均实现 {@link Serializable}。{@code readResolve} 重建可用的 Stream 实例。
+     * </p>
+     */
+    private static class StreamSnapshot implements Serializable {
+
+        private static final long serialVersionUID = 1L;
+
+        final ConcurrentSkipListMap<StreamId, StreamEntry> entries;
+        final long lastMillisecondsTime;
+        final long lastSequenceNumber;
+        final long entryCount;
+        final StreamId lastGeneratedId;
+        final long maxLen;
+        final StreamConsumerGroupManager consumerGroupManager;
+
+        StreamSnapshot(Stream stream) {
+            this.entries = stream.entries;
+            this.lastMillisecondsTime = stream.lastMillisecondsTime.get();
+            this.lastSequenceNumber = stream.lastSequenceNumber.get();
+            this.entryCount = stream.entryCount.get();
+            this.lastGeneratedId = stream.lastGeneratedId;
+            this.maxLen = stream.maxLen;
+            this.consumerGroupManager = stream.consumerGroupManager;
+        }
+
+        /**
+         * 反序列化替换：重建带锁与等待队列的 Stream 实例。
+         *
+         * @return 重建的 Stream
+         * @throws ObjectStreamException 反序列化异常
+         */
+        private Object readResolve() throws ObjectStreamException {
+            return new Stream(this);
+        }
     }
 
 /**

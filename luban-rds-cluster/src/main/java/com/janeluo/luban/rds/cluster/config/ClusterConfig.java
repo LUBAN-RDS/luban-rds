@@ -3,6 +3,9 @@ package com.janeluo.luban.rds.cluster.config;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -23,6 +26,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ClusterConfig implements Serializable {
 
     private static final long serialVersionUID = 1L;
+
+    private static final Logger logger = LoggerFactory.getLogger(ClusterConfig.class);
 
     /**
      * 当前节点ID
@@ -64,6 +69,22 @@ public class ClusterConfig implements Serializable {
     private volatile String[] slotAssignment;
 
     /**
+     * 槽位迁移目标表（槽位 -> 目标节点ID），对齐 Redis nodes.conf 的
+     * {@code [<slot>->-<nodeid>]} 迁移方括号语义（N-29）。
+     * <p>
+     * 由 CLUSTER SETSLOT MIGRATING / NODE / STABLE 维护，持久化到 nodes.conf，
+     * 重启后从方括号恢复，使迁移流程的中间状态跨重启可见。
+     * </p>
+     */
+    private final Map<Integer, String> migratingSlotsTo = new ConcurrentHashMap<>();
+
+    /**
+     * 槽位导入源表（槽位 -> 源节点ID），对齐 Redis nodes.conf 的
+     * {@code [<slot>-<-<nodeid>]} 导入方括号语义（N-29）。
+     */
+    private final Map<Integer, String> importingSlotsFrom = new ConcurrentHashMap<>();
+
+    /**
      * 已分配槽位的 BitSet（用于快速判断槽位是否已分配）
      * <p>
      * volatile 保证引用可见性；内容变更由 synchronized 方法保护。
@@ -90,6 +111,18 @@ public class ClusterConfig implements Serializable {
      * </p>
      */
     private volatile boolean dirty;
+
+    /**
+     * 脏标记版本号（N-27）。
+     * <p>
+     * 每次 {@link #markDirty()} 递增。保存方在写盘前快照版本号，写盘完成后调用
+     * {@link #clearDirtyIfUnchanged(long)}：若保存期间发生了新的 markDirty（版本号
+     * 变化），则<b>不清除</b>脏标记，避免"保存期间仅 markDirty 的变更（如
+     * recordVoteEpoch）被随后的无条件 clearDirty 抹掉、该变更永不落盘"的竞态。
+     * </p>
+     */
+    private final java.util.concurrent.atomic.AtomicLong dirtyVersion =
+            new java.util.concurrent.atomic.AtomicLong(0L);
 
     /**
      * FORGET 黑名单：被 CLUSTER FORGET 移除的节点在 60s 内禁止经 Gossip 重新引入。
@@ -341,6 +374,14 @@ public class ClusterConfig implements Serializable {
         if (nodeId == null || slots == null) {
             return;
         }
+        // N-3：位图长度上限校验。advertised 位图超过 16384 位（2048 字节）即协议违规；
+        // 整体拒绝而非中途抛异常，避免"已转移的槽位生效、剩余中止"的半应用状态
+        // （坏/恶意节点可致本地槽位表不一致，Redis 对 gossip 条目有固定 104B 上限）。
+        if (slots.length() > ClusterNode.CLUSTER_SLOTS) {
+            logger.warn("忽略超限槽位位图: nodeId={}, 最高位={}（上限 {}）",
+                    nodeId, slots.length() - 1, ClusterNode.CLUSTER_SLOTS);
+            return;
+        }
         ClusterNode node = nodes.get(nodeId);
         if (node == null) {
             return;
@@ -349,11 +390,15 @@ public class ClusterConfig implements Serializable {
         // 用于后续移除"本地仍记为该 owner、但 advertised 位图已不含"的槽位。
         // 必须先捕获，否则下面的 add 循环会修改 node.slots，污染移除判定。
         BitSet prevOwnedByNode = node.getSlots();
+        // P1-4：是否发生实际变更。仅在实际变更（槽位归属新增/抢占/删除）时置脏触发
+        // nodes.conf 持久化，避免每次心跳都置脏导致无谓的同步写盘。
+        boolean changed = false;
 
         for (int s = slots.nextSetBit(0); s >= 0; s = slots.nextSetBit(s + 1)) {
             String curOwner = slotAssignment[s];
             if (curOwner == null) {
                 setSlotOwner(s, nodeId);
+                changed = true;
             } else if (curOwner.equals(nodeId)) {
                 // 已归属该节点，确保 ClusterNode.slots 一致
                 node.addSlot(s);
@@ -366,6 +411,7 @@ public class ClusterConfig implements Serializable {
                         curOwnerNode.removeSlot(s);
                     }
                     setSlotOwner(s, nodeId);
+                    changed = true;
                 }
             }
             if (s == Integer.MAX_VALUE) {
@@ -382,11 +428,18 @@ public class ClusterConfig implements Serializable {
                 if (!slots.get(s) && nodeId.equals(slotAssignment[s])) {
                     setSlotOwner(s, null);
                     node.removeSlot(s);
+                    changed = true;
                 }
                 if (s == Integer.MAX_VALUE) {
                     break;
                 }
             }
+        }
+
+        // P1-4：gossip 学到的槽位/角色变更不置脏会导致 nodes.conf 长期陈旧，
+        // 全集群停机重启时回退旧拓扑（旧 master 复活、槽位错位）。仅实际变更时置脏。
+        if (changed) {
+            markDirty();
         }
     }
 
@@ -446,6 +499,78 @@ public class ClusterConfig implements Serializable {
         return assignedSlotCount.get();
     }
 
+    // ==================== 槽位迁移状态方法（N-29） ====================
+
+    /**
+     * 设置槽位迁移目标（CLUSTER SETSLOT MIGRATING）。
+     *
+     * @param slot         槽位号（0-16383）
+     * @param targetNodeId 目标节点ID，null 表示清除迁移状态
+     */
+    public void setSlotMigrating(int slot, String targetNodeId) {
+        validateSlot(slot);
+        if (targetNodeId == null) {
+            migratingSlotsTo.remove(slot);
+        } else {
+            migratingSlotsTo.put(slot, targetNodeId);
+        }
+    }
+
+    /**
+     * 设置槽位导入源（CLUSTER SETSLOT IMPORTING）。
+     *
+     * @param slot         槽位号（0-16383）
+     * @param sourceNodeId 源节点ID，null 表示清除导入状态
+     */
+    public void setSlotImporting(int slot, String sourceNodeId) {
+        validateSlot(slot);
+        if (sourceNodeId == null) {
+            importingSlotsFrom.remove(slot);
+        } else {
+            importingSlotsFrom.put(slot, sourceNodeId);
+        }
+    }
+
+    /**
+     * 获取槽位迁移目标节点ID。
+     *
+     * @param slot 槽位号（0-16383）
+     * @return 目标节点ID，未在迁移中返回 null
+     */
+    public String getMigratingTarget(int slot) {
+        validateSlot(slot);
+        return migratingSlotsTo.get(slot);
+    }
+
+    /**
+     * 获取槽位导入源节点ID。
+     *
+     * @param slot 槽位号（0-16383）
+     * @return 源节点ID，未在导入中返回 null
+     */
+    public String getImportingSource(int slot) {
+        validateSlot(slot);
+        return importingSlotsFrom.get(slot);
+    }
+
+    /**
+     * 全部迁移中槽位（槽位 -> 目标节点ID）视图，供 nodes.conf 持久化遍历。
+     *
+     * @return 迁移状态表
+     */
+    public Map<Integer, String> getMigratingSlots() {
+        return migratingSlotsTo;
+    }
+
+    /**
+     * 全部导入中槽位（槽位 -> 源节点ID）视图，供 nodes.conf 持久化遍历。
+     *
+     * @return 导入状态表
+     */
+    public Map<Integer, String> getImportingSlots() {
+        return importingSlotsFrom;
+    }
+
     /**
      * 检查所有槽位是否都已分配
      *
@@ -463,8 +588,8 @@ public class ClusterConfig implements Serializable {
      */
     private void validateSlot(int slot) {
         if (slot < 0 || slot >= ClusterNode.CLUSTER_SLOTS) {
-            throw new IllegalArgumentException(
-                    "槽位号必须在0-" + (ClusterNode.CLUSTER_SLOTS - 1) + "范围内，当前值: " + slot);
+            // 对齐 Redis 错误串（N-20），避免中文消息经 catch 泄漏到客户端 RESP 响应
+            throw new IllegalArgumentException("Invalid slot specified");
         }
     }
 
@@ -583,6 +708,9 @@ public class ClusterConfig implements Serializable {
      */
     public void markDirty() {
         this.dirty = true;
+        // N-27：先置脏再递增版本号——clearDirtyIfUnchanged 的二次确认依赖此顺序
+        // （若版本号先变而脏标记未置位，清除路径可能漏掉刚发生的变更）。
+        this.dirtyVersion.incrementAndGet();
     }
 
     /**
@@ -595,10 +723,48 @@ public class ClusterConfig implements Serializable {
     }
 
     /**
-     * 清除脏标记（持久化完成后调用）
+     * 获取当前脏标记版本号（N-27，保存前快照用）。
+     *
+     * @return 当前版本号
+     */
+    public long getDirtyVersion() {
+        return dirtyVersion.get();
+    }
+
+    /**
+     * 清除脏标记（持久化完成后调用）。
+     * <p>
+     * 注意：无条件清除存在竞态——保存期间发生仅 markDirty 的变更（如
+     * recordVoteEpoch 只置脏、不触发回调）时，脏标记被抹掉导致该变更永不落盘。
+     * 新代码应使用 {@link #clearDirtyIfUnchanged(long)}；本方法保留用于兼容
+     * 明确"保存即清"语义的调用方。
+     * </p>
      */
     public void clearDirty() {
         this.dirty = false;
+    }
+
+    /**
+     * N-27：保存完成后清除脏标记——仅当保存期间（版本号快照之后）没有新的 markDirty。
+     * <p>
+     * 二次确认消除竞态：先查版本号，再清脏标记，再复查版本号。若清除期间发生了
+     * markDirty（dirty=true 先写、版本号后增），复查发现版本号已变则恢复脏标记。
+     * </p>
+     *
+     * @param versionAtSaveStart 保存开始前的版本号快照（{@link #getDirtyVersion()}）
+     * @return true 表示脏标记已清除（保存期间无新变更）；false 表示有变更，脏标记保留
+     */
+    public boolean clearDirtyIfUnchanged(long versionAtSaveStart) {
+        if (dirtyVersion.get() == versionAtSaveStart) {
+            dirty = false;
+            // 二次确认：清除期间若有 markDirty 发生（dirty 写先于版本号递增），恢复脏标记
+            if (dirtyVersion.get() != versionAtSaveStart) {
+                dirty = true;
+                return false;
+            }
+            return true;
+        }
+        return false;
     }
 
     /**

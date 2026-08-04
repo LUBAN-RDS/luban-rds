@@ -480,8 +480,8 @@ public class ClusterNode implements Serializable {
      */
     private void validateSlot(int slot) {
         if (slot < 0 || slot >= CLUSTER_SLOTS) {
-            throw new IllegalArgumentException(
-                    "槽位号必须在0-" + (CLUSTER_SLOTS - 1) + "范围内，当前值: " + slot);
+            // 对齐 Redis 错误串（N-20），避免中文消息经 catch 泄漏到客户端 RESP 响应
+            throw new IllegalArgumentException("Invalid slot specified");
         }
     }
 

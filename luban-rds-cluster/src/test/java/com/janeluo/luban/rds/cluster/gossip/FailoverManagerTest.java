@@ -124,8 +124,8 @@ class FailoverManagerTest {
         failoverManager.tick();  // 进入 REQUESTING
         Mockito.verifyNoInteractions(busClient);
 
-        // 等退避窗口（gracePeriod=0 + jitter ≤ 500ms）+ 余量
-        Thread.sleep(600);
+        // 等退避窗口（gracePeriod=0 + N-11 固定 500ms 基数 + rank*1000 + jitter ≤ 500ms）+ 余量
+        Thread.sleep(1100);
         failoverManager.tick();  // 退避到期，广播
 
         assertTrue(config.getCurrentEpoch() >= 1);
@@ -335,6 +335,151 @@ class FailoverManagerTest {
 
         assertFalse(winner.isMaster());
         assertEquals(10L, config.getCurrentEpoch());
+    }
+
+    // ==================== N-9：FailoverResult 伪造防护 ====================
+
+    @Test
+    @DisplayName("N-9：sender≠winner 的 FailoverResult 被忽略（防伪造代发）")
+    void testRejectForgedResultSenderNotWinner() {
+        ClusterNode winner = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
+        ClusterNode oldMaster = createMasterNode(NODE_ID_1, 7000);
+        for (int i = 0; i <= 99; i++) oldMaster.addSlot(i);
+        config.addNode(winner);
+        config.addNode(oldMaster);
+        config.setCurrentEpoch(5L);
+
+        BitSet inherited = new BitSet();
+        inherited.set(0, 100);
+        // 第三方节点 NODE_ID_3 伪造 {winner=NODE_ID_2, epoch=6, slots=0-99}（sender≠winner）
+        failoverManager.onFailoverResult(new FailoverResultMessage(NODE_ID_3, NODE_ID_2, 6L, inherited));
+
+        assertFalse(winner.isMaster(), "伪造消息不应提升 winner");
+        assertTrue(oldMaster.isMaster(), "旧 master 不应被降级");
+        assertEquals(5L, config.getCurrentEpoch(), "currentEpoch 不应被抬升");
+    }
+
+    @Test
+    @DisplayName("N-9：声明槽位由更高纪元节点持有时整体拒绝（槽位来源交叉校验）")
+    void testRejectResultClaimingHigherEpochOwnerSlots() {
+        config.setCurrentEpoch(5L);
+        ClusterNode winner = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
+        // 槽位 0-99 当前由 configEpoch=7 的节点持有（比伪造声明纪元 6 更新）
+        ClusterNode fresherOwner = createMasterNode(NODE_ID_3, 7002);
+        fresherOwner.setConfigEpoch(7L);
+        for (int i = 0; i <= 99; i++) {
+            fresherOwner.addSlot(i);
+            config.setSlotOwner(i, NODE_ID_3);
+        }
+        config.addNode(winner);
+        config.addNode(fresherOwner);
+
+        BitSet inherited = new BitSet();
+        inherited.set(0, 100);
+        // 伪造 {winner=自己, epoch=6, slots=0-99}
+        failoverManager.onFailoverResult(new FailoverResultMessage(NODE_ID_2, NODE_ID_2, 6L, inherited));
+
+        assertFalse(winner.isMaster(), "槽位来源校验失败的消息不应被应用");
+        assertTrue(fresherOwner.isMaster(), "更高纪元的 owner 不应被降级");
+        assertEquals(NODE_ID_3, config.getSlotOwner(50), "槽位归属不应改变");
+        assertEquals(5L, config.getCurrentEpoch(), "currentEpoch 不应被抬升");
+    }
+
+    // ==================== N-13：isStaleMaster 收窄 ====================
+
+    @Test
+    @DisplayName("N-13：无槽位低纪元的无关 master 不被任意 FailoverResult 降级")
+    void testUnrelatedEmptyMasterNotDemotedByFailoverResult() {
+        ClusterNode winner = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
+        ClusterNode oldMaster = createMasterNode(NODE_ID_1, 7000);
+        for (int i = 0; i <= 99; i++) oldMaster.addSlot(i);
+        // 无关的新建空 master（无槽位、低纪元；不手动构造以避免 createMasterNode 的默认槽位）
+        ClusterNode emptyMaster = new ClusterNode(NODE_ID_3, "127.0.0.1", 7002, 17002);
+        emptyMaster.addState(ClusterNodeState.MASTER);
+        config.addNode(winner);
+        config.addNode(oldMaster);
+        config.addNode(emptyMaster);
+
+        BitSet inherited = new BitSet();
+        inherited.set(0, 100);
+
+        failoverManager.onFailoverResult(new FailoverResultMessage(NODE_ID_2, NODE_ID_2, 5L, inherited));
+
+        assertTrue(emptyMaster.isMaster(), "无关空 master 不应被降级为 winner 的 slave");
+        assertFalse(emptyMaster.isSlave());
+        assertNull(emptyMaster.getMasterNodeId());
+        // 对照：真正与 inherited slots 有交集的旧 master 仍被正常降级
+        assertTrue(oldMaster.isSlave());
+        assertEquals(NODE_ID_2, oldMaster.getMasterNodeId());
+    }
+
+    // ==================== N-11：选举重试冷却 + 退避公式 ====================
+
+    @Test
+    @DisplayName("N-11：退避公式 = gracePeriod + 500 固定基数 + rank×1000 + jitter")
+    void testBackoffFormulaMatchesRedis() {
+        ClusterNode master = createMasterNode(NODE_ID_1, 7000);
+        master.addState(ClusterNodeState.FAIL);
+        ClusterNode me = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
+        me.addState(ClusterNodeState.MYSELF);
+        ClusterNode m2 = createMasterNode(NODE_ID_3, 7002);
+        ClusterNode m3 = createMasterNode(NODE_ID_4, 7003);
+        config.addNode(master);
+        config.addNode(me);
+        config.addNode(m2);
+        config.addNode(m3);
+        config.setMyNodeId(NODE_ID_2);
+
+        failoverManager.tick();
+        assertEquals(FailoverState.REQUESTING, failoverManager.getState());
+
+        long start = failoverManager.getElectionStartTimeForTest();
+        long deadline = failoverManager.getRequestDeadlineForTest();
+        // 无兄弟 slave → rank=0；gracePeriod=0；jitter = |nodeId.hashCode() % 500|
+        long jitter = Math.abs(NODE_ID_2.hashCode() % 500L);
+        assertEquals(start + 500L + 0L * 1000L + jitter, deadline,
+                "退避到期时刻应为 start + 500（固定基数）+ rank×1000 + jitter");
+    }
+
+    @Test
+    @DisplayName("N-11：选举超时后进入 4×nodeTimeout 重试冷却，冷却期内不重开选举")
+    void testRetryCooldownAfterElectionTimeout() throws Exception {
+        // 小 nodeTimeout（50ms）：选举超时 2×50=100ms，重试冷却 4×50=200ms
+        FailoverManager fm = new FailoverManager(config, slotManager, stateManager, busClient,
+                () -> {}, 50L, 0L);
+        ClusterNode master = createMasterNode(NODE_ID_1, 7000);
+        master.addState(ClusterNodeState.FAIL);
+        ClusterNode me = createSlaveNode(NODE_ID_2, 7001, NODE_ID_1);
+        me.addState(ClusterNodeState.MYSELF);
+        ClusterNode m2 = createMasterNode(NODE_ID_3, 7002);
+        ClusterNode m3 = createMasterNode(NODE_ID_4, 7003);
+        config.addNode(master);
+        config.addNode(me);
+        config.addNode(m2);
+        config.addNode(m3);
+        config.setMyNodeId(NODE_ID_2);
+
+        // 进入 REQUESTING（退避窗口 ≥ 500ms，不会立即广播）
+        fm.tick();
+        assertEquals(FailoverState.REQUESTING, fm.getState());
+        assertEquals(0L, fm.getRetryCooldownUntilForTest(), "初次选举无重试冷却");
+
+        // 超过选举超时（100ms）→ 回 IDLE 并进入 4×nodeTimeout=200ms 冷却
+        Thread.sleep(150);
+        fm.tick();
+        assertEquals(FailoverState.IDLE, fm.getState());
+        long cooldownUntil = fm.getRetryCooldownUntilForTest();
+        assertTrue(cooldownUntil > 0L, "选举超时后应设置重试冷却");
+
+        // 冷却期内 tick 不重开选举（修复前下一轮 tick 立即重入 REQUESTING 形成选举风暴）
+        fm.tick();
+        assertEquals(FailoverState.IDLE, fm.getState(), "冷却期内不应重开选举");
+
+        // 冷却过期后重开选举
+        Thread.sleep(300);
+        fm.tick();
+        assertEquals(FailoverState.REQUESTING, fm.getState(), "冷却过期后应重开选举");
+        assertEquals(0L, fm.getRetryCooldownUntilForTest(), "进入新选举后清除冷却标记");
     }
 
     // ==================== 手动故障转移 ====================
@@ -618,9 +763,14 @@ class FailoverManagerTest {
 
     // ==================== 辅助方法 ====================
 
+    /**
+     * 创建主节点。默认分配槽位 0——N-14 起投票者必须持槽（对齐 Redis
+     * "myself->numslots == 0 无投票权"），多数投票测试以 master 身份投票，需满足该前置。
+     */
     private ClusterNode createMasterNode(String id, int port) {
         ClusterNode n = new ClusterNode(id, "127.0.0.1", port, port + 10000);
         n.addState(ClusterNodeState.MASTER);
+        n.addSlot(0);
         return n;
     }
 

@@ -404,6 +404,11 @@ public class PingMessage extends GossipMessage {
                     ((body[offset++] & 0xFF) << 16) |
                     ((body[offset++] & 0xFF) << 8) |
                     (body[offset++] & 0xFF);
+            // N-3：位图长度上限（16384 位 = 2048 字节），超限视为协议违规整体拒绝
+            if (slotsBytesLength > 2048) {
+                throw new IllegalArgumentException(
+                        "PING 发送方槽位位图超限: " + slotsBytesLength + " 字节（上限 2048）");
+            }
             if (slotsBytesLength > 0 && offset + slotsBytesLength <= body.length) {
                 byte[] slotsBytes = new byte[slotsBytesLength];
                 System.arraycopy(body, offset, slotsBytes, 0, slotsBytesLength);

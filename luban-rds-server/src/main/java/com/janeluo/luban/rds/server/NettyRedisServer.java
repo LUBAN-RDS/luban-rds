@@ -8,6 +8,7 @@ import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
 import com.janeluo.luban.rds.cluster.gossip.FailoverManager;
 import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
 import com.janeluo.luban.rds.cluster.handler.ClusterCommandHandler;
+import com.janeluo.luban.rds.cluster.lifecycle.ClusterWritePropagator;
 import com.janeluo.luban.rds.cluster.migration.MigrateCommandHandler;
 import com.janeluo.luban.rds.cluster.migration.SlotMigrationManager;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
@@ -451,10 +452,23 @@ public class NettyRedisServer implements RedisServer {
         this.gossipProtocol.setSlotMigrationManager(slotMigrationManager);
         this.migrateCommandHandler = new MigrateCommandHandler(
                 slotMigrationManager, memoryStore, clusterBusClient, clusterConfig);
-        logger.info("SlotMigrationManager 和 MigrateCommandHandler 已初始化");
 
-        // 11. 初始化 ClusterBusServer
-        this.clusterBusServer = new ClusterBusServer(port, clusterConfig, gossipProtocol);
+        // P0-新3：MIGRATE 的复制/AOF 传播接线。
+        // 源端删除（MigrateCommandHandler）与目标端导入（GossipProtocol.handleMigrateKey）
+        // 均绕过普通命令传播链，注入统一传播回调：将 DEL / RESTORE 帧写入复制 backlog、
+        // 在线从节点与 AOF，避免幽灵键/副本丢键（详见 ClusterWritePropagator 类注释）。
+        ClusterWritePropagator clusterWritePropagator = this::propagateClusterWrite;
+        this.gossipProtocol.setWritePropagator(clusterWritePropagator);
+        this.migrateCommandHandler.setWritePropagator(clusterWritePropagator);
+        logger.info("SlotMigrationManager 和 MigrateCommandHandler 已初始化（含复制/AOF 传播接线）");
+
+        // 11. 初始化 ClusterBusServer（N-37：消费 cluster-announce-bus-port——
+        // 总线服务端实际监听通告的总线端口，而非永远绑定 servicePort+10000）
+        int listenBusPort = config.getClusterAnnounceBusPort();
+        if (listenBusPort <= 0) {
+            listenBusPort = port + ClusterBusServer.BUS_PORT_OFFSET;
+        }
+        this.clusterBusServer = new ClusterBusServer(port, listenBusPort, clusterConfig, gossipProtocol);
         
         logger.info("集群模式初始化完成: nodeId={}, port={}, busPort={}", 
                 nodeId, port, clusterBusServer.getPort());
@@ -505,6 +519,10 @@ public class NettyRedisServer implements RedisServer {
         // 恢复配置纪元
         clusterConfig.setCurrentEpoch(loaded.getCurrentEpoch());
         clusterConfig.setConfigEpoch(loaded.getConfigEpoch());
+        // N-24：恢复 lastVoteEpoch（P1-19 生产路径闭环）。
+        // 若此处不恢复，投票节点重启后 lastVoteEpoch 恒 0，同一选举纪元内会重投第二张票
+        // （nodes.conf 已持久化该值，但恢复链漏掉了它）→ 同纪元双投 → 双 master 分脑。
+        clusterConfig.setLastVoteEpoch(loaded.getLastVoteEpoch());
         
         // 恢复所有节点（MYSELF 节点的网络地址将在 initCurrentNode 中更新）
         for (ClusterNode node : loaded.getAllNodes()) {
@@ -659,12 +677,48 @@ public class NettyRedisServer implements RedisServer {
                 File configFile = new File(config.getDir(), config.getClusterConfigFile());
                 // 确保目录存在
                 configFile.getParentFile().mkdirs();
+                // N-27：保存前快照脏版本号，保存完成后仅当期间无新变更才清脏——
+                // 否则保存期间发生的仅 markDirty 变更（如 recordVoteEpoch 的投票记录）
+                // 会被无条件 clearDirty 抹掉，该变更永不落盘。
+                long dirtyVersion = clusterConfig.getDirtyVersion();
                 persister.save(clusterConfig, configFile.getAbsolutePath());
-                clusterConfig.clearDirty();
+                clusterConfig.clearDirtyIfUnchanged(dirtyVersion);
                 logger.info("集群配置已保存到: {}", configFile.getAbsolutePath());
             } catch (IOException e) {
                 logger.error("保存集群配置失败", e);
             }
+        }
+    }
+
+    /**
+     * 集群内部写传播（P0-新3）：将 RESP 帧写入复制 backlog、在线从节点与 AOF。
+     * <p>
+     * 与 RedisServerHandler 普通命令传播路径对齐：
+     * <ul>
+     *   <li>本节点为从节点时不传播（避免从节点误传播内部写）；</li>
+     *   <li>传播与 AOF 记录同位置、同帧，保证 AOF 与 backlog 一致；</li>
+     *   <li>异常仅告警，不影响已完成的迁移/导入主流程。</li>
+     * </ul>
+     * 可能被客户端事件循环与总线事件循环同时调用，传播实现须线程安全。
+     * </p>
+     *
+     * @param respFrame RESP 编码的命令帧（DEL / RESTORE）
+     */
+    private void propagateClusterWrite(byte[] respFrame) {
+        try {
+            if (replicationCoordinator == null || replicationCoordinator.isSlave()) {
+                return;
+            }
+            com.janeluo.luban.rds.replication.MasterReplicationManager manager =
+                    replicationCoordinator.getMasterManager();
+            if (manager != null) {
+                manager.propagateCommand(respFrame);
+            }
+            if (persistService != null) {
+                persistService.recordCommand(respFrame);
+            }
+        } catch (Exception e) {
+            logger.warn("集群内部写传播失败（不影响迁移主流程）", e);
         }
     }
     

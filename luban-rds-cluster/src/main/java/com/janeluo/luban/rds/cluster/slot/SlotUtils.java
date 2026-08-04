@@ -171,8 +171,8 @@ public class SlotUtils {
      */
     public static void validateSlot(int slot) {
         if (!isValidSlot(slot)) {
-            throw new IllegalArgumentException(
-                    "槽位号必须在0-" + (CLUSTER_SLOTS - 1) + "范围内，当前值: " + slot);
+            // 对齐 Redis clusterCommand 的槽位越界错误串（客户端按错误串匹配）
+            throw new IllegalArgumentException("Invalid slot specified");
         }
     }
 }

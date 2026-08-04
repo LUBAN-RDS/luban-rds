@@ -114,6 +114,32 @@ class ClusterBusServerTest {
         assertEquals(17000, server2.getPort());
     }
 
+    @Test
+    void testN37CustomBusPortConsumed() {
+        // N-37：cluster-announce-bus-port 必须被总线服务端消费——
+        // 显式传入总线端口时监听该端口，而非永远 servicePort+10000。
+        ClusterBusServer server = new ClusterBusServer(6379, 26379, clusterConfig, gossipProtocol);
+        assertEquals(26379, server.getPort(), "自定义总线端口应被监听");
+    }
+
+    @Test
+    void testN37ResolveBusPortUsesAdvertisedPort() {
+        // N-37：出站连接优先使用对端通告的总线端口（@cport），未通告时回退 servicePort+10000。
+        ClusterNode withBusPort = new ClusterNode("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+        withBusPort.setBusPort(26379);
+        assertEquals(26379, ClusterBusClient.resolveBusPort(withBusPort, 6379),
+                "应使用对端通告的总线端口");
+
+        ClusterNode withoutBusPort = new ClusterNode("abcdefabcdefabcdefabcdefabcdefabcdefabcd");
+        withoutBusPort.setBusPort(0);
+        assertEquals(6379 + ClusterBusServer.BUS_PORT_OFFSET,
+                ClusterBusClient.resolveBusPort(withoutBusPort, 6379),
+                "未通告总线端口时应回退 servicePort+10000");
+        assertEquals(6379 + ClusterBusServer.BUS_PORT_OFFSET,
+                ClusterBusClient.resolveBusPort(null, 6379),
+                "目标未知时应回退 servicePort+10000");
+    }
+
     /**
      * Mock Gossip 协议实现
      */

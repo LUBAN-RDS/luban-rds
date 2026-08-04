@@ -1,6 +1,7 @@
 package com.janeluo.luban.rds.cluster.config;
 
 import java.io.Serializable;
+import java.util.Map;
 
 /**
  * 集群统计信息
@@ -66,6 +67,17 @@ public class ClusterStats implements Serializable {
      * 已接收的消息数量
      */
     private long messagesReceived;
+
+    /**
+     * 分类型已发送消息计数（类型展示名 -> 计数，N-26）。
+     * 供 CLUSTER INFO 输出 Redis 风格 cluster_stats_messages_<type>_sent 字段。
+     */
+    private Map<String, Long> messagesSentByType = new java.util.HashMap<>();
+
+    /**
+     * 分类型已接收消息计数（类型展示名 -> 计数，N-26）。
+     */
+    private Map<String, Long> messagesReceivedByType = new java.util.HashMap<>();
 
     /**
      * 默认构造方法
@@ -172,6 +184,32 @@ public class ClusterStats implements Serializable {
 
     public void setMessagesReceived(long messagesReceived) {
         this.messagesReceived = messagesReceived;
+    }
+
+    /**
+     * 获取分类型已发送消息计数（N-26）。
+     *
+     * @return 类型展示名 -> 计数
+     */
+    public Map<String, Long> getMessagesSentByType() {
+        return messagesSentByType;
+    }
+
+    public void setMessagesSentByType(Map<String, Long> messagesSentByType) {
+        this.messagesSentByType = messagesSentByType != null ? messagesSentByType : new java.util.HashMap<>();
+    }
+
+    /**
+     * 获取分类型已接收消息计数（N-26）。
+     *
+     * @return 类型展示名 -> 计数
+     */
+    public Map<String, Long> getMessagesReceivedByType() {
+        return messagesReceivedByType;
+    }
+
+    public void setMessagesReceivedByType(Map<String, Long> messagesReceivedByType) {
+        this.messagesReceivedByType = messagesReceivedByType != null ? messagesReceivedByType : new java.util.HashMap<>();
     }
 
     // ==================== 统计更新方法 ====================

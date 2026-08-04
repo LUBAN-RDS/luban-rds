@@ -119,14 +119,15 @@ public class ClusterNodeTest {
             node.addSlot(-1);
             fail("应该抛出IllegalArgumentException");
         } catch (IllegalArgumentException e) {
-            assertTrue(e.getMessage().contains("槽位号必须在"));
+            // N-20：错误串对齐 Redis，禁止中文泄漏
+            assertTrue(e.getMessage().contains("Invalid slot specified"));
         }
 
         try {
             node.addSlot(16384);
             fail("应该抛出IllegalArgumentException");
         } catch (IllegalArgumentException e) {
-            assertTrue(e.getMessage().contains("槽位号必须在"));
+            assertTrue(e.getMessage().contains("Invalid slot specified"));
         }
 
         // 测试槽位范围错误

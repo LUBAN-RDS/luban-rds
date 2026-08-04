@@ -342,6 +342,106 @@ public class ClusterConfigTest {
     }
 
     @Test
+    public void testSyncSlotsFromNodeOversizedBitmapRejectedWithoutPartialApplication() {
+        // N-3：位图含超过 16383 的位（协议违规）时整体拒绝，
+        // 不应出现"已转移的槽位生效、剩余中止"的半应用状态
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        config.addNode(node1);
+
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(0);
+        slots.set(20000); // 越界位
+
+        config.syncSlotsFromNode(nodeId1, slots, 1L);
+
+        assertEquals("越界位图应整体拒绝，不得部分应用", 0, config.getAssignedSlotCount());
+        assertNull("slot 0 不应被分配（即使它是合法位）", config.getSlotOwner(0));
+        assertFalse(node1.hasSlot(0));
+    }
+
+    @Test
+    public void testSyncSlotsFromNodeMarksDirtyOnActualChange() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        config.addNode(node1);
+
+        config.clearDirty();
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(0);
+
+        // 实际变更（分配新槽位）→ 应置脏（P1-4：gossip 拓扑变更必须落盘）
+        config.syncSlotsFromNode(nodeId1, slots, 1L);
+        assertTrue("实际槽位变更应置脏", config.isDirty());
+
+        // 幂等重放（owner/位图均一致）→ 不应再次置脏（避免每次心跳都触发写盘）
+        config.clearDirty();
+        config.syncSlotsFromNode(nodeId1, slots, 1L);
+        assertFalse("无实际变更不应置脏", config.isDirty());
+
+        // 删除路径（advertised 位图不再含 slot 0，epoch 不落后）→ 置脏
+        config.clearDirty();
+        java.util.BitSet emptySlots = new java.util.BitSet();
+        config.syncSlotsFromNode(nodeId1, emptySlots, 1L);
+        assertTrue("槽位删除应置脏", config.isDirty());
+        assertNull(config.getSlotOwner(0));
+    }
+
+    // ==================== N-27：clearDirtyIfUnchanged（保存期间新变更不清脏） ====================
+
+    @Test
+    public void testN27DirtyVersionIncrementsOnMarkDirty() {
+        long v0 = config.getDirtyVersion();
+        config.markDirty();
+        assertEquals("markDirty 应递增版本号", v0 + 1, config.getDirtyVersion());
+        config.markDirty();
+        assertEquals("多次 markDirty 版本号单调递增", v0 + 2, config.getDirtyVersion());
+    }
+
+    @Test
+    public void testN27ClearDirtyIfUnchangedClearsWhenNoNewChanges() {
+        config.markDirty();
+        long version = config.getDirtyVersion();
+        assertTrue("保存期间无新变更时应清除脏标记",
+                config.clearDirtyIfUnchanged(version));
+        assertFalse(config.isDirty());
+    }
+
+    @Test
+    public void testN27ClearDirtyIfUnchangedKeepsDirtyWhenChangeDuringSave() {
+        config.markDirty();
+        long version = config.getDirtyVersion();
+        // 模拟保存期间发生仅 markDirty 的变更（如 recordVoteEpoch 只置脏、不触发回调）
+        config.markDirty();
+        assertFalse("保存期间有新变更时不得清脏（旧 clearDirty 会抹掉该变更）",
+                config.clearDirtyIfUnchanged(version));
+        assertTrue("脏标记应保留，使后续周期保存落盘", config.isDirty());
+    }
+
+    @Test
+    public void testN27ClearDirtyIfUnchangedWithStaleSnapshot() {
+        config.markDirty();
+        config.markDirty();
+        long staleVersion = config.getDirtyVersion() - 1;
+        assertFalse("过期版本快照不应清脏", config.clearDirtyIfUnchanged(staleVersion));
+        assertTrue(config.isDirty());
+    }
+
+    @Test
+    public void testSyncSlotsFromNodeUnchangedSameOwnerDoesNotMarkDirty() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        node1.setConfigEpoch(1L);
+        config.addNode(node1);
+        config.setSlotOwner(100, nodeId1);
+
+        config.clearDirty();
+        java.util.BitSet slots = new java.util.BitSet();
+        slots.set(100);
+
+        // owner 相同且位图一致 → 幂等，不置脏
+        config.syncSlotsFromNode(nodeId1, slots, 1L);
+        assertFalse(config.isDirty());
+    }
+
+    @Test
     public void testSyncSlotsFromNodeEqualEpochSameOwnerPatchesBitSet() {
         ClusterNode node1 = new ClusterNode(nodeId1);
         node1.setConfigEpoch(5L);

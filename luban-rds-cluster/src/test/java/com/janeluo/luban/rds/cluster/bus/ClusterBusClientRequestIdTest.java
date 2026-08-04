@@ -107,15 +107,60 @@ class ClusterBusClientRequestIdTest {
     }
 
     /**
-     * 验证 requestIdSeq 从 1 起递增（保证 ≥1，与 requestId=0 旧格式不冲突）。
+     * 验证 requestIdSeq 从随机初值（≥1）起递增（保证 ≥1 且不可预测，与 requestId=0
+     * 旧格式不冲突；随机化使伪造 ACK 命中在途请求的难度增加，N-7）。
      */
     @Test
-    @DisplayName("requestIdSeq 从 1 起递增")
-    void testRequestIdSequenceStartsFromOne() throws Exception {
+    @DisplayName("requestIdSeq 从随机初值（≥1）起递增")
+    void testRequestIdSequenceStartsFromRandom() throws Exception {
         AtomicLong seq = getRequestIdSeq();
-        assertEquals(1L, seq.get(), "初始值应为 1");
-        assertEquals(1L, seq.getAndIncrement());
-        assertEquals(2L, seq.getAndIncrement());
+        long first = seq.get();
+        assertTrue(first >= 1L, "初始值应 ≥1（与 requestId=0 旧格式不冲突），实际: " + first);
+        assertEquals(first, seq.getAndIncrement());
+        assertEquals(first + 1L, seq.getAndIncrement());
+    }
+
+    /**
+     * N-7：ACK 发送方与请求目标节点不一致时应被忽略（防伪造 ACK 命中在途请求）。
+     */
+    @Test
+    @DisplayName("N-7：ACK 来源与请求目标不一致时忽略（防伪造 ACK）")
+    void testCompleteResponseRejectsWrongSender() throws Exception {
+        Map<Long, CompletableFuture<GossipMessage>> pending = getPendingResponses();
+        Map<Long, String> targets = getPendingResponseTargets();
+
+        CompletableFuture<GossipMessage> future = new CompletableFuture<>();
+        pending.put(1L, future);
+        // 请求目标是节点 A（40 字符 ID）
+        String targetA = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+        String attackerB = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0";
+        targets.put(1L, targetA);
+        // 伪造 ACK：发送方是节点 B（≠目标 A），即使 requestId 匹配也不应完成 future
+        MigrateKeyAckMessage forgedAck = new MigrateKeyAckMessage(attackerB, "key", true, null);
+        forgedAck.setRequestId(1L);
+        client.completeResponse(1L, forgedAck, attackerB);
+
+        assertFalse(future.isDone(), "来源不一致的 ACK 不应完成 future");
+        assertFalse(future.isCompletedExceptionally(), "被拒 ACK 不应让 future 异常完成");
+
+        // 合法 ACK：发送方 == 目标节点 A → 完成
+        MigrateKeyAckMessage legitAck = new MigrateKeyAckMessage(targetA, "key", true, null);
+        legitAck.setRequestId(1L);
+        client.completeResponse(1L, legitAck, targetA);
+        assertTrue(future.isDone(), "来源一致的 ACK 应完成 future");
+    }
+
+    /**
+     * N-7：无目标记录的陈旧/伪造 ACK（requestId 已超时清理）应被忽略。
+     */
+    @Test
+    @DisplayName("N-7：无目标记录的 ACK 忽略（陈旧/伪造）")
+    void testCompleteResponseWithoutTargetRecordIgnored() throws Exception {
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(SENDER_ID, "key", true, null);
+        ack.setRequestId(42L);
+        // 未注册目标记录（模拟超时清理后迟到的 ACK）
+        client.completeResponse(42L, ack, SENDER_ID);
+        assertTrue(getPendingResponses().isEmpty());
     }
 
     // ==================== 反射辅助（访问私有字段验证内部状态） ====================
@@ -125,6 +170,13 @@ class ClusterBusClientRequestIdTest {
         Field f = ClusterBusClient.class.getDeclaredField("pendingResponses");
         f.setAccessible(true);
         return (Map<Long, CompletableFuture<GossipMessage>>) f.get(client);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<Long, String> getPendingResponseTargets() throws Exception {
+        Field f = ClusterBusClient.class.getDeclaredField("pendingResponseTargets");
+        f.setAccessible(true);
+        return (Map<Long, String>) f.get(client);
     }
 
     private AtomicLong getRequestIdSeq() throws Exception {

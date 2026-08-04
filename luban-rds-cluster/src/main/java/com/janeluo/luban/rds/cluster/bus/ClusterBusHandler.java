@@ -160,6 +160,14 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
             logger.trace("收到 Gossip 消息: {}", message);
         }
 
+        // N-26：总线层分类型接收计数（覆盖全部消息类型；协议层旧计数点已移除，
+        // 避免 PING/PONG/MEET 等双重计数）
+        if (gossipProtocol != null && gossipProtocol.getClusterStateManager() != null
+                && message.getType() != null) {
+            gossipProtocol.getClusterStateManager()
+                    .incrementMessagesReceived(message.getType().getDisplayName(), 1);
+        }
+
         // MEET 握手响应处理：将临时节点ID替换为真实节点ID（仅执行一次，CAS 保证并发安全）
         if (busClient != null && expectedNodeId != null && remoteNodeId != null
                 && !expectedNodeId.equals(remoteNodeId)
@@ -173,6 +181,12 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
 
             // 如果需要响应，发送响应消息
             if (response != null) {
+                // N-26：总线层分类型发送计数（PONG 等响应不经 ClusterBusClient.send）
+                if (gossipProtocol != null && gossipProtocol.getClusterStateManager() != null
+                        && response.getType() != null) {
+                    gossipProtocol.getClusterStateManager()
+                            .incrementMessagesSent(response.getType().getDisplayName(), 1);
+                }
                 ctx.writeAndFlush(response);
             }
         } catch (Exception e) {
@@ -446,7 +460,8 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
                 msg.getKey(), msg.isSuccess(), msg.getSenderNodeId(), msg.getRequestId());
         if (busClient != null) {
             // P1-20：按 requestId 严格匹配等待中的 future（不再按 senderNodeId 单槽位）
-            busClient.completeResponse(msg.getRequestId(), msg);
+            // N-7：校验 ACK 发送方与请求目标节点一致，防总线对端伪造 ACK 命中在途请求
+            busClient.completeResponse(msg.getRequestId(), msg, remoteNodeId);
         }
     }
 

@@ -33,6 +33,7 @@ class FailoverRankBackoffTest {
     private ClusterStateManager stateManager;
     private ClusterBusClient busClient;
     private FailoverManager failoverManager;
+    private ReplicationLifecycleListener listener;
 
     @BeforeEach
     void setUp() {
@@ -43,7 +44,7 @@ class FailoverRankBackoffTest {
         // slaveValidityFactor=0 禁用有效性校验（多数测试默认）
         failoverManager = new FailoverManager(config, slotManager, stateManager, busClient,
                 () -> {}, NODE_TIMEOUT, 0L, 0L);
-        ReplicationLifecycleListener listener = Mockito.mock(ReplicationLifecycleListener.class);
+        listener = Mockito.mock(ReplicationLifecycleListener.class);
         Mockito.when(listener.getReplicationOffset()).thenReturn(0L);
         failoverManager.setReplicationLifecycleListener(listener);
     }
@@ -96,8 +97,7 @@ class FailoverRankBackoffTest {
         // 重建 failoverManager，启用 validity 校验（factor=1，允许落后 nodeTimeout*1=15000）
         FailoverManager fm = new FailoverManager(config, slotManager, stateManager, busClient,
                 () -> {}, NODE_TIMEOUT, 0L, 1L);
-        ReplicationLifecycleListener listener = Mockito.mock(ReplicationLifecycleListener.class);
-        Mockito.when(listener.getReplicationOffset()).thenReturn(0L);
+        // 复用字段 listener：setupFailoverScenario 会按其参数 stub 本节点 offset（P0-新2 接线）
         fm.setReplicationLifecycleListener(listener);
 
         // 本节点 offset=0，兄弟 offset=100000（远超允许落后量 15000）→ 数据过旧，不发起
@@ -112,8 +112,7 @@ class FailoverRankBackoffTest {
     void testValidityFactorAllowsFreshEnoughSlave() {
         FailoverManager fm = new FailoverManager(config, slotManager, stateManager, busClient,
                 () -> {}, NODE_TIMEOUT, 0L, 1L);
-        ReplicationLifecycleListener listener = Mockito.mock(ReplicationLifecycleListener.class);
-        Mockito.when(listener.getReplicationOffset()).thenReturn(0L);
+        // 复用字段 listener：setupFailoverScenario 会按其参数 stub 本节点 offset（P0-新2 接线）
         fm.setReplicationLifecycleListener(listener);
 
         // 本节点 offset=14999，兄弟 offset=15000（落后 1，远小于允许量 15000）→ 允许
@@ -171,13 +170,49 @@ class FailoverRankBackoffTest {
         assertEquals(NODE_ID_2, decodedOld.getNodeId(), "其他字段应正常解码");
     }
 
+    @Test
+    @DisplayName("P0-新2：MYSELF replOffset 由 replicationListener 回填，无需手工 setReplOffset")
+    void testMyselfOffsetBackfilledFromListener() {
+        // 本节点 offset=300 仅由监听器提供（节点自身未手工 setReplOffset）→ rank=0
+        setupFailoverScenario(300L, 100L, 200L);
+        failoverManager.tick();
+        assertEquals(FailoverState.REQUESTING, failoverManager.getState());
+        assertEquals(0, failoverManager.getComputedRankForTest(),
+                "MYSELF offset 应由监听器回填，offset 最大的 slave 应 rank=0");
+        // 验证回填闭环：MYSELF 节点 replOffset == 监听器提供的真实复制偏移量
+        assertEquals(300L, config.getMyNode().getReplOffset(),
+                "tryStartElection 应把监听器 offset 回填到 MYSELF 节点");
+    }
+
+    @Test
+    @DisplayName("P0-新2：默认 validity-factor=10 下监听器回填 offset 后不阻塞选举（回归保护）")
+    void testValidityFactorDefaultDoesNotBlockElectionWithBackfilledOffset() {
+        // 模拟生产默认配置：validityFactor=10、nodeTimeout=15000（allowedLag=150000）
+        FailoverManager fm = new FailoverManager(config, slotManager, stateManager, busClient,
+                () -> {}, NODE_TIMEOUT, 0L, 10L);
+        fm.setReplicationLifecycleListener(listener);
+        // 本节点 offset 正常增长（100000），兄弟 offset 更大但差距 < allowedLag → 允许发起。
+        // 回归保护：修复前 MYSELF offset 恒 0，差距恒 > allowedLag，选举被永久阻止。
+        setupFailoverScenario(100000L, 150000L, 120000L);
+        fm.tick();
+        assertEquals(FailoverState.REQUESTING, fm.getState(),
+                "默认 factor=10 下数据差距未超阈值的 slave 应能发起选举");
+    }
+
     /**
      * 构造故障转移场景：一个已 FAIL 的 master + 本节点(slave) + 两个兄弟 slave。
-     * @param myOffset     本节点 replOffset
+     * <p>
+     * P0-新2：MYSELF 的 replOffset 由 replicationListener 回填（tryStartElection 内
+     * {@code me.setReplOffset(listener.getReplicationOffset())}），因此本节点 offset 不再
+     * 通过手工 setReplOffset 注入，而是 stub 监听器返回——与生产装配（ReplicationCoordinator
+     * 提供真实复制偏移量）一致，同时验证该接线闭环。
+     * </p>
+     * @param myOffset     本节点 replOffset（由监听器提供）
      * @param sibling1Offset 兄弟1 replOffset
      * @param sibling2Offset 兄弟2 replOffset
      */
     private void setupFailoverScenario(long myOffset, long sibling1Offset, long sibling2Offset) {
+        Mockito.when(listener.getReplicationOffset()).thenReturn(myOffset);
         ClusterNode master = new ClusterNode(MASTER_ID, "127.0.0.1", 7000, 17000);
         master.addState(ClusterNodeState.MASTER);
         master.addState(ClusterNodeState.FAIL);
@@ -187,7 +222,6 @@ class FailoverRankBackoffTest {
         me.addState(ClusterNodeState.MYSELF);
         me.addState(ClusterNodeState.SLAVE);
         me.setMasterNodeId(MASTER_ID);
-        me.setReplOffset(myOffset);
         config.addNode(me);
         config.setMyNodeId(NODE_ID_1);
 

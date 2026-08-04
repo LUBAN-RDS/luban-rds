@@ -109,4 +109,26 @@ class GossipNodeInfoTest {
         assertNull(decoded.getMasterNodeId());
         assertEquals(info.getEncodedLength(), encoded.length);
     }
+
+    @Test
+    @DisplayName("N-3：超过 16384 位的槽位位图解码被拒绝")
+    void testDecodeRejectsOversizedSlotBitmap() {
+        GossipNodeInfo info = new GossipNodeInfo("ffffffffffffffffffffffffffffffffffffffff");
+        info.setIp("127.0.0.1");
+        info.setPort(7004);
+        info.setBusPort(17004);
+        info.setConfigEpoch(1L);
+        info.setFlags(EnumSet.of(ClusterNodeState.MASTER));
+
+        // 位图含越界位 20000 → toByteArray 长度超过 2048 字节
+        BitSet slots = new BitSet();
+        slots.set(20000);
+        info.setSlots(slots);
+
+        byte[] encoded = info.encode();
+
+        GossipNodeInfo decoded = new GossipNodeInfo();
+        assertThrows(IllegalArgumentException.class, () -> decoded.decode(encoded, 0),
+                "超限位图应作为协议违规整体拒绝");
+    }
 }

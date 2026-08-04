@@ -528,6 +528,12 @@ public class GossipNodeInfo implements Serializable {
             throw new IllegalArgumentException(
                     "GossipNodeInfo 槽位位图数据不足: slotsBytesLength=" + slotsBytesLength);
         }
+        // N-3：位图长度上限（16384 位 = 2048 字节）。超限视为协议违规整体拒绝，
+        // 否则 syncSlotsFromNode 对越界槽位抛异常导致槽位同步中途半应用。
+        if (slotsBytesLength > 2048) {
+            throw new IllegalArgumentException(
+                    "GossipNodeInfo 槽位位图超限: " + slotsBytesLength + " 字节（上限 2048）");
+        }
         if (slotsBytesLength > 0) {
             byte[] slotsBytes = new byte[slotsBytesLength];
             System.arraycopy(data, offset, slotsBytes, 0, slotsBytesLength);

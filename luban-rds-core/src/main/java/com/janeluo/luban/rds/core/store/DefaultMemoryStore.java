@@ -2519,7 +2519,11 @@ public class DefaultMemoryStore implements MemoryStore {
      * ZSet 内部存储结构
      * 使用 ConcurrentSkipListMap 保持按分数排序
      */
-    private static class ZSetStore {
+    private static class ZSetStore implements java.io.Serializable {
+        // N-31：ZSetStore 是 ZSET 键的存储值对象，MIGRATE 迁移（Java 序列化）需要其可序列化。
+        // 字段均为 ConcurrentHashMap/ConcurrentSkipListMap/ConcurrentSkipListSet（均可序列化），
+        // 反序列化白名单按包前缀 com.janeluo.luban.rds.core.store.* 放行。
+        private static final long serialVersionUID = 1L;
         // member -> score 映射，用于快速查找分数
         final java.util.concurrent.ConcurrentHashMap<String, Double> memberScores = 
                 new java.util.concurrent.ConcurrentHashMap<>();

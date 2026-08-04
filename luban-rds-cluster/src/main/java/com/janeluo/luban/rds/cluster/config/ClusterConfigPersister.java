@@ -3,6 +3,7 @@ package com.janeluo.luban.rds.cluster.config;
 import com.janeluo.luban.rds.cluster.node.ClusterLink;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
+import com.janeluo.luban.rds.cluster.slot.SlotUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,6 +23,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.BitSet;
 import java.util.HexFormat;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.StringTokenizer;
 
@@ -106,6 +108,12 @@ public class ClusterConfigPersister {
                 // 重启后据此拒绝同纪元二次投票，避免双 master。
                 writer.write("# Last Vote Epoch: " + config.getLastVoteEpoch());
                 writer.newLine();
+                // N-29：真实 Redis nodes.conf 的 vars 段（注释行不被真实 Redis 解析，
+                // 混布/迁移场景下真实 Redis 加载本文件时须能读取 epoch）。
+                // 旧版本本实现只认注释行，故两段同时输出保持双向兼容。
+                writer.write("vars currentEpoch " + config.getCurrentEpoch()
+                        + " lastVoteEpoch " + config.getLastVoteEpoch());
+                writer.newLine();
                 writer.newLine();
 
                 // 写入每个节点（跳过 HANDSHAKE 和 NOADDR 状态的临时节点）
@@ -114,11 +122,19 @@ public class ClusterConfigPersister {
                     if (node.hasState(ClusterNodeState.HANDSHAKE) || node.hasState(ClusterNodeState.NOADDR)) {
                         continue;
                     }
-                    String line = formatNodeLine(node, config.getMyNodeId());
+                    String line = formatNodeLine(node, config.getMyNodeId(), config);
                     writer.write(line);
                     writer.newLine();
                     savedCount++;
                 }
+            }
+
+            // N-28：fsync 落盘（对齐 Redis rewriteConfig 的 fsync 语义）。
+            // FileWriter 写毕直接 move 时数据可能仍在页缓存——断电后 nodes.conf
+            // 可变为空/截断文件，重启加载残缺拓扑。force(true) 同时刷文件内容与元数据。
+            try (java.nio.channels.FileChannel channel =
+                         java.nio.channels.FileChannel.open(tmp, java.nio.file.StandardOpenOption.WRITE)) {
+                channel.force(true);
             }
 
             // 原子替换：tmp -> target
@@ -196,9 +212,32 @@ public class ClusterConfigPersister {
                     continue;
                 }
 
+                // N-29：解析真实 Redis nodes.conf 的 vars 段（vars currentEpoch <n> lastVoteEpoch <n>）
+                if (line.startsWith("vars ")) {
+                    StringTokenizer st = new StringTokenizer(line);
+                    st.nextToken(); // 跳过 "vars"
+                    while (st.hasMoreTokens()) {
+                        String key = st.nextToken();
+                        if (!st.hasMoreTokens()) {
+                            break;
+                        }
+                        try {
+                            long value = Long.parseLong(st.nextToken());
+                            if ("currentEpoch".equals(key)) {
+                                config.setCurrentEpoch(value);
+                            } else if ("lastVoteEpoch".equals(key)) {
+                                config.setLastVoteEpoch(value);
+                            }
+                        } catch (NumberFormatException e) {
+                            logger.warn("解析 vars 段失败: key={}", key);
+                        }
+                    }
+                    continue;
+                }
+
                 // 解析节点行
                 try {
-                    ClusterNode node = parseNodeLine(line);
+                    ClusterNode node = parseNodeLine(line, config);
                     if (node != null) {
                         if (node.hasState(ClusterNodeState.HANDSHAKE)
                                 || node.hasState(ClusterNodeState.NOADDR)) {
@@ -282,9 +321,10 @@ public class ClusterConfigPersister {
      *
      * @param node     节点对象
      * @param myNodeId 当前节点ID
+     * @param config   集群配置（用于读取迁移/导入状态输出方括号）
      * @return 格式化的节点行
      */
-    private String formatNodeLine(ClusterNode node, String myNodeId) {
+    private String formatNodeLine(ClusterNode node, String myNodeId, ClusterConfig config) {
         StringBuilder sb = new StringBuilder();
 
         // 节点ID
@@ -302,13 +342,15 @@ public class ClusterConfigPersister {
         sb.append(" ");
         sb.append(node.getMasterNodeId() != null ? node.getMasterNodeId() : "-");
 
-        // 最后发送PING时间（落盘归零，避免重启后基于过期时间戳误判节点超时）
+        // N-29：最后发送PING时间写真实时间戳。
+        // 旧实现写 0，真实 Redis 加载后会把所有节点当作"从未通信"立即判 PFAIL；
+        // 真实时间戳与 Redis 落盘语义一致。加载端对 0 值仍做重启重置兼容（见 load）。
         sb.append(" ");
-        sb.append(0);
+        sb.append(node.getLastPingTime());
 
-        // 最后收到PONG时间（落盘归零，由故障检测器重新计时）
+        // 最后收到PONG时间（同理写真实时间戳）
         sb.append(" ");
-        sb.append(0);
+        sb.append(node.getLastPongTime());
 
         // 配置纪元
         sb.append(" ");
@@ -324,6 +366,18 @@ public class ClusterConfigPersister {
         if (!slots.isEmpty()) {
             sb.append(" ");
             sb.append(slots);
+        }
+
+        // N-29：迁移/导入方括号（对齐 Redis clusterAddNodeLine：
+        // 槽位区间后输出 [<slot>->-<targetId>] 与 [<slot>-<-<sourceId>]）。
+        // 迁移状态仅由本节点在本地 SETSLOT 时维护，故只输出到 myself 行。
+        if (node.getNodeId().equals(myNodeId)) {
+            for (Map.Entry<Integer, String> entry : config.getMigratingSlots().entrySet()) {
+                sb.append(" [").append(entry.getKey()).append("->-").append(entry.getValue()).append("]");
+            }
+            for (Map.Entry<Integer, String> entry : config.getImportingSlots().entrySet()) {
+                sb.append(" [").append(entry.getKey()).append("-<-").append(entry.getValue()).append("]");
+            }
         }
 
         return sb.toString();
@@ -437,10 +491,11 @@ public class ClusterConfigPersister {
     /**
      * 解析节点行
      *
-     * @param line 节点行字符串
+     * @param line   节点行字符串
+     * @param config 集群配置（方括号迁移/导入状态写入此处）
      * @return 节点对象
      */
-    private ClusterNode parseNodeLine(String line) {
+    private ClusterNode parseNodeLine(String line, ClusterConfig config) {
         StringTokenizer st = new StringTokenizer(line);
 
         // 至少需要8个字段
@@ -494,10 +549,10 @@ public class ClusterConfigPersister {
             link.setConnected("connected".equalsIgnoreCase(linkState));
         }
 
-        // 解析槽位
+        // 解析槽位（含方括号迁移/导入状态）
         while (st.hasMoreTokens()) {
             String slotStr = st.nextToken();
-            parseSlotRange(node, slotStr);
+            parseSlotRange(node, slotStr, config);
         }
 
         return node;
@@ -599,10 +654,31 @@ public class ClusterConfigPersister {
     /**
      * 解析槽位范围
      *
-     * @param node    节点对象
-     * @param slotStr 槽位字符串（如 "0-5460" 或 "5461"）
+     * @param node     节点对象
+     * @param slotStr  槽位字符串（如 "0-5460"、"5461"、"[5461->-id]"、"[5461-<-id]"）
+     * @param config   集群配置（方括号迁移/导入状态写入此处）
      */
-    private void parseSlotRange(ClusterNode node, String slotStr) {
+    private void parseSlotRange(ClusterNode node, String slotStr, ClusterConfig config) {
+        // N-29：迁移/导入方括号 [<start>-<end>->-<nodeid>] / [<slot>-<-<nodeid>]
+        if (slotStr.startsWith("[") && slotStr.endsWith("]") && slotStr.length() > 2) {
+            String inner = slotStr.substring(1, slotStr.length() - 1);
+            int migratingIdx = inner.indexOf("->-");
+            if (migratingIdx > 0) {
+                applySlotMigrationState(inner.substring(0, migratingIdx),
+                        inner.substring(migratingIdx + 3), true, config);
+                return;
+            }
+            int importingIdx = inner.indexOf("-<-");
+            if (importingIdx > 0) {
+                applySlotMigrationState(inner.substring(0, importingIdx),
+                        inner.substring(importingIdx + 3), false, config);
+                return;
+            }
+            // 未知方括号格式：忽略，不中断加载
+            logger.warn("忽略无法识别的方括号槽位条目: {}", slotStr);
+            return;
+        }
+
         try {
             int dashIndex = slotStr.indexOf('-');
             if (dashIndex > 0) {
@@ -617,6 +693,43 @@ public class ClusterConfigPersister {
             }
         } catch (NumberFormatException e) {
             logger.warn("解析槽位失败: {}", slotStr);
+        }
+    }
+
+    /**
+     * 应用方括号迁移/导入状态到集群配置（支持单槽与范围两种写法）。
+     *
+     * @param slotPart  方括号内的槽位部分（如 "5461" 或 "5461-5465"）
+     * @param nodeId    对端节点ID
+     * @param migrating true 为迁移（-&gt;-），false 为导入（-&lt;-）
+     * @param config    集群配置
+     */
+    private void applySlotMigrationState(String slotPart, String nodeId,
+                                         boolean migrating, ClusterConfig config) {
+        try {
+            int start;
+            int end;
+            int dashIndex = slotPart.indexOf('-');
+            if (dashIndex > 0) {
+                start = Integer.parseInt(slotPart.substring(0, dashIndex));
+                end = Integer.parseInt(slotPart.substring(dashIndex + 1));
+            } else {
+                start = Integer.parseInt(slotPart);
+                end = start;
+            }
+            if (start < 0 || end >= SlotUtils.CLUSTER_SLOTS || start > end) {
+                logger.warn("忽略越界槽位迁移状态: {}", slotPart);
+                return;
+            }
+            for (int slot = start; slot <= end; slot++) {
+                if (migrating) {
+                    config.setSlotMigrating(slot, nodeId);
+                } else {
+                    config.setSlotImporting(slot, nodeId);
+                }
+            }
+        } catch (NumberFormatException e) {
+            logger.warn("解析槽位迁移状态失败: {}", slotPart);
         }
     }
 

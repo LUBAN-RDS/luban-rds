@@ -5,15 +5,11 @@ import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.slot.SlotManager;
 import com.janeluo.luban.rds.cluster.slot.SlotUtils;
 import com.janeluo.luban.rds.core.store.MemoryStore;
+import com.janeluo.luban.rds.core.store.ValueSerialization;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectInputFilter;
-import java.io.ObjectOutputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -271,9 +267,10 @@ public class SlotMigrationManager {
      * @param value   键值数据（序列化后的字节数组）
      * @param ttl     过期时间（毫秒）
      * @param replace 是否替换目标节点已存在的键（MIGRATE REPLACE 选项）
+     * @param destDb  目标数据库号（N-30：MIGRATE 的 db 参数透传，修复硬编码 db0）
      * @return 导入结果（含状态码与错误信息）
      */
-    public ImportResult importKey(String key, byte[] value, long ttl, boolean replace) {
+    public ImportResult importKey(String key, byte[] value, long ttl, boolean replace, int destDb) {
         int slot = SlotUtils.keyHashSlot(key);
 
         // 检查槽位是否在导入状态。状态源为 SlotManager（DefaultSlotManager），由
@@ -287,8 +284,8 @@ public class SlotMigrationManager {
         try {
             // 对齐 Redis MIGRATE 的 REPLACE/BUSYKEY 语义（数据层保护）：
             // 目标键已存在且未带 REPLACE → 返回 BUSYKEY，源端据此回 -BUSYKEY。
-            if (!replace && memoryStore.exists(DEFAULT_DATABASE, key)) {
-                logger.warn("键 {} 已存在于目标节点且未指定 REPLACE，拒绝覆盖（BUSYKEY）", key);
+            if (!replace && memoryStore.exists(destDb, key)) {
+                logger.warn("键 {} 已存在于目标节点 db{} 且未指定 REPLACE，拒绝覆盖（BUSYKEY）", key, destDb);
                 return ImportResult.busykey();
             }
 
@@ -296,12 +293,12 @@ public class SlotMigrationManager {
             Object deserializedValue = deserializeValue(value);
 
             if (ttl > 0) {
-                memoryStore.setWithExpireMs(DEFAULT_DATABASE, key, deserializedValue, ttl);
+                memoryStore.setWithExpireMs(destDb, key, deserializedValue, ttl);
             } else {
-                memoryStore.set(DEFAULT_DATABASE, key, deserializedValue);
+                memoryStore.set(destDb, key, deserializedValue);
             }
 
-            logger.debug("成功导入键 {}，槽位: {}", key, slot);
+            logger.debug("成功导入键 {}（db{}），槽位: {}", key, destDb, slot);
             return ImportResult.success();
 
         } catch (Exception e) {
@@ -509,16 +506,8 @@ public class SlotMigrationManager {
      * @throws IOException 序列化失败
      */
     private byte[] serializeValue(Object value) throws IOException {
-        if (value == null) {
-            return new byte[0];
-        }
-        
-        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
-             ObjectOutputStream oos = new ObjectOutputStream(baos)) {
-            oos.writeObject(value);
-            oos.flush();
-            return baos.toByteArray();
-        }
+        // 统一委托 core 模块 ValueSerialization（与 RESTORE 传播帧共用同一序列化实现）
+        return ValueSerialization.serialize(value);
     }
 
     /**
@@ -530,40 +519,7 @@ public class SlotMigrationManager {
      * @throws ClassNotFoundException 类未找到异常
      */
     private Object deserializeValue(byte[] data) throws IOException, ClassNotFoundException {
-        if (data == null || data.length == 0) {
-            return null;
-        }
-
-        try (ByteArrayInputStream bais = new ByteArrayInputStream(data);
-             ObjectInputStream ois = new ObjectInputStream(bais)) {
-            // 反序列化白名单（JDK 9+ ObjectInputFilter）：仅允许基本类型、数组、字符串、
-            // 常用集合，以及本项目内部可序列化类型（P1-17：使 zset/stream 等可跨节点迁移）。
-            // 拒绝任意其他类的反序列化，防止跨节点反序列化 RCE。
-            // 安全考量：迁移是受信任的集群内部操作（节点间已建立总线连接），且仅允许
-            // 项目自身包前缀，对其他包仍 REJECTED，RCE 攻击面不扩大。
-            ois.setObjectInputFilter(filterInfo -> {
-                Class<?> clazz = filterInfo.serialClass();
-                if (clazz == null) {
-                    // 非类过滤（如数组长度、深度），允许
-                    return ObjectInputFilter.Status.UNDECIDED;
-                }
-                if (clazz.isPrimitive() || clazz.isArray()) {
-                    return ObjectInputFilter.Status.ALLOWED;
-                }
-                String name = clazz.getName();
-                if (name.startsWith("java.lang.") || name.startsWith("java.util.")
-                        || name.startsWith("java.math.")) {
-                    return ObjectInputFilter.Status.ALLOWED;
-                }
-                // P1-17：允许本项目内部可序列化类型（Stream/StreamEntry/StreamId 等），
-                // 否则 zset/stream 跨节点迁移会因 filter REJECTED 而静默失败
-                if (name.startsWith("com.janeluo.luban.rds.core.stream.")
-                        || name.startsWith("com.janeluo.luban.rds.core.store.")) {
-                    return ObjectInputFilter.Status.ALLOWED;
-                }
-                return ObjectInputFilter.Status.REJECTED;
-            });
-            return ois.readObject();
-        }
+        // 统一委托 core 模块 ValueSerialization（白名单单一来源，见其类注释）
+        return ValueSerialization.deserialize(data);
     }
 }

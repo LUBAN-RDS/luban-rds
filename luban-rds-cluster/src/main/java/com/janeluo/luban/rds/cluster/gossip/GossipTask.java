@@ -1,5 +1,6 @@
 package com.janeluo.luban.rds.cluster.gossip;
 
+import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
 import com.janeluo.luban.rds.cluster.node.ClusterNode;
 import com.janeluo.luban.rds.cluster.node.ClusterNodeState;
 import org.slf4j.Logger;
@@ -240,55 +241,21 @@ public class GossipTask implements Runnable {
     /**
      * 更新集群状态
      */
-    private void updateClusterState() {
-        // 检查集群是否健康
-        // 如果有超过一半的主节点不可用，则集群状态为 fail
-        int totalMasters = gossipProtocol.getClusterConfig().getMasterCount();
-        int failMasters = countFailedMasters();
-
-        String currentState = gossipProtocol.getClusterConfig().getState();
-        String newState;
-
-        // 计算可用主节点比例
-        if (totalMasters == 0) {
-            newState = "fail";
-        } else {
-            int availableMasters = totalMasters - failMasters;
-            int majority = (totalMasters / 2) + 1;
-
-            if (availableMasters >= majority) {
-                // 多数主节点存活，还需确保所有 16384 个槽位已分配
-                if (gossipProtocol.getClusterConfig().areAllSlotsAssigned()) {
-                    newState = "ok";
-                } else {
-                    newState = "fail";
-                }
-            } else {
-                newState = "fail";
-            }
-        }
-
-        if (!newState.equals(currentState)) {
-            gossipProtocol.getClusterConfig().setState(newState);
-            logger.info("集群状态变更: {} -> {}", currentState, newState);
-        }
-    }
-
     /**
-     * 统计已下线的主节点数量
-     *
-     * @return 已下线的主节点数量
+     * 更新集群状态（N-26：统一走 ClusterStateManager 的单一 Redis 公式）。
+     * <p>
+     * 旧实现在此维护第二套公式（quorum 按全部 master 计数、PFAIL 计入 available、
+     * FAIL 计入分母），与 ClusterStateManager.isClusterOk（全槽+owner 非 FAIL、无 quorum）
+     * 交替写同一 state 字段，两公式结论可相反导致状态抖动。现在委托给注入的
+     * ClusterStateManager——全网 cluster_state 只有 {@code isClusterOk()} 一个公式。
+     * 未注入（单测/旧装配）时构造一个本地实例（ClusterStateManager 无状态，仅计数）。
+     * </p>
      */
-    private int countFailedMasters() {
-        int count = 0;
-        Collection<ClusterNode> allNodes = gossipProtocol.getClusterConfig().getAllNodes();
-
-        for (ClusterNode node : allNodes) {
-            if (node.isMaster() && node.isFail()) {
-                count++;
-            }
+    private void updateClusterState() {
+        ClusterStateManager stateManager = gossipProtocol.getClusterStateManager();
+        if (stateManager == null) {
+            stateManager = new ClusterStateManager(gossipProtocol.getClusterConfig());
         }
-
-        return count;
+        stateManager.updateClusterState();
     }
 }

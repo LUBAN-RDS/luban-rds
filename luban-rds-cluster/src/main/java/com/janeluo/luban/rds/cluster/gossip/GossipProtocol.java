@@ -5,7 +5,9 @@ import com.janeluo.luban.rds.cluster.bus.ClusterBusServer;
 import com.janeluo.luban.rds.cluster.config.ClusterConfig;
 import com.janeluo.luban.rds.cluster.config.ClusterConfigPersister;
 import com.janeluo.luban.rds.cluster.config.ClusterStateManager;
+import com.janeluo.luban.rds.cluster.lifecycle.ClusterWritePropagator;
 import com.janeluo.luban.rds.cluster.lifecycle.NoOpReplicationLifecycleListener;
+import com.janeluo.luban.rds.cluster.lifecycle.PropagationFrames;
 import com.janeluo.luban.rds.cluster.lifecycle.ReplicationLifecycleListener;
 import com.janeluo.luban.rds.cluster.migration.ImportResult;
 import com.janeluo.luban.rds.cluster.migration.SlotMigrationManager;
@@ -92,6 +94,15 @@ public class GossipProtocol {
      * </p>
      */
     private SlotMigrationManager slotMigrationManager;
+
+    /**
+     * 集群内部写传播回调（P0-新3，由 NettyRedisServer 注入）。
+     * <p>
+     * 目标端经总线 MIGRATE_KEY 导入键后以 RESTORE 帧进入复制/AOF 传播流，
+     * 避免目标 master 的 slave 缺失导入键（failover 后丢键）。未注入（null）时跳过。
+     * </p>
+     */
+    private volatile ClusterWritePropagator writePropagator;
 
     /**
      * 跨节点 PUBLISH 消息监听器（由上层 server 模块注入，避免 cluster 反向依赖 server）。
@@ -184,7 +195,7 @@ public class GossipProtocol {
     }
 
     /**
-     * 设置集群状态管理器（用于消息计数统计）
+     * 设置集群状态管理器（用于消息计数统计与 cluster_state 单公式计算，N-26）。
      * <p>
      * 解决构造函数顺序依赖：ClusterStateManager 在 GossipProtocol 之前创建，
      * 需要在创建后通过此方法注入引用。
@@ -194,6 +205,19 @@ public class GossipProtocol {
      */
     public void setClusterStateManager(ClusterStateManager stateManager) {
         this.stateManager = stateManager;
+    }
+
+    /**
+     * 获取集群状态管理器（N-26）。
+     * <p>
+     * GossipTask 的周期性状态刷新委托给此实例，保证 cluster_state 全网只有
+     * {@link ClusterStateManager#isClusterOk()} 一个公式（未注入时返回 null）。
+     * </p>
+     *
+     * @return 集群状态管理器，未注入时返回 null
+     */
+    public ClusterStateManager getClusterStateManager() {
+        return stateManager;
     }
 
     /**
@@ -215,6 +239,19 @@ public class GossipProtocol {
     }
 
     /**
+     * 获取集群总线客户端（N-39）。
+     * <p>
+     * 供 CLUSTER FORGET 在移除节点后断开其总线连接（disconnect 会清除重连端点，
+     * 防止断线监听器把已删除节点复活成僵尸重连循环）。
+     * </p>
+     *
+     * @return 集群总线客户端，未注入时返回 null
+     */
+    public ClusterBusClient getBusClient() {
+        return busClient;
+    }
+
+    /**
      * 注入槽位迁移管理器（由 NettyRedisServer 在创建后注入）。
      * <p>
      * 用于处理 MIGRATE_KEY 消息：目标节点收到键迁移请求后调用 importKey 导入键。
@@ -233,6 +270,18 @@ public class GossipProtocol {
      */
     public SlotMigrationManager getSlotMigrationManager() {
         return slotMigrationManager;
+    }
+
+    /**
+     * 设置集群内部写传播回调（P0-新3，由 NettyRedisServer 注入）。
+     * <p>
+     * 目标端导入键后以 RESTORE 帧进入复制/AOF 传播流，避免从节点缺失导入键。
+     * </p>
+     *
+     * @param propagator 传播回调，null 时跳过传播
+     */
+    public void setWritePropagator(ClusterWritePropagator propagator) {
+        this.writePropagator = propagator;
     }
 
     /**
@@ -392,9 +441,6 @@ public class GossipProtocol {
 
         if (busClient != null) {
             busClient.send(node.getNodeId(), ping);
-            if (stateManager != null) {
-                stateManager.incrementMessagesSent(1);
-            }
         }
 
         // 更新最后发送 PING 时间
@@ -412,9 +458,6 @@ public class GossipProtocol {
             logger.trace("收到 PING 消息: from={}", ping.getSenderNodeId());
         }
 
-        if (stateManager != null) {
-            stateManager.incrementMessagesReceived(1);
-        }
 
         // 更新发送方节点信息（包含握手完成处理）
         updateNodeFromPingMessage(ping);
@@ -460,9 +503,6 @@ public class GossipProtocol {
             logger.trace("收到 PONG 消息: from={}", pong.getSenderNodeId());
         }
 
-        if (stateManager != null) {
-            stateManager.incrementMessagesReceived(1);
-        }
 
         // 更新发送方节点信息
         updateNodeFromPongMessage(pong);
@@ -540,9 +580,6 @@ public class GossipProtocol {
             connectFuture.addListener((ChannelFuture future) -> {
                 if (future.isSuccess()) {
                     busClient.send(tempNodeId, meet);
-                    if (stateManager != null) {
-                        stateManager.incrementMessagesSent(1);
-                    }
                 } else {
                     logger.error("发送 MEET 消息失败: 无法连接到 {}:{}", ip, port, future.cause());
                 }
@@ -598,8 +635,13 @@ public class GossipProtocol {
     public void handleMeet(MeetMessage meet) {
         logger.info("收到 MEET 消息: from={}", meet.getSenderNodeId());
 
-        if (stateManager != null) {
-            stateManager.incrementMessagesReceived(1);
+
+        // N-2：MYSELF 守卫。伪造本节点 ID 的 MEET 可经下方"已存在节点"分支覆盖本节点
+        // 自身通告地址并触发无意义的出站连接。正常拓扑中节点永远不会收到自己的 MEET。
+        String myNodeId = clusterConfig.getMyNodeId();
+        if (myNodeId != null && myNodeId.equals(meet.getSenderNodeId())) {
+            logger.warn("收到发送方为本节点的 MEET 消息，忽略（MYSELF 守卫）");
+            return;
         }
 
         // 检查发送方节点是否已存在
@@ -726,6 +768,16 @@ public class GossipProtocol {
             return;
         }
 
+        // N-10：MYSELF 守卫（对齐 Redis 7.2 clusterProcessPacket 的
+        // "if (!(failing->flags & CLUSTER_NODE_MYSELF))"）。任何已知节点（含 slave）
+        // 均可声明本节点 FAIL；若不拦截，本节点被自标 FAIL 后将失去投票/选举权并被
+        // gossip 自我传播。正常拓扑中节点永远不会收到关于自己的 FAIL 广播。
+        String myNodeId = clusterConfig.getMyNodeId();
+        if (myNodeId != null && myNodeId.equals(failedNodeId)) {
+            logger.warn("收到针对本节点的 FAIL 消息，忽略（MYSELF 守卫）: from={}", senderNodeId);
+            return;
+        }
+
         // 标记节点为 FAIL 状态
         failedNode.addState(ClusterNodeState.FAIL);
         failedNode.removeState(ClusterNodeState.PFAIL);
@@ -775,6 +827,10 @@ public class GossipProtocol {
      * 目标节点收到键迁移请求后，调用 SlotMigrationManager.importKey 导入键，
      * 并返回 MIGRATE_KEY_ACK 给源节点。
      * </p>
+     * <p>
+     * 导入成功后以 RESTORE 帧进入复制/AOF 传播流（P0-新3）：总线导入绕过普通命令
+     * 传播链，若不补传播，目标 master 的 slave 缺失导入键，failover 后丢键。
+     * </p>
      *
      * @param msg 键迁移请求消息
      * @return 键迁移确认消息（返回给源节点）
@@ -791,9 +847,14 @@ public class GossipProtocol {
         if (slotMigrationManager != null) {
             try {
                 ImportResult result = slotMigrationManager.importKey(msg.getKey(), msg.getValue(),
-                        msg.getTtl(), msg.isReplace());
+                        msg.getTtl(), msg.isReplace(), msg.getDestDb());
                 success = result.isSuccess();
-                if (!success) {
+                if (success) {
+                    // P0-新3：导入键进入复制/AOF 流（RESTORE 帧），避免目标 master 的
+                    // slave 缺失导入键、failover 后丢键。传播失败仅告警，不影响 ACK。
+                    propagateImport(msg.getKey(), msg.getTtl(), msg.getValue(), msg.isReplace(),
+                            msg.getDestDb());
+                } else {
                     errorMessage = result.getError();
                 }
             } catch (Exception e) {
@@ -809,6 +870,37 @@ public class GossipProtocol {
         MigrateKeyAckMessage ack = new MigrateKeyAckMessage(myNodeId, msg.getKey(), success, errorMessage);
         ack.setRequestId(msg.getRequestId());
         return ack;
+    }
+
+    /**
+     * 将目标端导入的键以 RESTORE 帧传播到复制 backlog、在线从节点与 AOF（P0-新3）。
+     * <p>
+     * 对齐 Redis 7：目标端以 RESTORE 进入正常传播流。payload 为 Java 序列化字节，
+     * 从节点/AOF 重放时经 core 模块 RESTORE 处理器按统一白名单反序列化还原值对象。
+     * </p>
+     *
+     * @param key     导入的键名
+     * @param ttlMs   导入的 TTL（毫秒）
+     * @param payload 序列化载荷
+     * @param replace 导入时的 REPLACE 选项
+     * @param destDb  导入的目标数据库号（N-30；>0 时前置 SELECT 帧保证重放落库正确）
+     */
+    private void propagateImport(String key, long ttlMs, byte[] payload, boolean replace, int destDb) {
+        ClusterWritePropagator propagator = writePropagator;
+        if (propagator == null) {
+            return;
+        }
+        try {
+            // N-30：导入到非 0 数据库时先传播 SELECT（复制流中为粘性上下文切换），
+            // 再传播 RESTORE，保证从节点/AOF 重放与主节点落到同一 db。
+            byte[] selectFrame = PropagationFrames.selectFrame(destDb);
+            if (selectFrame != null) {
+                propagator.propagate(selectFrame);
+            }
+            propagator.propagate(PropagationFrames.restoreFrame(key, ttlMs, payload, replace));
+        } catch (Exception e) {
+            logger.warn("目标端导入传播失败（键 {} 已导入，副本可能缺失）", key, e);
+        }
     }
 
     /**
@@ -943,6 +1035,15 @@ public class GossipProtocol {
      */
     private void updateNodeFromPingMessage(PingMessage ping) {
         String senderNodeId = ping.getSenderNodeId();
+        // N-2：MYSELF 守卫。伪造本节点 ID 的 PING 若被处理，可经
+        // syncSlotsFromNode(空位图) 删光本节点槽位、经 syncSenderRole(SLAVE) 把本节点
+        // 降级为从节点。对齐 Redis clusterProcessPacket 对 sender==myself 的忽略分支：
+        // 正常拓扑中节点永远不会收到"自己"发来的心跳，一律忽略。
+        String myNodeId = clusterConfig.getMyNodeId();
+        if (myNodeId != null && myNodeId.equals(senderNodeId)) {
+            logger.warn("收到发送方为本节点的 PING 消息，忽略（MYSELF 守卫）");
+            return;
+        }
         ClusterNode senderNode = clusterConfig.getNode(senderNodeId);
 
         if (senderNode != null) {
@@ -960,9 +1061,18 @@ public class GossipProtocol {
             // 避免本地纪元被先前消息提升后门控失效。
             long epochBaseline = senderNode.getConfigEpoch();
 
-            // 同步发送方槽位归属（基于发送方已记录的配置纪元裁决冲突）
+            // N-1：以消息头携带的 configEpoch 提升本地记录并用于槽位仲裁。
+            // 旧实现传 senderNode.getConfigEpoch()（本地陈旧值）并缺 setConfigEpochIfGreater，
+            // 导致：① failover 后新 master 的高纪元无法经其自身 PING/PONG 直接到达，
+            // 收敛窗口拉长；② 删除守卫 configEpoch >= node.getConfigEpoch() 恒真（陈旧
+            // 本地值必然 ≤ 消息值），任何广告位图缺槽都会被无条件删除。
+            // 对齐 MEET 路径：先提升本地纪元，再以 header 纪元仲裁槽位（Redis
+            // clusterProcessPacket 对 PING/PONG/MEET 统一以 hdr->configEpoch 仲裁）。
+            senderNode.setConfigEpochIfGreater(ping.getSenderConfigEpoch());
+
+            // 同步发送方槽位归属（基于消息头携带的配置纪元裁决冲突）
             clusterConfig.syncSlotsFromNode(senderNodeId, ping.getSenderSlots(),
-                    senderNode.getConfigEpoch());
+                    ping.getSenderConfigEpoch());
 
             // 同步发送方角色（master/slave）与 masterNodeId
             // selectGossipNodes 排除本节点，发送方自身角色只能通过消息头传播
@@ -970,7 +1080,13 @@ public class GossipProtocol {
                     ping.getSenderMasterNodeId(), ping.getSenderConfigEpoch(), epochBaseline);
 
             // 同步集群级 currentEpoch（重启节点本地可能滞后，导致 epoch 仲裁门控失效）
-            clusterConfig.setEpochIfGreater(ping.getSenderCurrentEpoch());
+            if (clusterConfig.setEpochIfGreater(ping.getSenderCurrentEpoch())) {
+                // N-12：currentEpoch 被外部消息抬升后，投票侧 votesCast 中旧纪元记录失效，
+                // 须清理，否则新纪元首个合法投票被旧条目误拒（选举停滞）。
+                if (failoverManager != null) {
+                    failoverManager.onClusterEpochRaised();
+                }
+            }
 
             // 同步发送方复制偏移量（P1-6），用于 failover rank 退避计算
             senderNode.setReplOffset(ping.getSenderReplicationOffset());
@@ -986,6 +1102,12 @@ public class GossipProtocol {
      */
     private void updateNodeFromPongMessage(PongMessage pong) {
         String senderNodeId = pong.getSenderNodeId();
+        // N-2：MYSELF 守卫（同 PING 路径，详见 updateNodeFromPingMessage）。
+        String myNodeId = clusterConfig.getMyNodeId();
+        if (myNodeId != null && myNodeId.equals(senderNodeId)) {
+            logger.warn("收到发送方为本节点的 PONG 消息，忽略（MYSELF 守卫）");
+            return;
+        }
         ClusterNode senderNode = clusterConfig.getNode(senderNodeId);
 
         if (senderNode != null) {
@@ -1003,16 +1125,26 @@ public class GossipProtocol {
             // 避免本地纪元被先前消息提升后门控失效。
             long epochBaseline = senderNode.getConfigEpoch();
 
-            // 同步发送方槽位归属（基于发送方已记录的配置纪元裁决冲突）
+            // N-1：以消息头携带的 configEpoch 提升本地记录并用于槽位仲裁（同 PING 路径，
+            // 对齐 Redis clusterProcessPacket 统一以 hdr->configEpoch 仲裁）。
+            senderNode.setConfigEpochIfGreater(pong.getSenderConfigEpoch());
+
+            // 同步发送方槽位归属（基于消息头携带的配置纪元裁决冲突）
             clusterConfig.syncSlotsFromNode(senderNodeId, pong.getSenderSlots(),
-                    senderNode.getConfigEpoch());
+                    pong.getSenderConfigEpoch());
 
             // 同步发送方角色（master/slave）与 masterNodeId
             syncSenderRole(senderNode, pong.getSenderFlags(),
                     pong.getSenderMasterNodeId(), pong.getSenderConfigEpoch(), epochBaseline);
 
             // 同步集群级 currentEpoch（重启节点本地可能滞后，导致 epoch 仲裁门控失效）
-            clusterConfig.setEpochIfGreater(pong.getSenderCurrentEpoch());
+            if (clusterConfig.setEpochIfGreater(pong.getSenderCurrentEpoch())) {
+                // N-12：currentEpoch 被外部消息抬升后，投票侧 votesCast 中旧纪元记录失效，
+                // 须清理，否则新纪元首个合法投票被旧条目误拒（选举停滞）。
+                if (failoverManager != null) {
+                    failoverManager.onClusterEpochRaised();
+                }
+            }
 
             // 同步发送方复制偏移量（P1-6），用于 failover rank 退避计算
             senderNode.setReplOffset(pong.getSenderReplicationOffset());
@@ -1046,6 +1178,13 @@ public class GossipProtocol {
      */
     private void updateNodeFromMeetMessage(MeetMessage meet) {
         String senderNodeId = meet.getSenderNodeId();
+        // N-2：MYSELF 守卫（同 PING 路径，详见 updateNodeFromPingMessage）。
+        // 同时阻止伪造 MEET 覆盖本节点自身通告地址（handleMeet 的地址更新分支）。
+        String myNodeId = clusterConfig.getMyNodeId();
+        if (myNodeId != null && myNodeId.equals(senderNodeId)) {
+            logger.warn("收到发送方为本节点的 MEET 消息，忽略（MYSELF 守卫）");
+            return;
+        }
         ClusterNode senderNode = clusterConfig.getNode(senderNodeId);
 
         if (senderNode != null) {
@@ -1058,7 +1197,13 @@ public class GossipProtocol {
             // 导致 slave 角色永不切换（回归缺陷）。
             long epochBaseline = senderNode.getConfigEpoch();
             senderNode.setConfigEpochIfGreater(meet.getSenderConfigEpoch());
-            clusterConfig.setEpochIfGreater(meet.getCurrentEpoch());
+            if (clusterConfig.setEpochIfGreater(meet.getCurrentEpoch())) {
+                // N-12：currentEpoch 被外部消息抬升后，投票侧 votesCast 中旧纪元记录失效，
+                // 须清理，否则新纪元首个合法投票被旧条目误拒（选举停滞）。
+                if (failoverManager != null) {
+                    failoverManager.onClusterEpochRaised();
+                }
+            }
             senderNode.updateLastPongTime();
             ClusterLink link = senderNode.getLink();
             if (link != null) {
@@ -1097,6 +1242,11 @@ public class GossipProtocol {
         }
 
         for (GossipNodeInfo nodeInfo : gossipNodes) {
+            // N-4：单条坏条目隔离。decode 端对非法 nodeId 保留原始字符串，此处构造
+            // ClusterNode/同步槽位时可能抛异常；若不隔离，一条坏条目会中断整条
+            // PING/PONG/MEET 的处理，发送方收不到 PONG 被误 PFAIL。逐条 try-catch
+            // 跳过坏条目，其余条目照常处理（对齐 Redis gossip 段逐条目容错）。
+            try {
             String nodeId = nodeInfo.getNodeId();
             boolean isMyselfEntry = nodeId != null && nodeId.equals(clusterConfig.getMyNodeId());
 
@@ -1222,6 +1372,11 @@ public class GossipProtocol {
 
             // 将发送方对该节点的 PFAIL 投票登记到故障检测器，用于跨节点 FAIL 共识
             failureDetector.processGossipPfailVote(nodeInfo, senderNodeId);
+            } catch (Exception e) {
+                // N-4：单条坏条目隔离（见循环头注释）
+                logger.warn("处理 Gossip 节点条目失败，跳过该条目: nodeId={}, from={}, error={}",
+                        nodeInfo.getNodeId(), senderNodeId, e.toString());
+            }
         }
     }
 
@@ -1329,9 +1484,6 @@ public class GossipProtocol {
         connectFuture.addListener((ChannelFuture future) -> {
             if (future.isSuccess()) {
                 busClient.send(node.getNodeId(), meet);
-                if (stateManager != null) {
-                    stateManager.incrementMessagesSent(1);
-                }
             } else {
                 logger.error("对 Gossip 发现的节点发送 MEET 失败: nodeId={}, address={}",
                         node.getNodeId(), node.getFullAddress(), future.cause());
