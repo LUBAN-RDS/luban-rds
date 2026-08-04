@@ -16,8 +16,10 @@ import com.janeluo.luban.rds.mesh.election.LeaseManager;
 import com.janeluo.luban.rds.mesh.election.VoteCollector;
 import com.janeluo.luban.rds.mesh.replication.LogApplier;
 import com.janeluo.luban.rds.mesh.replication.LogReplicator;
+import com.janeluo.luban.rds.mesh.replication.SnapshotManager;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesResponse;
+import com.janeluo.luban.rds.mesh.rpc.InstallSnapshotMessage;
 import com.janeluo.luban.rds.mesh.rpc.MeshRpcMessage;
 import com.janeluo.luban.rds.mesh.rpc.RequestVoteMessage;
 import com.janeluo.luban.rds.mesh.rpc.RequestVoteResponse;
@@ -102,6 +104,12 @@ public class MeshNode {
     private final LogReplicator replicator;
     /** apply 到 raw store 的应用器（仅用 raw store + handle，不写 AOF）。 */
     private final LogApplier applier;
+
+    /**
+     * 阶段 10：快照管理器（chunked INSTALL_SNAPSHOT + 周期快照）。
+     * 可为 null（未注入时收到 INSTALL_SNAPSHOT 静默忽略，保持向后兼容）。
+     */
+    private volatile SnapshotManager snapshotManager;
 
     /**
      * Leader 侧待响应的 propose：index → CompletableFuture。
@@ -232,6 +240,20 @@ public class MeshNode {
     /** 注入落盘 hook（阶段 11 替换为真实 fsync）。 */
     public void setPersistHook(Runnable hook) {
         this.persistHook = hook == null ? () -> { } : hook;
+    }
+
+    /**
+     * 注入快照管理器（阶段 10）。注入后入站 INSTALL_SNAPSHOT 走 chunked 接收路径，
+     * Leader 侧可调 {@link SnapshotManager#sendSnapshot} / {@link SnapshotManager#takePeriodicSnapshotIfNeeded}。
+     * 未注入时收到 INSTALL_SNAPSHOT 静默忽略。
+     */
+    public void setSnapshotManager(SnapshotManager snapshotManager) {
+        this.snapshotManager = snapshotManager;
+    }
+
+    /** 取快照管理器（测试用，可能为 null）。 */
+    public SnapshotManager getSnapshotManager() {
+        return snapshotManager;
     }
 
     // ==================== 阶段 4：propose（客户端写入口）====================
@@ -569,8 +591,12 @@ public class MeshNode {
                 handleAppendEntriesResponse(fromNodeId, (AppendEntriesResponse) msg);
                 break;
             case INSTALL_SNAPSHOT:
-                // 阶段 10 实现
-                logger.debug("INSTALL_SNAPSHOT 阶段 10 实现，暂忽略");
+                // 阶段 10：chunked INSTALL_SNAPSHOT（DESIGN §5.4）
+                if (snapshotManager != null) {
+                    snapshotManager.handleInstallSnapshot(fromNodeId, (InstallSnapshotMessage) msg);
+                } else {
+                    logger.debug("INSTALL_SNAPSHOT 收到但 SnapshotManager 未注入，暂忽略");
+                }
                 break;
             default:
                 logger.warn("未处理的消息类型: {}", type);

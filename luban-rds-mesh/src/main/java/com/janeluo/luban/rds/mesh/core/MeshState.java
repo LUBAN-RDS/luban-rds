@@ -201,6 +201,43 @@ public class MeshState {
         }
     }
 
+    /**
+     * 丢弃所有 ≤ {@code inclusiveIndex} 的日志条目（写锁内）。用于快照后日志截断（DESIGN §5.4）。
+     *
+     * <p>语义：快照已包含 index ≤ snapIndex 的全部状态，故 log 中这些条目应整体移除，
+     * 仅保留 index &gt; snapIndex 的 tail。</p>
+     *
+     * <p><b>调用顺序约定</b>：本方法基于<b>当前</b> {@link #lastIncludedIndex} 换算 list 索引
+     * （list 中绝对索引 = lastIncludedIndex + listIdx + 1）。故调用方应在<b>更新 lastIncludedIndex
+     * 之前</b>调用本方法（用旧 lastIncludedIndex 计算 dropCount），之后再赋新 lastIncludedIndex。
+     * 典型用法：</p>
+     * <pre>{@code
+     * state.discardUpToInclusive(snapIndex);   // 用旧 lastIncludedIndex 截断
+     * state.lastIncludedIndex = snapIndex;      // 截断后再推进边界
+     * }</pre>
+     *
+     * <p>与 {@link #truncateAfter(long)} 的区别：truncateAfter 保留 ≤ index 的条目（用于回滚，
+     * 删未来的）；本方法删除 ≤ index 的条目（用于快照，删过去的、已被快照覆盖的）。</p>
+     *
+     * @param inclusiveIndex 删除所有绝对索引 ≤ 该值的条目（1-based）
+     */
+    public void discardUpToInclusive(long inclusiveIndex) {
+        lock.writeLock().lock();
+        try {
+            // list 中条目绝对索引 = lastIncludedIndex + listIdx + 1（基于当前 lastIncludedIndex）
+            // 要删的最后一个条目的绝对索引 ≤ inclusiveIndex：
+            //   lastIncludedIndex + (dropCount-1) + 1 ≤ inclusiveIndex
+            //   dropCount ≤ inclusiveIndex - lastIncludedIndex
+            int dropCount = (int) Math.min(
+                    Math.max(inclusiveIndex - lastIncludedIndex, 0), log.size());
+            if (dropCount > 0) {
+                log.subList(0, dropCount).clear();
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
     @Override
     public String toString() {
         readLock().lock();
