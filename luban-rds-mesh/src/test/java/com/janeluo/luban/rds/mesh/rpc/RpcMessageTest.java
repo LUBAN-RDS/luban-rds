@@ -4,6 +4,7 @@ import com.janeluo.luban.rds.mesh.bus.MessageType;
 import com.janeluo.luban.rds.mesh.core.LogEntry;
 import org.junit.jupiter.api.Test;
 
+import java.io.DataOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
@@ -113,6 +114,7 @@ class RpcMessageTest {
 
     @Test
     void requestVoteMessage_roundtrip_allFieldsMatch() {
+        // 默认构造器（preVote=false）
         RequestVoteMessage original = new RequestVoteMessage(6L, NODE_ID, 100L, 5L);
 
         RequestVoteMessage decoded = RequestVoteMessage.decode(original.encode());
@@ -121,6 +123,66 @@ class RpcMessageTest {
         assertEquals(NODE_ID, decoded.getCandidateId());
         assertEquals(100L, decoded.getLastLogIndex());
         assertEquals(5L, decoded.getLastLogTerm());
+        assertFalse(decoded.isPreVote(), "默认构造应为正式投票 preVote=false");
+    }
+
+    @Test
+    void requestVoteMessage_roundtrip_preVote_true() {
+        // PreVote 探测：preVote=true 往返
+        RequestVoteMessage original = new RequestVoteMessage(6L, NODE_ID, 100L, 5L, true);
+
+        RequestVoteMessage decoded = RequestVoteMessage.decode(original.encode());
+
+        assertEquals(6L, decoded.getTerm());
+        assertEquals(NODE_ID, decoded.getCandidateId());
+        assertEquals(100L, decoded.getLastLogIndex());
+        assertEquals(5L, decoded.getLastLogTerm());
+        assertTrue(decoded.isPreVote(), "PreVote 探测 preVote 应为 true");
+    }
+
+    @Test
+    void requestVoteMessage_preVote_explicitFalse() {
+        // 显式 preVote=false
+        RequestVoteMessage original = new RequestVoteMessage(6L, NODE_ID, 100L, 5L, false);
+
+        RequestVoteMessage decoded = RequestVoteMessage.decode(original.encode());
+
+        assertFalse(decoded.isPreVote());
+    }
+
+    @Test
+    void requestVoteMessage_preVote_wireCompat_noTrailingByte() {
+        // 兼容性：手动构造不含 preVote 尾字节的旧 wire 格式，decode 应视为 false
+        byte[] legacyBody = buildLegacyRequestVoteBody(6L, NODE_ID, 100L, 5L);
+
+        RequestVoteMessage decoded = RequestVoteMessage.decode(legacyBody);
+
+        assertEquals(6L, decoded.getTerm());
+        assertEquals(NODE_ID, decoded.getCandidateId());
+        assertEquals(100L, decoded.getLastLogIndex());
+        assertEquals(5L, decoded.getLastLogTerm());
+        assertFalse(decoded.isPreVote(), "旧格式无 preVote 尾字节应视为 false");
+    }
+
+    /** 构造不含 preVote 尾字节的旧版 RequestVote wire body（term + candidateId + lastLogIndex + lastLogTerm）。 */
+    private static byte[] buildLegacyRequestVoteBody(long term, String candidateId,
+                                                     long lastLogIndex, long lastLogTerm) {
+        try (java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+             DataOutputStream out = new DataOutputStream(baos)) {
+            LogEntry.writeUtf8(out, candidateId);
+            out.writeLong(lastLogIndex);
+            out.writeLong(lastLogTerm);
+            out.flush();
+            byte[] bodyTail = baos.toByteArray();
+            byte[] body = new byte[8 + bodyTail.length]; // 8 = term(long)
+            for (int i = 7; i >= 0; i--) {
+                body[i] = (byte) ((term >> (8 * (7 - i))) & 0xFF);
+            }
+            System.arraycopy(bodyTail, 0, body, 8, bodyTail.length);
+            return body;
+        } catch (java.io.IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     // ==================== RequestVoteResponse ====================
