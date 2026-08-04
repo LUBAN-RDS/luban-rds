@@ -10,6 +10,8 @@ import io.netty.buffer.Unpooled;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
+
 /**
  * 日志应用器（DESIGN.md §5.1 步骤4 / 阶段 4.3）。
  * <p>
@@ -28,6 +30,9 @@ import org.slf4j.LoggerFactory;
  *       且不写 Channel——apply 返回值即客户端响应对象（如 {@code "+OK\r\n"}、{@code ":1\r\n"}、
  *       数组等），零转换管线（DESIGN v1.1 最大优点）。</li>
  *   <li>RESP 解析失败时返回 {@code "-ERR ..."} 错误响应对象（不抛异常中断 apply 循环）。</li>
+ *   <li><b>阶段 9：MULTI/EXEC 整事务单条 LogEntry</b>（DESIGN §5.8）——当 {@code entry.extra != null}
+ *       时走 {@link #applyTransaction} 分支：反序列化 WATCH 版本快照 + 命令帧序列 → WATCH 校验
+ *       → 按序执行 → 组装 RESP 数组。</li>
  * </ul>
  *
  * <h3>RESP 解析对接</h3>
@@ -92,8 +97,8 @@ public class LogApplier {
      * <p>
      * 流程：
      * <ol>
-     *   <li>事务（{@code entry.extra != null}）：阶段 4 暂不支持，抛
-     *       {@link UnsupportedOperationException}（阶段 9 完善）。</li>
+     *   <li>事务（{@code entry.extra != null}）：走 {@link #applyTransaction}（阶段 9 完善）
+     *       —— WATCH 版本校验 + 按序执行命令帧组装 RESP 数组。</li>
      *   <li>RESP 解析：{@code entry.respPayload} (byte[]) → {@link Command}
      *       （用 {@link Unpooled#wrappedBuffer(byte[])} 包成 ByteBuf 喂 parser）。</li>
      *   <li>{@code handler.handle(commandName, entry.dbIndex, args, rawStore)} → Object response。
@@ -111,10 +116,9 @@ public class LogApplier {
             return "-ERR nil log entry\r\n";
         }
 
-        // 事务暂不支持（阶段 9 完善）
+        // 阶段 9：MULTI/EXEC 整事务单条 LogEntry（extra != null）→ 事务分支
         if (entry.getExtra() != null) {
-            throw new UnsupportedOperationException(
-                    "MULTI/EXEC 事务 apply 在阶段 9 实现，当前不支持 extra != null 的条目: " + entry);
+            return applyTransaction(entry);
         }
 
         byte[] payload = entry.getRespPayload();
@@ -176,6 +180,137 @@ public class LogApplier {
         return serializeResponse(response);
     }
 
+    // ==================== MULTI/EXEC 事务分支（阶段 9 / DESIGN §5.8） ====================
+
+    /**
+     * apply 一条事务 LogEntry（DESIGN.md §5.8 场景 8）。
+     * <p>
+     * 整事务封装为单条 {@link LogEntry}：{@code respPayload} 为 MULTI 帧（或 EXEC 帧）作事务标识，
+     * {@code extra} 为 {@link TransactionPayload} 序列化的「WATCH 版本快照 + 命令帧序列」。
+     * apply 流程：
+     * <ol>
+     *   <li>反序列化 extra 得 WATCH 快照 + 命令帧序列
+     *       （{@link TransactionPayload#decode(byte[])}）。</li>
+     *   <li><b>WATCH 校验</b>：对每个 WATCH 的 {@code (db, key)}，取 rawStore 当前版本
+     *       （{@link MemoryStore#getKeyVersion(int, String)}），若与快照不符 → 事务中止，
+     *       返回 {@code "*-1\r\n"}（RESP null multi，与 Redis WATCH 失败语义一致）。</li>
+     *   <li>按序执行命令帧：每帧 RESP 解析 → {@code handler.handle(...)} → 收集响应对象。</li>
+     *   <li>组装 RESP 数组：{@code *<n>\r\n} + 各响应序列化字节。</li>
+     *   <li>返回该数组（= 客户端 EXEC 的响应）。</li>
+     * </ol>
+     * </p>
+     *
+     * <h3>原子性</h3>
+     * <p>单条 LogEntry 被 Raft 提交后，各节点 apply 串行执行：apply 期间 rawStore 不接受其它
+     * apply（{@code raftExecutor} 串行），且事务所有命令在同一 apply 调用内执行——
+     * 故整个事务要么全部生效要么全部不生效（仅 WATCH 失败时不执行命令，返回 {@code *-1}）。</p>
+     *
+     * <h3>异常容错</h3>
+     * <p>单条命令执行异常不会中断整个事务（与 Redis 行为一致：命令错误仍占一个数组元素，
+     * 写命令在 handler 内已不抛——错误以 {@code "-ERR ..."} 对象返回）；extra 格式非法
+     * （反序列化失败）返回 {@code "-ERR ..."} 错误响应对象。</p>
+     *
+     * @param entry 事务日志条目（extra 非空）
+     * @return EXEC 响应：RESP 数组字节串（如 {@code "*2\r\n+OK\r\n:1\r\n"}）或
+     *         {@code "*-1\r\n"}（WATCH 失败）或 {@code "-ERR ..."}（extra 格式错误）
+     */
+    private Object applyTransaction(LogEntry entry) {
+        TransactionPayload.Decoded payload;
+        try {
+            payload = TransactionPayload.decode(entry.getExtra());
+        } catch (RuntimeException e) {
+            logger.warn("applyTransaction: extra 反序列化失败, index={}", entry.getIndex(), e);
+            return "-ERR transaction payload decode error\r\n";
+        }
+
+        // 1. WATCH 版本校验
+        for (TransactionPayload.WatchEntry w : payload.getWatchEntries()) {
+            long currentVersion = rawStore.getKeyVersion(w.getDb(), w.getKey());
+            if (currentVersion != w.getVersion()) {
+                logger.debug("applyTransaction: WATCH 校验失败 db={} key={} snapshot={} current={}",
+                        w.getDb(), w.getKey(), w.getVersion(), currentVersion);
+                // RESP null multi（*-1\r\n），与 Redis WATCH 失败语义一致
+                return "*-1\r\n";
+            }
+        }
+
+        // 2. 空事务 → 空数组（*0\r\n，与 Redis EXEC 无排队命令行为一致）
+        if (payload.isEmptyTransaction()) {
+            return "*0\r\n";
+        }
+
+        // 3. 按序执行队列内命令，收集响应
+        List<Object> responses = new java.util.ArrayList<>(payload.commandCount());
+        for (byte[] frame : payload.getCommandFrames()) {
+            responses.add(applyCommandFrame(frame, entry.getDbIndex()));
+        }
+
+        // 4. 组装 RESP 数组并返回（字符串形式 "*<n>\r\n + 各响应序列化"）
+        return assembleRespArray(responses);
+    }
+
+    /**
+     * apply 单个命令帧到 rawStore（事务内命令复用普通 apply 的解析/执行路径）。
+     * <p>帧解析或执行失败时返回 {@code "-ERR ..."} 字符串（不抛异常，占一个数组元素）。</p>
+     *
+     * @param frame   完整 RESP 命令帧
+     * @param dbIndex apply 时传给 handler 的 database 参数
+     * @return 命令响应对象（{@code "+OK\r\n"} / {@code ":1\r\n"} / {@code "$-1\r\n"} / {@code "-ERR ..."}）
+     */
+    private Object applyCommandFrame(byte[] frame, int dbIndex) {
+        if (frame == null || frame.length == 0) {
+            return "-ERR empty command frame\r\n";
+        }
+
+        Command command;
+        ByteBuf buf = Unpooled.wrappedBuffer(frame);
+        try {
+            command = protocolParser.parse(buf);
+        } catch (Exception e) {
+            logger.warn("applyCommandFrame: RESP 解析失败, frameLen={}", frame.length, e);
+            return "-ERR protocol parse error\r\n";
+        } finally {
+            buf.release();
+        }
+
+        if (command == null) {
+            return "-ERR incomplete resp frame\r\n";
+        }
+
+        String commandName = command.getName();
+        String[] args = command.getArgs();
+        if (commandName == null || commandName.isEmpty()) {
+            return "-ERR empty command name\r\n";
+        }
+        String upperName = commandName.trim().toUpperCase();
+
+        try {
+            Object response = handler.handle(upperName, dbIndex, args, rawStore);
+            return response == null ? "$-1\r\n" : response;
+        } catch (Exception e) {
+            logger.error("applyCommandFrame: 命令执行异常, cmd={}", upperName, e);
+            return "-ERR apply command error: " + safeMsg(e) + "\r\n";
+        }
+    }
+
+    /**
+     * 把各命令响应对象组装为 RESP 数组（{@code *<n>\r\n + 各响应序列化字节}）。
+     * <p>用 {@link RedisProtocolParser#serialize(Object)} 序列化每项后拼接，
+     * 与直连 server 的 EXEC 响应字节完全一致。</p>
+     *
+     * @param responses 各命令响应对象
+     * @return RESP 数组字节串
+     */
+    private Object assembleRespArray(List<Object> responses) {
+        StringBuilder sb = new StringBuilder();
+        sb.append('*').append(responses.size()).append("\r\n");
+        for (Object resp : responses) {
+            byte[] bytes = serializeResponse(resp);
+            sb.append(new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1));
+        }
+        return sb.toString();
+    }
+
     /**
      * 将 apply 返回的响应对象序列化为 RESP 字节。
      * <p>
@@ -197,5 +332,11 @@ public class LogApplier {
                 respBuf.release();
             }
         }
+    }
+
+    /** 安全提取异常 message（null 时返回简单类名），用于错误响应构造。 */
+    private static String safeMsg(Exception e) {
+        String m = e.getMessage();
+        return m == null ? e.getClass().getSimpleName() : m;
     }
 }

@@ -185,11 +185,15 @@ class LogApplierTest {
     }
 
     @Test
-    void apply_transactionExtra_throwsUnsupported() {
-        // extra != null 表示事务，阶段 9 完善
+    void apply_transactionExtra_malformed_returnsErrorObject() {
+        // 阶段 9：extra != null 走事务分支；格式非法（非 TransactionPayload 编码）返回 -ERR
         LogEntry entry = new LogEntry(1L, 1L, respFrame("MULTI"), 0, new byte[]{1, 2});
 
-        assertThrows(UnsupportedOperationException.class, () -> applier.apply(entry));
+        Object response = applier.apply(entry);
+
+        assertTrue(response instanceof String, "响应应为 String 错误对象");
+        String s = (String) response;
+        assertTrue(s.startsWith("-ERR"), "非法 extra 应返回 -ERR: " + s);
     }
 
     @Test

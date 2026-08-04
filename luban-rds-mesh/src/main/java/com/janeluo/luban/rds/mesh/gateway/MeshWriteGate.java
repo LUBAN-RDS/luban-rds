@@ -83,6 +83,14 @@ public class MeshWriteGate {
      */
     private static final long DEFAULT_READ_INDEX_WAIT_MS = 300L;
 
+    /**
+     * BLOCK 类命令禁用错误响应字节（DESIGN §9 风险表 / 决策 17 / 阶段 9）。
+     * <p>v1 在 mesh 模式禁用 BLPOP/BRPOP/BZPOPMIN/BZPOPMAX，到达 gate 时直接返回此错误。</p>
+     */
+    public static final byte[] BLOCK_COMMAND_ERR_BYTES =
+            "-ERR BLOCK commands are not supported in mesh mode\r\n"
+                    .getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
+
     private final MeshNode meshNode;
     /** 真实 DefaultMemoryStore——apply 唯一目标、读路径直接读。 */
     private final MemoryStore rawStore;
@@ -139,6 +147,26 @@ public class MeshWriteGate {
             // 连接/控制（非 mutating，不应走 Raft）
             "PING", "ECHO", "AUTH", "HELLO", "RESET", "COMMAND", "INFO", "TIME",
             "CLIENT", "CONFIG", "ROLE", "LASTSAVE", "SLOWLOG", "acl"
+    );
+
+    /**
+     * BLOCK 类命令禁用集（DESIGN §9 风险表 / 决策 17 / 阶段 9）。
+     * <p>
+     * v1 在 mesh 模式禁用这些命令——其阻塞/唤醒路径绕过拦截层，无法被 Raft 复制：
+     * <ul>
+     *   <li>BLPOP/BRPOP 唤醒：{@code BlockingRequestManager.tryWakeUpWithPop} 接收 lambda，
+     *       真正直调 {@code memoryStore.lpop/rpop} 在 {@code RedisServerHandler:2082-2086}，
+     *       绕过集群重定向门与 AOF/传播段；</li>
+     *   <li>BZPOPMIN/BZPOPMAX：同样的阻塞语义与唤醒路径；</li>
+     *   <li>XREAD BLOCK：唤醒在 Stream 等待器机制（{@code RedisServerHandler:2132/2146/2220-2466}），
+     *       不在 BlockingRequestManager，同样绕拦截层。
+     *       <b>简化</b>：XREAD 统一当读处理（非阻塞 XREAD COUNT n 可用），不在此集合——
+     *       仅当带 BLOCK 选项时才禁用（由 {@link #isBlockXRead(String[])} 判定）。</li>
+     * </ul>
+     * </p>
+     */
+    private static final Set<String> BLOCK_COMMANDS = unmodifiableSet(
+            "BLPOP", "BRPOP", "BZPOPMIN", "BZPOPMAX"
     );
 
     // ==================== 构造 ====================
@@ -220,6 +248,10 @@ public class MeshWriteGate {
      * @return apply 产生的响应字节（直写客户端 Channel）
      * @throws MovedToLeaderException 当前不是 Leader（携带 leader service 地址；阶段 5 为 nodeId 占位）
      * @throws RuntimeException        propose 超时或其它异常
+     * @apiNote <b>BLOCK 命令禁用</b>（阶段 9 / DESIGN §9）：本方法接收原始 RESP 帧，
+     *          BLOCK 命令判定需命令名/参数，由上层（阶段 12 RedisServerHandler 集成时）
+     *          在调本方法前用 {@link #isBlockCommand(String, String[])} 预检；
+     *          命中时直接回 {@link #blockCommandError()}，不进入 propose。
      */
     public byte[] write(byte[] rawRespFrame, int dbIndex, byte[] extra) {
         CompletableFuture<byte[]> future = meshNode.propose(rawRespFrame, dbIndex, extra);
@@ -279,6 +311,11 @@ public class MeshWriteGate {
     public byte[] read(int dbIndex, String[] args) {
         if (args == null || args.length == 0) {
             throw new IllegalArgumentException("read: args 不能为空");
+        }
+
+        // 0. BLOCK 类命令禁用（阶段 9 / DESIGN §9）：到达 gate 即返回错误字节
+        if (isBlockCommand(args[0], args)) {
+            return blockCommandError();
         }
 
         // 1. 非 Leader → MOVED
@@ -459,6 +496,83 @@ public class MeshWriteGate {
         }
         // 未知命令保守当写（强一致优先）
         return true;
+    }
+
+    // ==================== BLOCK 命令禁用（阶段 9 / DESIGN §9 / 决策 17） ====================
+
+    /**
+     * 判定命令是否为 mesh 模式禁用的 BLOCK 类命令（大小写不敏感）。
+     * <p>
+     * v1 禁用 {@code BLPOP/BRPOP/BZPOPMIN/BZPOPMAX}（集合判定）。{@code XREAD} 本身不在禁用集——
+     * 非阻塞 XREAD 是普通读；仅当其参数中带 {@code BLOCK} 选项时才禁用，由
+     * {@link #isBlockCommand(String, String[])} 的 args 变体重载判定。
+     * </p>
+     *
+     * @param commandName 命令名（args[0]）；null/空返回 false（由上层 isWriteCommand/default 处理）
+     * @return true=该命令在 mesh 模式应被拒绝（返回 BLOCK 错误）
+     */
+    public static boolean isBlockCommand(String commandName) {
+        if (commandName == null || commandName.isEmpty()) {
+            return false;
+        }
+        return BLOCK_COMMANDS.contains(commandName.trim().toUpperCase());
+    }
+
+    /**
+     * 判定命令（含参数）是否为 mesh 模式禁用的 BLOCK 类命令。
+     * <p>
+     * 在 {@link #isBlockCommand(String)} 基础上，额外处理 {@code XREAD} 带 {@code BLOCK} 选项的情况：
+     * <ul>
+     *   <li>{@code BLPOP/BRPOP/BZPOPMIN/BZPOPMAX}：恒禁用；</li>
+     *   <li>{@code XREAD ... BLOCK &lt;ms&gt;}：禁用（阻塞语义）；</li>
+     *   <li>{@code XREAD COUNT n ...}（无 BLOCK）：不禁用（普通读）。</li>
+     * </ul>
+     * </p>
+     *
+     * @param commandName 命令名（args[0]）
+     * @param args        完整参数数组（含命令名）；可传 null（仅按命令名判定）
+     * @return true=该命令在 mesh 模式应被拒绝
+     */
+    public static boolean isBlockCommand(String commandName, String[] args) {
+        if (!isBlockCommand(commandName)) {
+            // 非 BLOCK 命令集，但 XREAD 带 BLOCK 选项也要拦
+            return isBlockXRead(commandName, args);
+        }
+        return true;
+    }
+
+    /**
+     * 判定 XREAD 是否带 BLOCK 选项。
+     * <p>XREAD 参数形如 {@code XREAD [COUNT n] [BLOCK ms] STREAMS key id ...}，
+     * 大小写不敏感查找 token {@code "BLOCK"}（非前缀匹配）。</p>
+     *
+     * @param commandName 命令名
+     * @param args        参数数组
+     * @return true=XREAD 且带 BLOCK 选项
+     */
+    private static boolean isBlockXRead(String commandName, String[] args) {
+        if (commandName == null || commandName.isEmpty() || args == null || args.length == 0) {
+            return false;
+        }
+        if (!"XREAD".equalsIgnoreCase(commandName.trim())) {
+            return false;
+        }
+        for (String a : args) {
+            if (a != null && "BLOCK".equalsIgnoreCase(a.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 返回 BLOCK 命令禁用错误响应字节（{@link #BLOCK_COMMAND_ERR_BYTES}）。
+     * <p>供 write/read 入口拒绝 BLOCK 命令时返回，直写客户端 Channel。</p>
+     *
+     * @return {@code -ERR BLOCK commands are not supported in mesh mode\r\n}
+     */
+    public static byte[] blockCommandError() {
+        return BLOCK_COMMAND_ERR_BYTES.clone();
     }
 
     // ==================== 序列化辅助 ====================
