@@ -125,6 +125,13 @@ public class MeshBootstrap {
         RaftStateMachine stateMachine = new RaftStateMachine();
         MeshNode meshNode = new MeshNode(meshConfig, state, busClient, stateMachine, applier, rawStore);
 
+        // 6.1 注册入站消息消费者：把 MeshNode.onMessage 注入共享的 @Sharable busHandler。
+        // busHandler 同时挂在 MeshBusServer（peer→本节点 inbound）与 MeshBusClient（本节点→peer 出站连接上的应答 inbound）
+        // 的 pipeline 上，一次注册即覆盖双向入站；否则所有 Raft RPC（PreVote/RequestVote/AppendEntries）到站即丢，
+        // 选举永远无法收敛（症状：日志「未注册 messageConsumer，MeshFrame 仅记录日志」+ 客户端 MESHDOWN）。
+        busHandler.setMessageConsumer(meshNode::onMessage);
+        logger.info("mesh 总线消息消费者已注册: nodeId={}, consumer=MeshNode::onMessage", topo.selfNodeId);
+
         // persistHook：MeshState 变更时落盘 raft-nodes.conf（term/votedFor/log/lastIncluded）
         meshNode.setPersistHook(() -> {
             try {
