@@ -28,7 +28,7 @@ public class MeshFrame {
     /** 帧头固定长度：40（nodeId）+ 1（type）+ 4（length）= 45 字节 */
     public static final int HEADER_LENGTH = 45;
 
-    /** nodeId 长度：40 字符 hex（SHA-1，160bit） */
+    /** nodeId 帧字段固定长度（40 字节）。≤ 40 字符的短 nodeId 由 {@link MeshBusCodec} 右填 NUL 补齐。 */
     public static final int NODE_ID_LENGTH = 40;
 
     /** 单帧 body 上限：16MB（与 cluster MAX_BODY_LENGTH 对齐） */

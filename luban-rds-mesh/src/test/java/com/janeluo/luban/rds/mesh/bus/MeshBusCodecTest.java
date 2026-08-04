@@ -220,6 +220,97 @@ class MeshBusCodecTest {
         channel.finishAndReleaseAll();
     }
 
+    // ==================== 短 nodeId 补齐（修复 senderNodeId 长度非法丢弃帧） ====================
+
+    /**
+     * P0 回归：人工可读的短 nodeId（如 "node-9736"）编解码 round-trip 必须还原正确。
+     * 修复前 Encoder 因长度 != 40 直接丢弃本帧，导致 PreVote/选举消息无法到达 peer，集群瘫痪。
+     */
+    @Test
+    void roundtrip_shortNodeId_humanReadable_preserved() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new MeshBusCodec.Encoder(), new MeshBusCodec.Decoder());
+
+        String shortNodeId = "node-9736";   // 9 字符，远短于 40
+        byte[] body = randomBody(64);
+        MeshFrame original = new MeshFrame(shortNodeId,
+                MessageType.REQUEST_VOTE.getCode(), body);
+
+        assertTrue(channel.writeOutbound(original));
+        ByteBuf encoded = channel.readOutbound();
+        assertNotNull(encoded, "短 nodeId 帧不应被 Encoder 丢弃");
+        assertEquals(MeshFrame.HEADER_LENGTH + body.length, encoded.readableBytes());
+
+        assertTrue(channel.writeInbound(encoded));
+        MeshFrame decoded = channel.readInbound();
+        assertNotNull(decoded);
+        assertEquals(shortNodeId, decoded.getSenderNodeId(), "短 nodeId 解码后应 trim NUL 还原");
+        assertEquals(MessageType.REQUEST_VOTE.getCode(), decoded.getType());
+        assertArrayEquals(body, decoded.getBody());
+
+        channel.finish();
+    }
+
+    @Test
+    void encoder_shortNodeId_paddedWithNulTo40Bytes() {
+        EmbeddedChannel channel = new EmbeddedChannel(new MeshBusCodec.Encoder());
+
+        String shortNodeId = "node-9738";   // 9 字符
+        MeshFrame frame = new MeshFrame(shortNodeId,
+                MessageType.APPEND_ENTRIES.getCode(), randomBody(10));
+
+        channel.writeOutbound(frame);
+        ByteBuf encoded = channel.readOutbound();
+        assertNotNull(encoded);
+        assertEquals(MeshFrame.HEADER_LENGTH + 10, encoded.readableBytes());
+
+        // 前 9B 为 nodeId ASCII，后 31B 为 NUL 填充
+        byte[] nodeIdField = new byte[MeshFrame.NODE_ID_LENGTH];
+        encoded.getBytes(0, nodeIdField);
+        byte[] expected = new byte[MeshFrame.NODE_ID_LENGTH];
+        byte[] raw = shortNodeId.getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(raw, 0, expected, 0, raw.length);
+        // 其余字节为 0x00
+        assertArrayEquals(expected, nodeIdField, "短 nodeId 应右填 NUL 补齐到 40B");
+
+        channel.finish();
+    }
+
+    @Test
+    void encoder_overlongNodeId_dropped() {
+        EmbeddedChannel channel = new EmbeddedChannel(new MeshBusCodec.Encoder());
+
+        // 41 字符 nodeId（超过 40B 上限）应被丢弃
+        String overlongId = "0123456789abcdef0123456789abcdef012345678";  // 41 chars
+        assertEquals(41, overlongId.length());
+        MeshFrame frame = new MeshFrame(overlongId,
+                MessageType.APPEND_ENTRIES.getCode(), randomBody(10));
+
+        channel.writeOutbound(frame);
+        ByteBuf out = channel.readOutbound();
+        assertTrue(out == null || out.readableBytes() == 0,
+                "超长 nodeId 帧应被 Encoder 丢弃");
+        channel.finish();
+    }
+
+    @Test
+    void roundtrip_exactly40CharNodeId_preserved() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new MeshBusCodec.Encoder(), new MeshBusCodec.Decoder());
+
+        // 恰好 40 字符（边界值，无填充）
+        MeshFrame original = new MeshFrame(NODE_ID,
+                MessageType.APPEND_ENTRIES.getCode(), randomBody(32));
+
+        assertTrue(channel.writeOutbound(original));
+        ByteBuf encoded = channel.readOutbound();
+        assertTrue(channel.writeInbound(encoded));
+        MeshFrame decoded = channel.readInbound();
+        assertNotNull(decoded);
+        assertEquals(NODE_ID, decoded.getSenderNodeId());
+        channel.finish();
+    }
+
     // ==================== MessageType ====================
 
     @Test

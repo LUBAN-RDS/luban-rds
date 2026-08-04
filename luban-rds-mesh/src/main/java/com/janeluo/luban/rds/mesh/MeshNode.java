@@ -188,6 +188,11 @@ public class MeshNode {
 
     // ==================== 生命周期 ====================
 
+    /** 本节点 nodeId（来自 {@link MeshConfig#getSelfNodeId()}）。 */
+    public String getNodeId() {
+        return nodeId;
+    }
+
     /** 启动：角色=FOLLOWER，启动 ElectionTimer。 */
     public synchronized void start() {
         if (started) {

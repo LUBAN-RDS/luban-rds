@@ -536,7 +536,7 @@ public class NettyRedisServer implements RedisServer {
         this.meshAssembly = bootstrap.bootstrap(config, memoryStore, commandHandler);
 
         logger.info("mesh 模式初始化完成: nodeId={}, peers={}",
-                com.janeluo.luban.rds.mesh.lifecycle.MeshAssembly.class.getSimpleName(),
+                config.getMeshSelfNodeId(),
                 meshAssembly.getClientRedirector() != null ? "ready" : "n/a");
     }
     
@@ -998,7 +998,7 @@ public class NettyRedisServer implements RedisServer {
             // 3. 启动 MeshNode（ElectionTimer + 心跳；FOLLOWER 起步，选举超时后竞选）
             meshAssembly.getMeshNode().start();
             logger.info("mesh MeshNode 启动成功，nodeId={}",
-                    meshAssembly.getMeshNode().getState().currentTerm);
+                    meshAssembly.getMeshNode().getNodeId());
         } catch (Exception e) {
             logger.error("mesh 组件启动失败", e);
             throw new RuntimeException("mesh 组件启动失败", e);

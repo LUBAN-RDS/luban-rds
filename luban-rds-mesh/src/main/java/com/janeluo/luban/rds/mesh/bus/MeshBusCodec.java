@@ -13,8 +13,13 @@ import java.util.List;
 /**
  * Mesh 总线帧编解码器（与 {@code ClusterBusCodec} 同构，但独立于 cluster，不复用代码）。
  * <p>
- * 帧格式（见 DESIGN.md §4.2）：45B 帧头 = 40B senderNodeId(ASCII hex) + 1B type + 4B length(大端)，
+ * 帧格式（见 DESIGN.md §4.2）：45B 帧头 = 40B senderNodeId(ASCII) + 1B type + 4B length(大端)，
  * 无 term 字段；body ≤ {@link MeshFrame#MAX_BODY_LENGTH}（16MB）。
+ * </p>
+ * <p>
+ * senderNodeId 支持 ≤ 40 字符的任意 ASCII 字符串：编码时短 nodeId 右填 NUL (0x00) 补齐到 40B，
+ * 解码时 trim 尾部 NUL 还原。这样人工可读的 nodeId（如 {@code "node-9736"}）也能直接使用，
+ * 无需强制 40 字符 hex。
  * </p>
  */
 public final class MeshBusCodec {
@@ -30,6 +35,10 @@ public final class MeshBusCodec {
      * 写入 40B nodeId + 1B type + 4B length(大端) + body。编码前预检 body 长度，
      * 超过 {@link MeshFrame#MAX_BODY_LENGTH} 的帧直接丢弃（不写帧、不断连），
      * 避免对端解码器判为非法帧后关闭整条连接。
+     * </p>
+     * <p>
+     * nodeId 字段：≤ 40 字符的 ASCII 字符串，不足 40 时右填 NUL (0x00) 补齐；
+     * 超过 40 字符视为配置错误，丢弃本帧。
      * </p>
      */
     public static class Encoder extends MessageToByteEncoder<MeshFrame> {
@@ -51,16 +60,21 @@ public final class MeshBusCodec {
                 return;
             }
 
-            // 校验 senderNodeId：必须 40 字符（解码端固定读 40B，长度不符会污染后续帧）
+            // 校验 senderNodeId：≤ 40 字符（解码端固定读 40B）。短 nodeId 右填 NUL 补齐到 40B，
+            // 使人工可读的 nodeId（如 "node-9736"）也能正确编解码（NUL 在 nodeId 中不会出现）。
             String senderNodeId = msg.getSenderNodeId();
-            if (senderNodeId == null || senderNodeId.length() != MeshFrame.NODE_ID_LENGTH) {
-                logger.error("senderNodeId 长度非法（期望 {}，实际 {}），丢弃本帧",
+            if (senderNodeId == null || senderNodeId.length() > MeshFrame.NODE_ID_LENGTH) {
+                logger.error("senderNodeId 长度非法（上限 {}，实际 {}），丢弃本帧",
                         MeshFrame.NODE_ID_LENGTH, senderNodeId == null ? 0 : senderNodeId.length());
                 return;
             }
 
-            // 写 40B nodeId（ASCII 字节）
-            out.writeBytes(senderNodeId.getBytes(StandardCharsets.US_ASCII));
+            // 写 40B nodeId（ASCII 字节，不足 40 右填 NUL）
+            byte[] nodeIdBytes = new byte[MeshFrame.NODE_ID_LENGTH];
+            byte[] raw = senderNodeId.getBytes(StandardCharsets.US_ASCII);
+            System.arraycopy(raw, 0, nodeIdBytes, 0, raw.length);
+            // 剩余字节保持 0x00（NUL）填充
+            out.writeBytes(nodeIdBytes);
 
             // 写 1B type
             out.writeByte(msg.getType());
@@ -96,10 +110,10 @@ public final class MeshBusCodec {
             while (in.readableBytes() >= MeshFrame.HEADER_LENGTH) {
                 in.markReaderIndex();
 
-                // 读 40B nodeId（ASCII hex）
+                // 读 40B nodeId（ASCII，可能右填 NUL），trim 尾部 NUL 还原原始 nodeId
                 byte[] nodeIdBytes = new byte[MeshFrame.NODE_ID_LENGTH];
                 in.readBytes(nodeIdBytes);
-                String senderNodeId = new String(nodeIdBytes, StandardCharsets.US_ASCII);
+                String senderNodeId = trimNulPadding(nodeIdBytes);
 
                 // 读 1B type
                 byte typeCode = in.readByte();
@@ -152,5 +166,20 @@ public final class MeshBusCodec {
             logger.error("MeshBus 解码器异常: {}", cause.getMessage(), cause);
             ctx.close();
         }
+    }
+
+    /**
+     * 去除 nodeId 字节数组尾部的 NUL (0x00) 填充，还原为 ASCII 字符串。
+     * <p>编码端对短 nodeId 右填 NUL 补齐到 40B，这里反向还原。NUL (0x00) 不在合法 nodeId 字符集内。</p>
+     *
+     * @param nodeIdBytes 固定 40B 的 nodeId 字段（可能含尾部 NUL 填充）
+     * @return 去除尾部 NUL 后的 nodeId 字符串
+     */
+    private static String trimNulPadding(byte[] nodeIdBytes) {
+        int len = nodeIdBytes.length;
+        while (len > 0 && nodeIdBytes[len - 1] == 0x00) {
+            len--;
+        }
+        return new String(nodeIdBytes, 0, len, StandardCharsets.US_ASCII);
     }
 }
