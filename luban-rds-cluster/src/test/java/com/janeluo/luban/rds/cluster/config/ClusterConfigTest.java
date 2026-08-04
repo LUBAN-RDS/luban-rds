@@ -417,4 +417,80 @@ public class ClusterConfigTest {
         config.clearDirty();
         assertFalse(config.isDirty());
     }
+
+    // ==================== P1-2B：syncSlotsFromNode 槽位移除（epoch 守卫） ====================
+
+    /**
+     * P1-2B：节点迁出槽位后，gossip 通告的位图不再含该槽位，
+     * syncSlotsFromNode 应移除本地残留的所有权，使槽位归属收敛。
+     */
+    @Test
+    public void testSyncSlotsFromNodeRemovesSlotsNoLongerAdvertised() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        node1.setConfigEpoch(5L);
+        config.addNode(node1);
+        // node1 原持有 slot 0 和 slot 100
+        java.util.BitSet initial = new java.util.BitSet();
+        initial.set(0);
+        initial.set(100);
+        config.syncSlotsFromNode(nodeId1, initial, 5L);
+        assertEquals(nodeId1, config.getSlotOwner(0));
+        assertEquals(nodeId1, config.getSlotOwner(100));
+
+        // node1 迁出 slot 100，advertised 位图只剩 slot 0，epoch 不低于上次
+        java.util.BitSet migrated = new java.util.BitSet();
+        migrated.set(0);
+        config.syncSlotsFromNode(nodeId1, migrated, 5L);
+
+        assertEquals("slot 0 应保留", nodeId1, config.getSlotOwner(0));
+        assertNull("slot 100 应被移除（不再 advertised）", config.getSlotOwner(100));
+        assertFalse("node1 不应再持有 slot 100", node1.hasSlot(100));
+    }
+
+    /**
+     * P1-2B：陈旧的 gossip 分片（epoch 偏低）不应冲掉更新的槽位变更。
+     */
+    @Test
+    public void testSyncSlotsFromNodeStaleEpochDoesNotRemove() {
+        ClusterNode node1 = new ClusterNode(nodeId1);
+        node1.setConfigEpoch(10L);
+        config.addNode(node1);
+        java.util.BitSet initial = new java.util.BitSet();
+        initial.set(0);
+        initial.set(100);
+        config.syncSlotsFromNode(nodeId1, initial, 10L);
+
+        // 更新 node1 的 configEpoch（模拟后续 failover 提升了它的纪元）
+        node1.setConfigEpoch(20L);
+
+        // 陈旧分片：epoch=5 < 20，位图不含 slot 100，但不应移除
+        java.util.BitSet stale = new java.util.BitSet();
+        stale.set(0);
+        config.syncSlotsFromNode(nodeId1, stale, 5L);
+
+        assertEquals("陈旧分片不应移除 slot 100", nodeId1, config.getSlotOwner(100));
+        assertTrue("node1 仍应持有 slot 100", node1.hasSlot(100));
+    }
+
+    // ==================== P1-3：FORGET 黑名单 ====================
+
+    @Test
+    public void testBlacklistNodeIsBlacklistedWithinTtl() {
+        config.blacklistNode(nodeId1);
+        assertTrue("加入黑名单后应处于黑名单内", config.isBlacklisted(nodeId1));
+    }
+
+    @Test
+    public void testBlacklistNullAndUnknownReturnsFalse() {
+        assertFalse(config.isBlacklisted(null));
+        assertFalse(config.isBlacklisted("unknown-node-id"));
+    }
+
+    @Test
+    public void testCleanupBlacklistRemovesExpiredEntries() {
+        // 黑名单条目 TTL 由实现常量决定，这里验证 cleanup 不影响未过期条目
+        config.blacklistNode(nodeId1);
+        config.cleanupBlacklist();
+        assertTrue("未过期条目应保留", config.isBlacklisted(nodeId1));
+    }
 }

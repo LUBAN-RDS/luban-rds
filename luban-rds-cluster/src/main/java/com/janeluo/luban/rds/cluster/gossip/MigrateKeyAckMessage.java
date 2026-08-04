@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
  * - 键名长度（4 字节，大端序）+ 键名（UTF-8）
  * - 成功标志（1 字节，0=失败，1=成功）
  * - 错误信息长度（4 字节，大端序）+ 错误信息（UTF-8，失败时填写）
+ * - requestId（8 字节，大端序，P1-20 请求-响应关联；尾部追加，旧消息忽略）
  * </p>
  */
 public class MigrateKeyAckMessage extends GossipMessage {
@@ -84,7 +85,8 @@ public class MigrateKeyAckMessage extends GossipMessage {
     protected byte[] encodeBody() {
         byte[] keyBytes = key != null ? key.getBytes(StandardCharsets.UTF_8) : new byte[0];
         byte[] errorBytes = errorMessage != null ? errorMessage.getBytes(StandardCharsets.UTF_8) : new byte[0];
-        int totalLength = 4 + keyBytes.length + 1 + 4 + errorBytes.length;
+        // 末尾追加 8 字节 requestId（P1-20），向后兼容：旧节点忽略多余字节
+        int totalLength = 4 + keyBytes.length + 1 + 4 + errorBytes.length + 8;
         byte[] data = new byte[totalLength];
         int offset = 0;
 
@@ -108,7 +110,18 @@ public class MigrateKeyAckMessage extends GossipMessage {
         data[offset++] = (byte) errorBytes.length;
         if (errorBytes.length > 0) {
             System.arraycopy(errorBytes, 0, data, offset, errorBytes.length);
+            offset += errorBytes.length;
         }
+
+        // 写入 requestId（8 字节大端序，P1-20 请求-响应关联，回填自入站 MigrateKeyMessage）
+        data[offset++] = (byte) (requestId >> 56);
+        data[offset++] = (byte) (requestId >> 48);
+        data[offset++] = (byte) (requestId >> 40);
+        data[offset++] = (byte) (requestId >> 32);
+        data[offset++] = (byte) (requestId >> 24);
+        data[offset++] = (byte) (requestId >> 16);
+        data[offset++] = (byte) (requestId >> 8);
+        data[offset++] = (byte) requestId;
 
         return data;
     }
@@ -157,6 +170,19 @@ public class MigrateKeyAckMessage extends GossipMessage {
             byte[] errorBytes = new byte[errorLen];
             System.arraycopy(body, offset, errorBytes, 0, errorLen);
             this.errorMessage = new String(errorBytes, StandardCharsets.UTF_8);
+            offset += errorLen;
+        }
+
+        // 读取 requestId（P1-20，尾部追加，长度守卫向后兼容旧消息）
+        if (offset + 8 <= body.length) {
+            this.requestId = ((long) (body[offset++] & 0xFF) << 56) |
+                    ((long) (body[offset++] & 0xFF) << 48) |
+                    ((long) (body[offset++] & 0xFF) << 40) |
+                    ((long) (body[offset++] & 0xFF) << 32) |
+                    ((long) (body[offset++] & 0xFF) << 24) |
+                    ((long) (body[offset++] & 0xFF) << 16) |
+                    ((long) (body[offset++] & 0xFF) << 8) |
+                    (body[offset++] & 0xFF);
         }
     }
 

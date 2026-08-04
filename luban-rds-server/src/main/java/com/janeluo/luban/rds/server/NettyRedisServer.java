@@ -122,6 +122,12 @@ public class NettyRedisServer implements RedisServer {
      * MIGRATE 命令处理器（集群模式下用于节点间键迁移）
      */
     private MigrateCommandHandler migrateCommandHandler;
+
+    /**
+     * 写暂停门控（P1-12，手动 failover 普通模式与 CLIENT PAUSE 共用）。
+     * 传给 RedisServerHandler 在写路径查询；无暂停时零开销。
+     */
+    private ServerWritePauseGate writePauseGate;
     
     /**
      * 集群状态管理器
@@ -408,6 +414,7 @@ public class NettyRedisServer implements RedisServer {
         logger.info("集群配置自动保存回调已注册");
 
         // 10.5 初始化 FailoverManager 并注入 GossipProtocol
+        // P1-6：传入 clusterSlaveValidityFactor 启用 replica 有效性校验
         FailoverManager failoverManager = new FailoverManager(
                 clusterConfig,
                 slotManager,
@@ -415,9 +422,17 @@ public class NettyRedisServer implements RedisServer {
                 clusterBusClient,
                 saveConfigCallback,
                 config.getClusterNodeTimeout(),
-                config.getClusterFailoverGracePeriod());
+                config.getClusterFailoverGracePeriod(),
+                config.getClusterSlaveValidityFactor());
         this.gossipProtocol.setFailoverManager(failoverManager);
-        logger.info("FailoverManager 已注入: gracePeriod={}ms", config.getClusterFailoverGracePeriod());
+        logger.info("FailoverManager 已注入: gracePeriod={}ms, slaveValidityFactor={}",
+                config.getClusterFailoverGracePeriod(), config.getClusterSlaveValidityFactor());
+
+        // P1-12：创建写暂停门控并注入 FailoverManager（手动 failover 普通模式用）。
+        // 同一实例后续也会传给 RedisServerHandler 在写路径查询，保证无暂停时零开销。
+        this.writePauseGate = new ServerWritePauseGate();
+        failoverManager.setWritePauseGate(this.writePauseGate);
+        logger.info("WritePauseGate 已注入 FailoverManager");
 
         // 10.55 注入复制生命周期监听器到集群组件，使角色变更触发复制连接启停。
         // ReplicationCoordinator 已在构造函数中创建并 setup()，此处仅做装配注入。
@@ -739,6 +754,10 @@ public class NettyRedisServer implements RedisServer {
                      }
                      if (clusterEnabled && migrateCommandHandler != null) {
                          handler.setMigrateCommandHandler(migrateCommandHandler);
+                     }
+                     // P1-12：注入写暂停门控，使手动 failover 普通模式期间写路径拒绝写
+                     if (clusterEnabled && writePauseGate != null) {
+                         handler.setWritePauseGate(writePauseGate);
                      }
                     // 注入复制命令处理器：非集群模式下由 replicaof 配置驱动复制，
                     // 集群模式下由 ReplicationCoordinator 统一管理复制组件生命周期。

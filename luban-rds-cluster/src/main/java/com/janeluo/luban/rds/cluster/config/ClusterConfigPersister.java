@@ -102,6 +102,10 @@ public class ClusterConfigPersister {
                 long myConfigEpoch = myNode != null ? myNode.getConfigEpoch() : config.getConfigEpoch();
                 writer.write("# My Config Epoch: " + myConfigEpoch);
                 writer.newLine();
+                // P0-4：持久化 lastVoteEpoch（对齐 Redis 7 var lastVoteEpoch）。
+                // 重启后据此拒绝同纪元二次投票，避免双 master。
+                writer.write("# Last Vote Epoch: " + config.getLastVoteEpoch());
+                writer.newLine();
                 writer.newLine();
 
                 // 写入每个节点（跳过 HANDSHAKE 和 NOADDR 状态的临时节点）
@@ -180,6 +184,13 @@ public class ClusterConfigPersister {
                             config.setConfigEpoch(epoch);
                         } catch (NumberFormatException e) {
                             logger.warn("解析我的配置纪元失败: {}", line);
+                        }
+                    } else if (line.startsWith("# Last Vote Epoch:")) {
+                        try {
+                            long epoch = Long.parseLong(line.substring("# Last Vote Epoch:".length()).trim());
+                            config.setLastVoteEpoch(epoch);
+                        } catch (NumberFormatException e) {
+                            logger.warn("解析最后投票纪元失败: {}", line);
                         }
                     }
                     continue;

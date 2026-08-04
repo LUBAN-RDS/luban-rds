@@ -63,7 +63,19 @@ public enum GossipMessageType {
     /**
      * 键迁移确认 - 目标节点收到键后回复源节点
      */
-    MIGRATE_KEY_ACK((byte) 0x0A);
+    MIGRATE_KEY_ACK((byte) 0x0A),
+
+    /**
+     * 手动故障转移启动（P1-12）- slave→master，请求 master 暂停写并回传当前 offset。
+     * 对齐 Redis CLUSTERMSG_TYPE_MFSTART。
+     */
+    MANUAL_FAILOVER_START((byte) 0x0B),
+
+    /**
+     * 手动故障转移 offset 回传（P1-12）- master→slave，携带 master 暂停写时的复制偏移量。
+     * slave 须追平到此 offset 后才执行提升，保证手动 failover 不丢数据。
+     */
+    MANUAL_FAILOVER_OFFSET((byte) 0x0C);
 
     /**
      * 消息类型编码

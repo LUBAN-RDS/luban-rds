@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,11 +34,24 @@ public class FailureDetector {
     private final long nodeTimeout;
 
     /**
-     * 记录每个节点被哪些主节点标记为 PFAIL
-     * key: 被标记的节点ID
-     * value: 标记该节点为 PFAIL 的主节点ID集合
+     * PFAIL 投票过期阈值（毫秒），对齐 Redis {@code NODE_TIMEOUT * 2}。
+     * 超过此时间未被刷新的 failure report 会被 {@link #cleanupStaleFailureReports()} 丢弃。
      */
-    private final Map<String, Set<String>> pfailVotes;
+    private final long failureReportTtlMs;
+
+    /**
+     * 记录每个节点被哪些主节点标记为 PFAIL。
+     * <p>
+     * key: 被标记的节点ID；
+     * value: 投票人 nodeId -> 投票时刻（ms）。
+     * </p>
+     * <p>
+     * 带时间戳是 P1-8 的关键：对齐 Redis {@code clusterNodeCleanupFailureReports}，
+     * 投票在 {@code NODE_TIMEOUT * 2} 后过期并被周期性清理；节点恢复时撤销其全部 failure reports。
+     * 取代原先的 {@code Set<String>}（无时间戳、永不过期）。
+     * </p>
+     */
+    private final Map<String, Map<String, Long>> pfailVotes;
 
     /**
      * 记录已确认 FAIL 的节点，避免重复广播
@@ -54,6 +68,7 @@ public class FailureDetector {
         this.clusterConfig = clusterConfig;
         this.nodeTimeout = nodeTimeout;
         this.pfailVotes = new ConcurrentHashMap<>();
+        this.failureReportTtlMs = 2L * nodeTimeout;
         this.confirmedFailNodes = ConcurrentHashMap.newKeySet();
     }
 
@@ -94,14 +109,20 @@ public class FailureDetector {
                     logger.warn("节点超时，标记为 PFAIL: nodeId={}, timeSinceLastPong={}ms, timeout={}ms",
                             node.getNodeId(), timeSinceLastPong, nodeTimeout);
 
-                    // 记录本节点的 PFAIL 投票
-                    recordPfailVote(node.getNodeId(), myNode.getNodeId());
+                    // 记录本节点的 PFAIL 投票（P1-7：仅 master 投票可推 FAIL，
+                    // 对齐 Redis——slave 的主观 PFAIL 不计入多数判定）。
+                    if (myNode.isMaster()) {
+                        recordPfailVote(node.getNodeId(), myNode.getNodeId());
+                    }
                 }
             } else {
                 // 节点恢复正常，清除 PFAIL 状态
                 if (node.isPfail()) {
                     node.removeState(ClusterNodeState.PFAIL);
                     logger.info("节点恢复正常，清除 PFAIL: nodeId={}", node.getNodeId());
+                    // P1-8：节点恢复时撤销其收到的全部 failure reports，
+                    // 对齐 Redis 节点恢复即清报告的语义，避免历史票在下一轮抖动中累积误 FAIL。
+                    pfailVotes.remove(node.getNodeId());
                 }
             }
         }
@@ -165,9 +186,10 @@ public class FailureDetector {
         // 计算需要的多数票数
         int majority = (masterCount / 2) + 1;
 
-        // 获取当前投票数
-        Set<String> votes = pfailVotes.get(nodeId);
-        int voteCount = votes != null ? votes.size() : 0;
+        // 获取当前投票数（P1-7：仅统计来自 master 的有效票，
+        // 对齐 Redis 只有 master 的 PFAIL 报告能把节点推 FAIL 的语义）。
+        Map<String, Long> votes = pfailVotes.get(nodeId);
+        int voteCount = countMasterVotes(votes);
 
         logger.debug("检查 FAIL 多数条件: nodeId={}, votes={}, majority={}, masterCount={}",
                 nodeId, voteCount, majority, masterCount);
@@ -203,6 +225,9 @@ public class FailureDetector {
         // PFAIL 清除不受保护期影响（PFAIL 是本节点主观判断，收到 PONG 即可清除）
         if (node.isPfail()) {
             node.removeState(ClusterNodeState.PFAIL);
+            // P1-8：撤销该节点收到的全部 failure reports，
+            // 与 checkNodeTimeout 恢复分支保持一致，避免历史残留票误推 FAIL。
+            pfailVotes.remove(nodeId);
             logger.info("节点恢复，清除 PFAIL 状态: nodeId={}", nodeId);
         }
 
@@ -224,13 +249,17 @@ public class FailureDetector {
     }
 
     /**
-     * 记录 PFAIL 投票
+     * 记录 PFAIL 投票（带时间戳）。
+     * <p>
+     * 同一 voter 重复投票会刷新其时间戳，重置过期计时。
+     * </p>
      *
      * @param targetNodeId 被投票的节点ID
      * @param voterNodeId  投票的主节点ID
      */
     public void recordPfailVote(String targetNodeId, String voterNodeId) {
-        pfailVotes.computeIfAbsent(targetNodeId, k -> ConcurrentHashMap.newKeySet()).add(voterNodeId);
+        pfailVotes.computeIfAbsent(targetNodeId, k -> new ConcurrentHashMap<>())
+                .put(voterNodeId, System.currentTimeMillis());
         logger.debug("记录 PFAIL 投票: targetNodeId={}, voterNodeId={}", targetNodeId, voterNodeId);
     }
 
@@ -269,20 +298,75 @@ public class FailureDetector {
             return;
         }
 
+        // P1-7：仅 master 的 gossip PFAIL 投票才登记。
+        // 对齐 Redis：只有 master 的 PFAIL 报告能把节点推 FAIL；
+        // slave 的主观 PFAIL 视图不计入多数判定，避免 N 个 slave 票 + 1 个 master 票凑多数误 FAIL。
+        ClusterNode voter = clusterConfig.getNode(voterNodeId);
+        if (voter == null || !voter.isMaster()) {
+            return;
+        }
+
         recordPfailVote(targetNodeId, voterNodeId);
         logger.debug("处理 Gossip PFAIL 投票: targetNodeId={}, voterNodeId={}",
                 targetNodeId, voterNodeId);
     }
 
     /**
-     * 获取节点的 PFAIL 投票数
+     * 获取节点的 PFAIL 投票数（仅 master 投票，P1-7）。
      *
      * @param nodeId 节点ID
      * @return 投票数
      */
     public int getPfailVoteCount(String nodeId) {
-        Set<String> votes = pfailVotes.get(nodeId);
-        return votes != null ? votes.size() : 0;
+        return countMasterVotes(pfailVotes.get(nodeId));
+    }
+
+    /**
+     * 统计投票集合中来自 master 的有效票数（P1-7 双保险）。
+     * <p>
+     * 计票时再次校验投票人角色：即使历史残留 slave 票（来自旧版本或角色变更后未清理）也不计入，
+     * 与 {@link #processGossipPfailVote} / {@link #checkNodeTimeout} 的记票门控形成纵深防御。
+     * </p>
+     *
+     * @param votes 投票集合（voterId -> 投票时刻），可为 null
+     * @return 来自 master 的有效票数
+     */
+    private int countMasterVotes(Map<String, Long> votes) {
+        if (votes == null || votes.isEmpty()) {
+            return 0;
+        }
+        int count = 0;
+        for (String voterId : votes.keySet()) {
+            ClusterNode voter = clusterConfig.getNode(voterId);
+            if (voter != null && voter.isMaster()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 清理过期的 PFAIL failure reports（P1-8，对齐 Redis {@code clusterNodeCleanupFailureReports}）。
+     * <p>
+     * 丢弃投票时刻距今超过 {@code failureReportTtlMs}（{@code NODE_TIMEOUT * 2}）的票。
+     * 由 {@code GossipTask} 每轮在 {@code checkNodeTimeouts} 之后调用，
+     * 确保历史分区的旧票不会永久有效、避免抖动节点 "FAIL→恢复→再 FAIL" 循环。
+     * </p>
+     */
+    public void cleanupStaleFailureReports() {
+        if (pfailVotes.isEmpty()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        Iterator<Map.Entry<String, Map<String, Long>>> outer = pfailVotes.entrySet().iterator();
+        while (outer.hasNext()) {
+            Map.Entry<String, Map<String, Long>> entry = outer.next();
+            Map<String, Long> voters = entry.getValue();
+            voters.entrySet().removeIf(e -> (now - e.getValue()) > failureReportTtlMs);
+            if (voters.isEmpty()) {
+                outer.remove();
+            }
+        }
     }
 
     /**

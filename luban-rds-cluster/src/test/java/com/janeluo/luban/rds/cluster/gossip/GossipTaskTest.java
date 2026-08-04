@@ -260,6 +260,98 @@ class GossipTaskTest {
         // 由于没有设置超时，节点应该不会被标记
     }
 
+    @Test
+    @DisplayName("P1-9：启用优先策略时优先 PING pong 最老的节点")
+    void testP19OldestPongPrioritized() {
+        // 使用 mock 总线客户端，捕获被 PING 的目标
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        EmbeddedChannel channel = new EmbeddedChannel();
+        ChannelPromise succeededPromise = new DefaultChannelPromise(channel);
+        succeededPromise.trySuccess();
+        when(mockBusClient.isConnected(anyString())).thenReturn(false);
+        when(mockBusClient.connect(anyString(), anyString(), anyInt())).thenReturn(succeededPromise);
+
+        // 用 nodeTimeout=5000 重新构建协议与 task，启用 P1-9 优先策略
+        GossipProtocol proto = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+        GossipTask task = new GossipTask(proto, proto.getFailureDetector(), 5000);
+        proto.start();
+
+        // 两个候选节点：newer 较新 pong，older 较老 pong，且都已超 nodeTimeout/2 未 ping
+        ClusterNode newer = createTestNode("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "127.0.0.1", 6380, 16380);
+        newer.addState(ClusterNodeState.MASTER);
+        newer.setLastPongTime(System.currentTimeMillis() - 1000); // 较新
+        clusterConfig.addNode(newer);
+
+        ClusterNode older = createTestNode("cccccccccccccccccccccccccccccccccccccccc", "127.0.0.1", 6381, 16381);
+        older.addState(ClusterNodeState.MASTER);
+        older.setLastPongTime(System.currentTimeMillis() - 8000); // 较老（pong 最老）
+        clusterConfig.addNode(older);
+
+        // 默认 lastPingTime=0，getTimeSinceLastPing 返回 0（< nodeTimeout/2=2500）
+        // 需要把两个节点的 lastPingTime 设到足够久以前以满足优先条件
+        newer.setLastPingTime(System.currentTimeMillis() - 6000);
+        older.setLastPingTime(System.currentTimeMillis() - 6000);
+
+        task.run();
+
+        // 应优先 PING pong 最老的 older（调度器可能并行触发多次，用 atLeastOnce 容忍）
+        verify(mockBusClient, atLeastOnce()).send(eq("cccccccccccccccccccccccccccccccccccccccc"), any());
+        verify(mockBusClient, never()).send(eq("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), any());
+
+        proto.stop();
+    }
+
+    /**
+     * 创建测试节点
+     */
+    @Test
+    @DisplayName("P1-21: cleanupStaleHandshakeNodes 清理超时未握手的 HANDSHAKE 节点")
+    void testP21CleanupStaleHandshakeNodes() {
+        ClusterBusClient mockBusClient = mock(ClusterBusClient.class);
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, mockBusClient, 5000);
+
+        // 添加一个 HANDSHAKE 节点，lastPongTime 设为很久以前（模拟长期未握手完成）
+        ClusterNode staleHandshake = createTestNode(
+                "cccccccccccccccccccccccccccccccccccccccc", "127.0.0.1", 6381, 16381);
+        staleHandshake.addState(ClusterNodeState.HANDSHAKE);
+        staleHandshake.setLastPongTime(System.currentTimeMillis() - 60000L); // 60s 前，超过 2*nodeTimeout(10s)
+        clusterConfig.addNode(staleHandshake);
+
+        // 添加一个正常节点（非 HANDSHAKE），不应被清理
+        ClusterNode normalNode = createTestNode(
+                "dddddddddddddddddddddddddddddddddddddddd", "127.0.0.1", 6382, 16382);
+        normalNode.addState(ClusterNodeState.MASTER);
+        clusterConfig.addNode(normalNode);
+
+        // 调用清理（阈值 10000ms = 2*5000）
+        protocol.cleanupStaleHandshakeNodes(10000L);
+
+        // 超时 HANDSHAKE 节点应被移除
+        assertNull(clusterConfig.getNode(staleHandshake.getNodeId()),
+                "超时 HANDSHAKE 节点应被清理");
+        // 正常节点应保留
+        assertNotNull(clusterConfig.getNode(normalNode.getNodeId()),
+                "正常节点不应被清理");
+        // 应对超时节点调用 disconnect（清理残留连接）
+        verify(mockBusClient).disconnect(staleHandshake.getNodeId());
+    }
+
+    @Test
+    @DisplayName("P1-21: cleanupStaleHandshakeNodes 阈值<=0 时跳过（向后兼容）")
+    void testP21CleanupStaleHandshakeNodesDisabledWhenTimeoutZero() {
+        GossipProtocol protocol = new GossipProtocol(clusterConfig, null, 5000);
+        ClusterNode handshake = createTestNode(
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "127.0.0.1", 6383, 16383);
+        handshake.addState(ClusterNodeState.HANDSHAKE);
+        handshake.setLastPongTime(System.currentTimeMillis() - 60000L);
+        clusterConfig.addNode(handshake);
+
+        // timeout=0 → 跳过清理
+        protocol.cleanupStaleHandshakeNodes(0L);
+        assertNotNull(clusterConfig.getNode(handshake.getNodeId()),
+                "timeout<=0 时不应清理 HANDSHAKE 节点");
+    }
+
     /**
      * 创建测试节点
      */

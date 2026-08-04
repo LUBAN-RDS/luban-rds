@@ -464,6 +464,44 @@ public class ClusterConfigPersisterTest {
     }
 
     /**
+     * P0-4：lastVoteEpoch 必须持久化到 nodes.conf 并在重启后恢复，
+     * 否则 master 重启后会遗忘已投过的纪元、同纪元二次投票导致双 master。
+     */
+    @Test
+    public void testLastVoteEpochPersistenceRoundTrip() throws IOException {
+        ClusterConfig config = createTestConfig();
+        config.setLastVoteEpoch(7L);  // 模拟本节点已在 epoch=7 投过票
+
+        persister.save(config, tempFile.getAbsolutePath());
+
+        // 验证文件包含 Last Vote Epoch 头
+        String content = new String(Files.readAllBytes(tempFile.toPath()));
+        assertTrue("nodes.conf 应写入 Last Vote Epoch 头: " + content,
+                content.contains("# Last Vote Epoch: 7"));
+
+        // 加载并验证恢复
+        ClusterConfig loaded = persister.load(tempFile.getAbsolutePath());
+        assertEquals("重启后 lastVoteEpoch 应从 nodes.conf 恢复",
+                7L, loaded.getLastVoteEpoch());
+    }
+
+    /**
+     * P0-4：兼容性——旧格式 nodes.conf（无 Last Vote Epoch 头）加载后 lastVoteEpoch 默认 0。
+     */
+    @Test
+    public void testLoadLegacyFileWithoutLastVoteEpochDefaultsToZero() throws IOException {
+        String content = "# Current Epoch: 5\n" +
+                "# My Config Epoch: 3\n" +
+                "\n" +
+                "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0 127.0.0.1:7000@17000 myself,master - 0 1234567890 3 connected 0-5460\n";
+        Files.write(tempFile.toPath(), content.getBytes());
+
+        ClusterConfig loaded = persister.load(tempFile.getAbsolutePath());
+        assertEquals("旧格式无 Last Vote Epoch 头时默认 0",
+                0L, loaded.getLastVoteEpoch());
+    }
+
+    /**
      * 创建测试配置
      */
     private ClusterConfig createTestConfig() {

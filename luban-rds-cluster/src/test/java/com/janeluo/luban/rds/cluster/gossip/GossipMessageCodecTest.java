@@ -8,8 +8,11 @@ import java.util.BitSet;
 import java.util.EnumSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Gossip 消息二进制编解码往返测试
@@ -186,5 +189,73 @@ class GossipMessageCodecTest {
                 "旧版本消息解码后 senderCurrentEpoch 应为默认值 0");
         assertEquals(5L, decoded.getSenderConfigEpoch(),
                 "其他字段应正常解码");
+    }
+
+    @Test
+    @DisplayName("P1-20: MigrateKeyMessage requestId encode/decode 往返不丢失")
+    void testMigrateKeyMessageRequestIdRoundTrip() {
+        byte[] value = "v".getBytes();
+        MigrateKeyMessage msg = new MigrateKeyMessage(SENDER_ID, "mykey", value, 1000L, true);
+        msg.setRequestId(123456789L);
+
+        byte[] encoded = msg.encode();
+        GossipMessage decoded = GossipMessage.parseMessage(encoded);
+
+        assertInstanceOf(MigrateKeyMessage.class, decoded);
+        MigrateKeyMessage decodedMsg = (MigrateKeyMessage) decoded;
+        assertEquals(123456789L, decodedMsg.getRequestId(), "requestId 往返应不丢失");
+        assertEquals("mykey", decodedMsg.getKey());
+        assertTrue(decodedMsg.isReplace());
+        assertEquals(1000L, decodedMsg.getTtl());
+    }
+
+    @Test
+    @DisplayName("P1-20: MigrateKeyAckMessage requestId encode/decode 往返不丢失")
+    void testMigrateKeyAckMessageRequestIdRoundTrip() {
+        MigrateKeyAckMessage ack = new MigrateKeyAckMessage(SENDER_ID, "mykey", false, "BUSYKEY");
+        ack.setRequestId(987654321L);
+
+        byte[] encoded = ack.encode();
+        GossipMessage decoded = GossipMessage.parseMessage(encoded);
+
+        assertInstanceOf(MigrateKeyAckMessage.class, decoded);
+        MigrateKeyAckMessage decodedAck = (MigrateKeyAckMessage) decoded;
+        assertEquals(987654321L, decodedAck.getRequestId(), "requestId 往返应不丢失");
+        assertEquals("BUSYKEY", decodedAck.getErrorMessage());
+        assertFalse(decodedAck.isSuccess());
+    }
+
+    @Test
+    @DisplayName("P1-20: 旧版本 MigrateKeyMessage（无 requestId 字段）解码向后兼容")
+    void testMigrateKeyMessageBackwardCompatibleWithoutRequestId() {
+        // 构造完整消息后裁掉尾部 8 字节（requestId 为消息体最后 8 字节），
+        // 并同步修正头部 bodyLength，模拟旧版本无 requestId 字段的报文。
+        byte[] value = "v".getBytes();
+        MigrateKeyMessage msg = new MigrateKeyMessage(SENDER_ID, "mykey", value, 1000L, true);
+        msg.setRequestId(0L);
+        byte[] fullEncoded = msg.encode();
+
+        int bodyLengthOffset = GossipMessage.NODE_ID_LENGTH + 1;
+        int originalBodyLength = GossipMessage.HEADER_LENGTH; // placeholder
+        // 读取原 bodyLength
+        originalBodyLength = ((fullEncoded[bodyLengthOffset] & 0xFF) << 24)
+                | ((fullEncoded[bodyLengthOffset + 1] & 0xFF) << 16)
+                | ((fullEncoded[bodyLengthOffset + 2] & 0xFF) << 8)
+                | (fullEncoded[bodyLengthOffset + 3] & 0xFF);
+        int truncatedBodyLength = originalBodyLength - 8;
+
+        byte[] truncated = new byte[GossipMessage.HEADER_LENGTH + truncatedBodyLength];
+        System.arraycopy(fullEncoded, 0, truncated, 0, truncated.length);
+        truncated[bodyLengthOffset] = (byte) (truncatedBodyLength >> 24);
+        truncated[bodyLengthOffset + 1] = (byte) (truncatedBodyLength >> 16);
+        truncated[bodyLengthOffset + 2] = (byte) (truncatedBodyLength >> 8);
+        truncated[bodyLengthOffset + 3] = (byte) truncatedBodyLength;
+
+        // 不应抛异常，requestId 保持默认值 0
+        MigrateKeyMessage decoded = new MigrateKeyMessage();
+        decoded.decode(truncated);
+
+        assertEquals(0L, decoded.getRequestId(), "旧版本消息解码后 requestId 应为默认值 0");
+        assertEquals("mykey", decoded.getKey(), "其他字段应正常解码");
     }
 }

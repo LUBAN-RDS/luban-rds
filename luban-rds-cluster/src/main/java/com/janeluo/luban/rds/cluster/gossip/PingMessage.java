@@ -75,6 +75,15 @@ public class PingMessage extends GossipMessage {
     private long senderCurrentEpoch;
 
     /**
+     * 发送方（myNode）的复制偏移量（P1-6）。
+     * <p>
+     * slave 填已同步偏移量，master 填 0 或自身偏移。供对端维护本节点的 replOffset，
+     * 用于 failover rank 退避计算。尾部追加字段，向后兼容（同 senderCurrentEpoch 模式）。
+     * </p>
+     */
+    private long senderReplicationOffset;
+
+    /**
      * 默认构造方法
      */
     public PingMessage() {
@@ -219,6 +228,24 @@ public class PingMessage extends GossipMessage {
     }
 
     /**
+     * 获取发送方复制偏移量（P1-6）。
+     *
+     * @return 复制偏移量
+     */
+    public long getSenderReplicationOffset() {
+        return senderReplicationOffset;
+    }
+
+    /**
+     * 设置发送方复制偏移量（P1-6）。
+     *
+     * @param senderReplicationOffset 复制偏移量
+     */
+    public void setSenderReplicationOffset(long senderReplicationOffset) {
+        this.senderReplicationOffset = senderReplicationOffset;
+    }
+
+    /**
      * 添加 Gossip 节点信息
      *
      * @param nodeInfo 节点信息
@@ -254,7 +281,8 @@ public class PingMessage extends GossipMessage {
         int masterNodeIdLength = senderMasterNodeId != null ? GossipNodeInfo.NODE_ID_LENGTH : 0;
 
         int totalLength = 8 + 2 + gossipNodesLength + 4 + slotsBytes.length
-                + 8 + 1 + flagsCount * 2 + 1 + masterNodeIdLength + 8;
+                + 8 + 1 + flagsCount * 2 + 1 + masterNodeIdLength + 8
+                + 8; // +8：senderReplicationOffset（P1-6，尾部追加）
         byte[] data = new byte[totalLength];
         int offset = 0;
 
@@ -326,6 +354,16 @@ public class PingMessage extends GossipMessage {
         data[offset++] = (byte) (senderCurrentEpoch >> 16);
         data[offset++] = (byte) (senderCurrentEpoch >> 8);
         data[offset++] = (byte) senderCurrentEpoch;
+
+        // 写入发送方复制偏移量（8字节，大端序，P1-6，尾部追加，向后兼容）
+        data[offset++] = (byte) (senderReplicationOffset >> 56);
+        data[offset++] = (byte) (senderReplicationOffset >> 48);
+        data[offset++] = (byte) (senderReplicationOffset >> 40);
+        data[offset++] = (byte) (senderReplicationOffset >> 32);
+        data[offset++] = (byte) (senderReplicationOffset >> 24);
+        data[offset++] = (byte) (senderReplicationOffset >> 16);
+        data[offset++] = (byte) (senderReplicationOffset >> 8);
+        data[offset++] = (byte) senderReplicationOffset;
 
         return data;
     }
@@ -426,6 +464,18 @@ public class PingMessage extends GossipMessage {
         // 读取发送方集群当前纪元（8字节，大端序）- 向后兼容：旧消息无此字段时保留默认值 0
         if (offset + 8 <= body.length) {
             this.senderCurrentEpoch = ((long) (body[offset++] & 0xFF) << 56) |
+                    ((long) (body[offset++] & 0xFF) << 48) |
+                    ((long) (body[offset++] & 0xFF) << 40) |
+                    ((long) (body[offset++] & 0xFF) << 32) |
+                    ((long) (body[offset++] & 0xFF) << 24) |
+                    ((long) (body[offset++] & 0xFF) << 16) |
+                    ((long) (body[offset++] & 0xFF) << 8) |
+                    ((long) (body[offset++] & 0xFF));
+        }
+
+        // 读取发送方复制偏移量（8字节，大端序，P1-6，尾部追加，向后兼容：旧消息无此字段时保留默认值 0）
+        if (offset + 8 <= body.length) {
+            this.senderReplicationOffset = ((long) (body[offset++] & 0xFF) << 56) |
                     ((long) (body[offset++] & 0xFF) << 48) |
                     ((long) (body[offset++] & 0xFF) << 40) |
                     ((long) (body[offset++] & 0xFF) << 32) |

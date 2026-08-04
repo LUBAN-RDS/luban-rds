@@ -156,10 +156,12 @@ class ClusterIntegrationTest {
         assertFalse(config.hasNode(nodeId2), "节点应该已被移除");
         assertEquals(1, config.getNodeCount(), "应该只剩1个节点");
 
-        // 验证 60 秒延迟机制 - 节点在延迟列表中
-        // 注意：延迟列表仅用于主节点（有槽位的节点）
-        // 从节点没有槽位，不会添加到延迟列表
-        assertFalse(commandHandler.isNodeInForgetList(nodeId2), "从节点不应该在延迟移除列表中");
+        // P1-3：从节点也应加入 FORGET 黑名单（与主节点一致），否则 gossip 会立即重新引入它。
+        // 原行为仅主节点进黑名单是 bug（P1-3 正是要修复它）。
+        assertTrue(commandHandler.isNodeInForgetList(nodeId2),
+                "FORGET 后从节点也应在黑名单内（防 gossip 重新引入）");
+        assertTrue(config.isBlacklisted(nodeId2),
+                "clusterConfig 黑名单应包含该从节点");
     }
 
     @Test

@@ -47,6 +47,24 @@ public class MigrateCommandHandler {
     private static final int DEFAULT_DATABASE = 0;
 
     /**
+     * sendAndWait 默认超时（毫秒，P1-17）。当 MIGRATE timeout=0 时使用此值，
+     * 避免 Netty await(0) 立即返回导致必失败。
+     */
+    private static final long DEFAULT_MIGRATE_TIMEOUT_MS = 5000L;
+
+    /**
+     * 发送键到目标节点的结果（P1-17，区分 BUSYKEY 与普通失败）。
+     */
+    private enum SendResult {
+        /** 发送并经目标节点 ACK 确认成功 */
+        SUCCESS,
+        /** 目标键已存在且未带 REPLACE（对齐 Redis BUSYKEY） */
+        BUSYKEY,
+        /** 其他失败（未连接、ACK 超时/失败、目标拒绝等） */
+        FAILED
+    }
+
+    /**
      * 迁移管理器
      */
     private final SlotMigrationManager migrationManager;
@@ -107,11 +125,15 @@ public class MigrateCommandHandler {
             boolean copy = false;
             boolean replace = false;
             List<String> keys = new ArrayList<>();
+            // P1-17：AUTH/AUTH2 参数解析（本项目内部总线无鉴权，解析后不强制，
+            // 仅避免 Redis 客户端传入时报 syntax error；连接已鉴权时 Redis 允许忽略）
+            String authUser = null;
+            String authPassword = null;
 
             int i = 6;
             while (i < args.length) {
                 String option = args[i].toUpperCase();
-                
+
                 switch (option) {
                     case "COPY":
                         copy = true;
@@ -120,6 +142,23 @@ public class MigrateCommandHandler {
                     case "REPLACE":
                         replace = true;
                         i++;
+                        break;
+                    case "AUTH":
+                        // AUTH <password>（单参，Redis 7 也允许 AUTH <user> <password> 两参）
+                        if (i + 1 >= args.length) {
+                            return "-ERR syntax error\r\n";
+                        }
+                        authPassword = args[i + 1];
+                        i += 2;
+                        break;
+                    case "AUTH2":
+                        // AUTH2 <user> <password>（两参）
+                        if (i + 2 >= args.length) {
+                            return "-ERR syntax error\r\n";
+                        }
+                        authUser = args[i + 1];
+                        authPassword = args[i + 2];
+                        i += 3;
                         break;
                     case "KEYS":
                         // 收集后续所有键名
@@ -134,13 +173,18 @@ public class MigrateCommandHandler {
                 }
             }
 
+            // P1-17：key 与 KEYS 不能并存（Redis 7：key 非空时不得再用 KEYS）
+            if (!key.isEmpty() && !keys.isEmpty()) {
+                return "-ERR syntax error\r\n";
+            }
+
             // 执行迁移
             if (key.isEmpty()) {
                 // 批量迁移模式
                 if (keys.isEmpty()) {
                     return "-ERR no keys to migrate\r\n";
                 }
-                return migrateMultipleKeys(host, port, keys.toArray(new String[0]), 
+                return migrateMultipleKeys(host, port, keys.toArray(new String[0]),
                                           destDb, timeout, copy, replace);
             } else {
                 // 单键迁移模式
@@ -172,7 +216,8 @@ public class MigrateCommandHandler {
                                      boolean copy, boolean replace) {
         // 检查键是否存在
         if (!memoryStore.exists(DEFAULT_DATABASE, key)) {
-            return "$-1\r\n"; // NOKEY
+            // 对齐 Redis 7 MIGRATE：单键不存在时回复 +NOKEY（而非 bulk nil $-1）
+            return "+NOKEY\r\n";
         }
 
         // MIGRATE 命令应能独立工作，不强制依赖 SETSLOT MIGRATING 状态。
@@ -189,15 +234,18 @@ public class MigrateCommandHandler {
         }
 
         // 发送键到目标节点（真正通过总线传输，等待目标节点 ACK）
-        boolean success = sendKeyToTarget(host, port, key, valueBytes, ttl, timeout, replace);
+        SendResult result = sendKeyToTarget(host, port, key, valueBytes, ttl, timeout, replace);
 
-        if (success) {
+        if (result == SendResult.SUCCESS) {
             // 如果不是 COPY 模式，删除源键
             if (!copy) {
                 memoryStore.del(DEFAULT_DATABASE, key);
             }
             logger.info("成功迁移键 {} 到 {}:{}", key, host, port);
             return "+OK\r\n";
+        } else if (result == SendResult.BUSYKEY) {
+            // P1-17：目标键已存在且未带 REPLACE，对齐 Redis -BUSYKEY 回复
+            return "-BUSYKEY Target key name already exists.\r\n";
         } else {
             // 发送失败时不删除源键，避免数据丢失
             return "-IOERR error transferring key\r\n";
@@ -272,10 +320,11 @@ public class MigrateCommandHandler {
 
         for (KeyDump kd : dumped) {
             try {
-                boolean success = sendKeyToTarget(host, port, kd.key, kd.value, kd.ttl, timeout, replace);
-                if (success) {
+                SendResult result = sendKeyToTarget(host, port, kd.key, kd.value, kd.ttl, timeout, replace);
+                if (result == SendResult.SUCCESS) {
                     successCount++;
                 } else {
+                    // P1-17：逐键语义——BUSYKEY/FAILED 仅计入本键失败，不影响其他键（对齐 Redis 7）
                     sendFailedKeys.add(kd.key);
                 }
             } catch (Exception e) {
@@ -358,30 +407,34 @@ public class MigrateCommandHandler {
     }
 
     /**
-     * 发送键到目标节点（通过集群总线传输，等待目标节点 ACK 确认）
+     * 发送键到目标节点（通过集群总线传输，等待目标节点 ACK 确认，P1-17）。
+     * <p>
+     * 返回 {@link SendResult} 以区分 BUSYKEY（目标键已存在且未带 REPLACE）与普通失败，
+     * 使调用方能回送精确的 Redis 错误（-BUSYKEY）。
+     * </p>
      *
      * @param host    目标主机
      * @param port    目标端口
      * @param key     键名
      * @param value   键值数据（序列化后的字节数组）
      * @param ttl     过期时间
-     * @param timeout 超时时间
+     * @param timeout 超时时间（毫秒）；0 时使用内部默认值，避免 Netty await(0) 必失败
      * @param replace 是否替换
-     * @return 是否发送成功（目标节点 ACK 成功才返回 true）
+     * @return 发送结果
      */
-    public boolean sendKeyToTarget(String host, int port, String key,
+    public SendResult sendKeyToTarget(String host, int port, String key,
                                      byte[] value, long ttl, long timeout,
                                      boolean replace) {
         if (busClient == null || clusterConfig == null) {
             logger.error("无法迁移键 {}: busClient 或 clusterConfig 未注入", key);
-            return false;
+            return SendResult.FAILED;
         }
 
         // 根据 host:port 查找目标节点ID
         String targetNodeId = findNodeIdByAddress(host, port);
         if (targetNodeId == null) {
             logger.error("无法迁移键 {}: 未找到目标节点 {}:{}", key, host, port);
-            return false;
+            return SendResult.FAILED;
         }
 
         // 获取本节点ID作为发送者
@@ -389,33 +442,42 @@ public class MigrateCommandHandler {
         String senderNodeId = myNode != null ? myNode.getNodeId() : null;
         if (senderNodeId == null) {
             logger.error("无法迁移键 {}: 本节点ID未设置", key);
-            return false;
+            return SendResult.FAILED;
         }
 
         try {
             MigrateKeyMessage message = new MigrateKeyMessage(senderNodeId, key, value, ttl, replace);
             logger.debug("发送键 {} 到目标节点 {}:{} (nodeId={})", key, host, port, targetNodeId);
 
+            // P1-17：timeout=0 时用内部默认值，避免 Netty await(0) 立即返回必失败
+            long effectiveTimeout = timeout > 0 ? timeout : DEFAULT_MIGRATE_TIMEOUT_MS;
+
             // 通过总线发送并等待 ACK
-            GossipMessage response = busClient.sendAndWait(targetNodeId, message, timeout);
+            GossipMessage response = busClient.sendAndWait(targetNodeId, message, effectiveTimeout);
 
             if (response instanceof MigrateKeyAckMessage) {
                 MigrateKeyAckMessage ack = (MigrateKeyAckMessage) response;
                 if (ack.isSuccess()) {
                     logger.debug("键 {} 迁移成功，目标节点已确认", key);
-                    return true;
+                    return SendResult.SUCCESS;
                 } else {
-                    logger.error("键 {} 迁移失败: 目标节点返回错误: {}", key, ack.getErrorMessage());
-                    return false;
+                    // P1-17：ACK errorMessage 为 BUSYKEY 时映射为 BUSYKEY 结果
+                    String errMsg = ack.getErrorMessage();
+                    if (errMsg != null && errMsg.contains("BUSYKEY")) {
+                        logger.warn("键 {} 迁移失败: BUSYKEY（目标键已存在且未带 REPLACE）", key);
+                        return SendResult.BUSYKEY;
+                    }
+                    logger.error("键 {} 迁移失败: 目标节点返回错误: {}", key, errMsg);
+                    return SendResult.FAILED;
                 }
             }
 
             logger.error("键 {} 迁移失败: 未收到有效 ACK（响应为 null 或类型错误）", key);
-            return false;
+            return SendResult.FAILED;
 
         } catch (Exception e) {
             logger.error("发送键 {} 到目标节点 {}:{} 失败", key, host, port, e);
-            return false;
+            return SendResult.FAILED;
         }
     }
 

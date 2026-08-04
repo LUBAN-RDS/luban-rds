@@ -8,6 +8,8 @@ import com.janeluo.luban.rds.cluster.gossip.FailoverResultMessage;
 import com.janeluo.luban.rds.cluster.gossip.GossipMessage;
 import com.janeluo.luban.rds.cluster.gossip.GossipProtocol;
 import com.janeluo.luban.rds.cluster.gossip.MeetMessage;
+import com.janeluo.luban.rds.cluster.gossip.ManualFailoverOffsetMessage;
+import com.janeluo.luban.rds.cluster.gossip.ManualFailoverStartMessage;
 import com.janeluo.luban.rds.cluster.gossip.MigrateKeyAckMessage;
 import com.janeluo.luban.rds.cluster.gossip.MigrateKeyMessage;
 import com.janeluo.luban.rds.cluster.gossip.PingMessage;
@@ -261,6 +263,12 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
             case MIGRATE_KEY_ACK:
                 handleMigrateKeyAck((MigrateKeyAckMessage) message);
                 return null;
+            case MANUAL_FAILOVER_START:
+                handleManualFailoverStart((ManualFailoverStartMessage) message);
+                return null;
+            case MANUAL_FAILOVER_OFFSET:
+                handleManualFailoverOffset((ManualFailoverOffsetMessage) message);
+                return null;
             default:
                 logger.warn("未知的消息类型: {}", message.getType());
                 return null;
@@ -434,10 +442,42 @@ public class ClusterBusHandler extends ChannelInboundHandlerAdapter {
      * @param msg 键迁移确认消息
      */
     private void handleMigrateKeyAck(MigrateKeyAckMessage msg) {
-        logger.debug("收到 MIGRATE_KEY_ACK: key={}, success={}, sender={}",
-                msg.getKey(), msg.isSuccess(), msg.getSenderNodeId());
+        logger.debug("收到 MIGRATE_KEY_ACK: key={}, success={}, sender={}, requestId={}",
+                msg.getKey(), msg.isSuccess(), msg.getSenderNodeId(), msg.getRequestId());
         if (busClient != null) {
-            busClient.completeResponse(msg.getSenderNodeId(), msg);
+            // P1-20：按 requestId 严格匹配等待中的 future（不再按 senderNodeId 单槽位）
+            busClient.completeResponse(msg.getRequestId(), msg);
+        }
+    }
+
+    /**
+     * 处理手动故障转移启动请求（P1-12，MANUAL_FAILOVER_START）。
+     * <p>
+     * master 侧：收到候选 slave 的 MFStart 后，暂停客户端写、记录复制偏移量、回传 offset。
+     * </p>
+     *
+     * @param msg 手动故障转移启动消息
+     */
+    private void handleManualFailoverStart(ManualFailoverStartMessage msg) {
+        logger.info("收到 MANUAL_FAILOVER_START: sender={}", msg.getSenderNodeId());
+        if (gossipProtocol != null) {
+            gossipProtocol.handleManualFailoverStart(msg);
+        }
+    }
+
+    /**
+     * 处理手动故障转移 offset 回传（P1-12，MANUAL_FAILOVER_OFFSET）。
+     * <p>
+     * slave 侧：收到 master 回传的暂停时偏移量，记录后等待自身 offset 追平再提升。
+     * </p>
+     *
+     * @param msg master 暂停写时的 offset 回传消息
+     */
+    private void handleManualFailoverOffset(ManualFailoverOffsetMessage msg) {
+        logger.info("收到 MANUAL_FAILOVER_OFFSET: sender={}, masterOffset={}",
+                msg.getSenderNodeId(), msg.getMasterOffset());
+        if (gossipProtocol != null) {
+            gossipProtocol.handleManualFailoverOffset(msg);
         }
     }
 

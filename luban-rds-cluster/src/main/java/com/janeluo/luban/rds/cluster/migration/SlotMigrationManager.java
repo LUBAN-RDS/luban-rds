@@ -260,42 +260,53 @@ public class SlotMigrationManager {
     // ==================== 键导入导出 ====================
 
     /**
-     * 导入单个键
+     * 导入单个键。
+     * <p>
+     * 返回 {@link ImportResult} 以区分失败原因（P1-17）：
+     * NOT_IMPORTING（槽位未导入）、BUSYKEY（目标键已存在且未带 REPLACE）、ERROR（反序列化/存储异常），
+     * 使源端 MIGRATE 能回送精确的 Redis 错误（BUSYKEY / IOERR）而非统一的 IOERR。
+     * </p>
      *
-     * @param key   键名
-     * @param value 键值数据（序列化后的字节数组）
-     * @param ttl   过期时间（毫秒）
-     * @return 是否导入成功
+     * @param key     键名
+     * @param value   键值数据（序列化后的字节数组）
+     * @param ttl     过期时间（毫秒）
+     * @param replace 是否替换目标节点已存在的键（MIGRATE REPLACE 选项）
+     * @return 导入结果（含状态码与错误信息）
      */
-    public boolean importKey(String key, byte[] value, long ttl) {
+    public ImportResult importKey(String key, byte[] value, long ttl, boolean replace) {
         int slot = SlotUtils.keyHashSlot(key);
-        
-        // 检查槽位是否在导入状态
-        ImportState importState = importingSlots.get(slot);
-        if (importState == null) {
+
+        // 检查槽位是否在导入状态。状态源为 SlotManager（DefaultSlotManager），由
+        // CLUSTER SETSLOT IMPORTING 写入；修复旧实现检查私有 importingSlots map
+        // （生产代码从未写入，仅测试调用 setImporting）导致 MIGRATE 永远返回 -IOERR。
+        if (!slotManager.isSlotImporting(slot)) {
             logger.warn("槽位 {} 未处于导入状态，无法导入键 {}", slot, key);
-            return false;
+            return ImportResult.notImporting();
         }
-        
+
         try {
+            // 对齐 Redis MIGRATE 的 REPLACE/BUSYKEY 语义（数据层保护）：
+            // 目标键已存在且未带 REPLACE → 返回 BUSYKEY，源端据此回 -BUSYKEY。
+            if (!replace && memoryStore.exists(DEFAULT_DATABASE, key)) {
+                logger.warn("键 {} 已存在于目标节点且未指定 REPLACE，拒绝覆盖（BUSYKEY）", key);
+                return ImportResult.busykey();
+            }
+
             // 反序列化并存储键值
             Object deserializedValue = deserializeValue(value);
-            
+
             if (ttl > 0) {
                 memoryStore.setWithExpireMs(DEFAULT_DATABASE, key, deserializedValue, ttl);
             } else {
                 memoryStore.set(DEFAULT_DATABASE, key, deserializedValue);
             }
-            
-            // 更新导入计数
-            importState.incrementImportedCount();
-            
+
             logger.debug("成功导入键 {}，槽位: {}", key, slot);
-            return true;
-            
+            return ImportResult.success();
+
         } catch (Exception e) {
             logger.error("导入键 {} 失败", key, e);
-            return false;
+            return ImportResult.error("导入键异常: " + e.getMessage());
         }
     }
 
@@ -525,8 +536,11 @@ public class SlotMigrationManager {
 
         try (ByteArrayInputStream bais = new ByteArrayInputStream(data);
              ObjectInputStream ois = new ObjectInputStream(bais)) {
-            // 反序列化白名单（JDK 9+ ObjectInputFilter）：仅允许基本类型、数组、字符串及常用集合，
-            // 拒绝任意类的反序列化，防止跨节点反序列化 RCE
+            // 反序列化白名单（JDK 9+ ObjectInputFilter）：仅允许基本类型、数组、字符串、
+            // 常用集合，以及本项目内部可序列化类型（P1-17：使 zset/stream 等可跨节点迁移）。
+            // 拒绝任意其他类的反序列化，防止跨节点反序列化 RCE。
+            // 安全考量：迁移是受信任的集群内部操作（节点间已建立总线连接），且仅允许
+            // 项目自身包前缀，对其他包仍 REJECTED，RCE 攻击面不扩大。
             ois.setObjectInputFilter(filterInfo -> {
                 Class<?> clazz = filterInfo.serialClass();
                 if (clazz == null) {
@@ -539,6 +553,12 @@ public class SlotMigrationManager {
                 String name = clazz.getName();
                 if (name.startsWith("java.lang.") || name.startsWith("java.util.")
                         || name.startsWith("java.math.")) {
+                    return ObjectInputFilter.Status.ALLOWED;
+                }
+                // P1-17：允许本项目内部可序列化类型（Stream/StreamEntry/StreamId 等），
+                // 否则 zset/stream 跨节点迁移会因 filter REJECTED 而静默失败
+                if (name.startsWith("com.janeluo.luban.rds.core.stream.")
+                        || name.startsWith("com.janeluo.luban.rds.core.store.")) {
                     return ObjectInputFilter.Status.ALLOWED;
                 }
                 return ObjectInputFilter.Status.REJECTED;

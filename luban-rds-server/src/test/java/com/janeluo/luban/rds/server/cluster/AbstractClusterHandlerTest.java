@@ -47,6 +47,8 @@ public abstract class AbstractClusterHandlerTest {
         myNode.addState(ClusterNodeState.MYSELF);
         myNode.addState(ClusterNodeState.MASTER);
         clusterConfig.addNode(myNode);
+        // P1-13：命令路由门控依赖 cluster_state=ok，否则键命令被 CLUSTERDOWN 拒绝。
+        clusterConfig.setState("ok");
 
         SlotManager slotManager = new DefaultSlotManager(NODE_ID_1);
         ClusterStateManager stateManager = new ClusterStateManager(clusterConfig);
