@@ -104,6 +104,16 @@ public class RdsConfig {
      */
     private String maxmemoryPolicy = "noeviction";
 
+    // ===== Memory Store 配置（hybrid 堆外存储）=====
+    /** 存储引擎类型：default | hybrid */
+    private String memoryStoreKind = "default";
+    /** 是否启用堆外内存（仅 hybrid 模式生效） */
+    private boolean offheapEnabled = true;
+    /** 堆外阈值（字节），string value >= 此值进堆外，默认 256 */
+    private int offheapThreshold = 256;
+    /** 堆外内存上限（字节），0 = 仅受全局 maxmemory 约束 */
+    private long offheapMaxMemory = 0;
+
     // ==================== 安全配置 ====================
     
     /**
@@ -581,6 +591,15 @@ public class RdsConfig {
     public void setMaxmemoryPolicy(String maxmemoryPolicy) {
         this.maxmemoryPolicy = maxmemoryPolicy;
     }
+
+    public String getMemoryStoreKind() { return memoryStoreKind; }
+    public void setMemoryStoreKind(String memoryStoreKind) { this.memoryStoreKind = memoryStoreKind; }
+    public boolean isOffheapEnabled() { return offheapEnabled; }
+    public void setOffheapEnabled(boolean offheapEnabled) { this.offheapEnabled = offheapEnabled; }
+    public int getOffheapThreshold() { return offheapThreshold; }
+    public void setOffheapThreshold(int offheapThreshold) { this.offheapThreshold = offheapThreshold; }
+    public long getOffheapMaxMemory() { return offheapMaxMemory; }
+    public void setOffheapMaxMemory(long offheapMaxMemory) { this.offheapMaxMemory = offheapMaxMemory; }
 
     public String getRequirepass() {
         return requirepass;
