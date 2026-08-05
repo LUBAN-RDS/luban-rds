@@ -52,20 +52,17 @@ public class OffHeapStringEngine implements StoreEngine {
 
     private void setBytes(int database, String key, byte[] bytes, long expireTimeMs) {
         ConcurrentMap<String, OffHeapEntry> map = db(database);
-        OffHeapEntry old = map.get(key);
         // 分配 + 写入
         ByteBuf buf = allocator.directBuffer(bytes.length);
         buf.writeBytes(bytes);
         long now = System.currentTimeMillis();
         OffHeapEntry entry = new OffHeapEntry(buf, bytes.length, expireTimeMs, now);
         OffHeapEntry prev = map.put(key, entry);
+        // 新值容量计入（releaseEntry 内部负责扣减旧容量，避免重复扣减）
+        offheapUsed.addAndGet(buf.capacity());
         // release 旧值（单点 R1）
-        long added = buf.capacity();
         if (prev != null) {
-            added -= releaseEntry(prev);
-        }
-        if (added != 0) {
-            offheapUsed.addAndGet(added);
+            releaseEntry(prev);
         }
     }
 
