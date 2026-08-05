@@ -25,7 +25,9 @@ import java.util.function.Supplier;
  *   <li><b>CLUSTER NODES</b>：3 节点一行一个，复用 Redis master/slave 语义：
  *       Leader 行 {@code myself,master} 持 {@code 0-16383}；2 个 Follower 行
  *       {@code slave <leaderNodeId>}。行尾用裸 {@code \n}（对齐 Redis
- *       clusterGenNodesDescription，避免 Redisson split("\n") 残留 \r）。</li>
+ *       clusterGenNodesDescription，避免 Redisson split("\n") 残留 \r）。
+ *       离线节点（bus 未连接，经 {@code onlinePredicate} 判定）linkState 标
+ *       {@code disconnected}，避免集群感知客户端向死节点发起连接。</li>
  *   <li><b>CLUSTER INFO</b>：多行 {@code key:value}（{@code \r\n} 分隔），
  *       关键字段 {@code cluster_state:ok}、{@code cluster_known_nodes:3}、
  *       {@code cluster_slots_ok:16384}。无 Leader 时 {@code cluster_state:fail}。</li>
@@ -72,6 +74,9 @@ public class MeshClusterCommands {
     /** 本节点 nodeId（用于 CLUSTER NODES 的 {@code myself} 标记）。 */
     private final String selfNodeId;
 
+    /** 节点在线判定（nodeId → 是否在线）；null/恒 true 表示不启用死节点标记。 */
+    private final java.util.function.Predicate<String> onlinePredicate;
+
     /**
      * 构造集群命令响应生成器。
      *
@@ -84,6 +89,20 @@ public class MeshClusterCommands {
                                 Supplier<String> leaderAddrSupplier,
                                 Map<String, NodeInfo> allNodes,
                                 String selfNodeId) {
+        this(leaderNodeIdSupplier, leaderAddrSupplier, allNodes, selfNodeId, null);
+    }
+
+    /**
+     * 重载构造器：额外接受节点在线判定。
+     *
+     * @param onlinePredicate nodeId → 在线；{@code null} 视为恒 true（不标记 disconnected）。
+     *                        由 MeshBootstrap 装配 {@code busClient::isConnected}。
+     */
+    public MeshClusterCommands(Supplier<String> leaderNodeIdSupplier,
+                                Supplier<String> leaderAddrSupplier,
+                                Map<String, NodeInfo> allNodes,
+                                String selfNodeId,
+                                java.util.function.Predicate<String> onlinePredicate) {
         this.leaderNodeIdSupplier = leaderNodeIdSupplier != null
                 ? leaderNodeIdSupplier : () -> null;
         this.leaderAddrSupplier = leaderAddrSupplier != null
@@ -92,6 +111,7 @@ public class MeshClusterCommands {
                 ? Collections.unmodifiableMap(new LinkedHashMap<>(allNodes))
                 : Collections.emptyMap();
         this.selfNodeId = selfNodeId;
+        this.onlinePredicate = onlinePredicate != null ? onlinePredicate : n -> true;
     }
 
     // ==================== CLUSTER SLOTS ====================
@@ -346,7 +366,8 @@ public class MeshClusterCommands {
             sb.append("1 ");
 
             // <linkState>
-            sb.append("connected");
+            boolean online = onlinePredicate.test(nid);
+            sb.append(online ? "connected" : "disconnected");
 
             // <slot...>：仅 Leader（有 Leader 时）持 0-16383
             if (isLeader && !noLeader) {
