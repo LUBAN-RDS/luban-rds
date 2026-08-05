@@ -52,6 +52,8 @@ public class MeshTestCluster implements AutoCloseable {
     private final List<Integer> servicePorts = new ArrayList<>();
     private final int baseServicePort;
     private final int baseBusPort;
+    /** raft-nodes.conf 落盘开关：默认跟随 -Dbench.mesh.persist，可 per-scenario 覆盖。 */
+    private boolean persistEnabled = Boolean.getBoolean("bench.mesh.persist");
     private Path rootDir;
     private boolean started;
 
@@ -61,6 +63,11 @@ public class MeshTestCluster implements AutoCloseable {
         for (int i = 0; i < 3; i++) {
             servicePorts.add(baseServicePort + i);
         }
+    }
+
+    /** 覆盖默认落盘行为（{@link RedisVsMeshBenchmark} 用于同 JVM 内对照持久化开/关）。 */
+    public void setPersistEnabled(boolean persistEnabled) {
+        this.persistEnabled = persistEnabled;
     }
 
     // ==================== 生命周期 ====================
@@ -179,7 +186,7 @@ public class MeshTestCluster implements AutoCloseable {
         config.setMeshLeaseDurationMs(400);
         // 默认关落盘：raft-nodes.conf 每次 propose 全量序列化+fsync 是写路径主要成本
         // （O(log) 每写，日志越长越慢）。-Dbench.mesh.persist=true 恢复生产行为。
-        config.setMeshPersistEnabled(Boolean.getBoolean("bench.mesh.persist"));
+        config.setMeshPersistEnabled(persistEnabled);
         config.setPersistMode("none"); // mesh 的 dump.rdb 由 SnapshotManager 管理，server 级持久化退役
         config.setDir(dataDirs.get(svcPort).toString());
         return config;
