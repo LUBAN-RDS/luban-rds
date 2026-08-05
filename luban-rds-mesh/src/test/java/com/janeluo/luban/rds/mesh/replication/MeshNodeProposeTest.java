@@ -126,6 +126,55 @@ class MeshNodeProposeTest {
     }
 
     @Test
+    void propose_nonLeader_exceptionCarriesRealKey() {
+        MeshConfig config = singleNodeConfig();
+        MeshState state = new MeshState();
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        LogApplier applier = new LogApplier(new DefaultCommandHandler(), rawStore);
+        CaptureBus bus = new CaptureBus("solo");
+        MeshNode node = new MeshNode(config, state, bus, new com.janeluo.luban.rds.mesh.core.RaftStateMachine(),
+                applier, rawStore);
+        node.start();
+        try {
+            CompletableFuture<byte[]> f = node.propose(setFrame("diag-key", "v"), 0, null);
+            CompletionException ce = assertThrows(CompletionException.class, f::join);
+            Throwable cause = ce.getCause();
+            assertTrue(cause instanceof MovedToLeaderException,
+                    "cause 应为 MovedToLeaderException, 实际=" + cause);
+            MovedToLeaderException ex = (MovedToLeaderException) cause;
+            assertEquals("diag-key", ex.getKey(),
+                    "写路径 MOVED 异常应携带真实 key（供 slot 计算）");
+        } finally {
+            node.stop();
+        }
+    }
+
+    @Test
+    void propose_nonLeader_malformedFrameKeyIsNull() {
+        MeshConfig config = singleNodeConfig();
+        MeshState state = new MeshState();
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        LogApplier applier = new LogApplier(new DefaultCommandHandler(), rawStore);
+        CaptureBus bus = new CaptureBus("solo");
+        MeshNode node = new MeshNode(config, state, bus, new com.janeluo.luban.rds.mesh.core.RaftStateMachine(),
+                applier, rawStore);
+        node.start();
+        try {
+            // 畸形帧：无数组头
+            byte[] bad = "garbage-no-resp".getBytes(StandardCharsets.ISO_8859_1);
+            CompletableFuture<byte[]> f = node.propose(bad, 0, null);
+            CompletionException ce = assertThrows(CompletionException.class, f::join);
+            Throwable cause = ce.getCause();
+            assertTrue(cause instanceof MovedToLeaderException,
+                    "cause 应为 MovedToLeaderException, 实际=" + cause);
+            assertTrue(((MovedToLeaderException) cause).getKey() == null,
+                    "畸形帧应回退 null key（不抛异常）");
+        } finally {
+            node.stop();
+        }
+    }
+
+    @Test
     void propose_singleNodeLeader_commitsAppliesAndCompletesFuture() throws Exception {
         MeshConfig config = singleNodeConfig();
         MeshState state = new MeshState();
