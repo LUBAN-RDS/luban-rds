@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>
  * 验证点：
  * <ul>
- *   <li><b>CLUSTER SLOTS</b>：返回 {@code [[0, 16383, [ip, port, nodeId]]]}；
+ *   <li><b>CLUSTER SLOTS</b>：返回 {@code [[0, 16383, [ip, port, nodeId], []]]}；
  *       手工解析 RESP 嵌套数组，断言 startSlot=0/endSlot=16383/Leader 信息正确；
  *       无 Leader 时返回空数组 {@code *0\r\n}。</li>
  *   <li><b>CLUSTER NODES</b>：3 行，Leader 行 {@code myself,master} 持 {@code 0-16383}，
@@ -93,7 +93,7 @@ class MeshClusterCommandsTest {
 
     @Test
     void clusterSlots_exactExpectedRespBytes() {
-        // 完整 RESP 字节精确断言（对齐 luban-rds-cluster 格式）
+        // 完整 RESP 字节精确断言（Redis 7.0 格式：start/end/master/replicas）
         MeshClusterCommands cmd = withLeaderA();
         byte[] resp = cmd.clusterSlots();
 
@@ -104,9 +104,32 @@ class MeshClusterCommandsTest {
                 + "*3\r\n"
                 + "$11\r\n192.168.1.1\r\n"
                 + ":6379\r\n"
-                + "$40\r\n" + NODE_A + "\r\n";
+                + "$40\r\n" + NODE_A + "\r\n"
+                + "*0\r\n";
         byte[] expectedBytes = expected.getBytes(StandardCharsets.ISO_8859_1);
-        assertArrayEquals(expectedBytes, resp, "SLOTS RESP 字节应精确匹配");
+        assertArrayEquals(expectedBytes, resp, "SLOTS RESP 字节应精确匹配（含 replicas 空数组）");
+    }
+
+    /**
+     * 回归：*4 声明 4 元素必须恰好发送 4 元素（start/end/master/replicas）。
+     * 缺第 4 元素（旧 bug）会让 redis-cli/Lettuce/Jedis 的严格 RESP 解析器
+     * 在拓扑刷新时永久等待——用行级结构验证元素数与字节边界齐全。
+     */
+    @Test
+    void clusterSlots_strictParserConsumesEntireResponse() {
+        MeshClusterCommands cmd = withLeaderA();
+        byte[] resp = cmd.clusterSlots();
+        String s = new String(resp, StandardCharsets.ISO_8859_1);
+        // 结构：*1 | *4 | :0 | :16383 | *3 | $11 | ip | :6379 | $40 | nodeId | *0
+        java.util.List<String> lines = new java.util.ArrayList<>();
+        for (String seg : s.split("\r\n")) {
+            lines.add(seg);
+        }
+        assertEquals("*1", lines.get(0), "外层数组");
+        assertEquals("*4", lines.get(1), "内层 4 元素头");
+        assertEquals(11, lines.size(), "总行数 = 11（4 元素齐全）");
+        assertEquals("*0", lines.get(lines.size() - 1), "末行应为 replicas 空数组");
+        assertTrue(s.endsWith("\r\n"), "响应应以 CRLF 结尾");
     }
 
     @Test
@@ -444,6 +467,9 @@ class MeshClusterCommandsTest {
         p.skipCrLn();
         assertEquals(NODE_A, nodeId, "解析出的 nodeId");
         assertEquals(40, idLen, "nodeId 长度 40");
+        // replicas 空数组（第 4 元素，Redis 7.0 格式必需）
+        assertEquals('*', (char) p.readByte());
+        assertEquals(0, p.readNumberUntilCrLn(), "replicas 空数组 0 元素");
         // 应已消费完毕
         assertTrue(p.atEnd(), "RESP 字节应已全部消费");
     }

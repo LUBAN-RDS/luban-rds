@@ -18,8 +18,9 @@ import java.util.function.Supplier;
  *
  * <h3>响应语义（DESIGN §5.6）</h3>
  * <ul>
- *   <li><b>CLUSTER SLOTS</b>：{@code [[0, 16383, [leaderIp, leaderPort, leaderNodeId]]]}
+ *   <li><b>CLUSTER SLOTS</b>：{@code [[0, 16383, [leaderIp, leaderPort, leaderNodeId], []]]}
  *       —— 全 16384 个 slot 指向当前 Leader（mesh 无分片，单 master）。
+ *       第 4 元素为 replicas 空数组（对齐 Redis 7.0 格式，缺省会挂死严格解析器）。
  *       无 Leader 时返回空数组 {@code *0\r\n}（客户端会重试引导）。</li>
  *   <li><b>CLUSTER NODES</b>：3 节点一行一个，复用 Redis master/slave 语义：
  *       Leader 行 {@code myself,master} 持 {@code 0-16383}；2 个 Follower 行
@@ -99,7 +100,7 @@ public class MeshClusterCommands {
      * 生成 {@code CLUSTER SLOTS} 响应（RESP 字节）。
      * <p>
      * mesh 无分片：全 16384 slot 指向当前 Leader，输出单个 slot range：
-     * {@code [[0, 16383, [leaderIp, leaderPort, leaderNodeId]]]}。
+     * {@code [[0, 16383, [leaderIp, leaderPort, leaderNodeId], []]]}。
      * </p>
      * <p>
      * 无 Leader（leaderAddr/nodeId 为 null，或 Leader 的 NodeInfo 缺失）时返回空数组
@@ -118,12 +119,16 @@ public class MeshClusterCommands {
         StringBuilder sb = new StringBuilder();
         // 外层 1 个元素（1 个 slot range）
         sb.append("*1\r\n");
-        // 内层 4 个元素：startSlot, endSlot, masterInfo[3]
+        // 内层 4 个元素：startSlot, endSlot, masterInfo[3], replicas
         sb.append("*4\r\n");
         sb.append(":0\r\n");             // startSlot = 0
         sb.append(":").append(LAST_SLOT).append("\r\n"); // endSlot = 16383
         // master endpoint: [ip(bulk), port(integer), nodeId(bulk)]
         appendNodeEndpoint(sb, leader);
+        // replicas 数组：mesh 无从节点（全 16384 slot 仅 Leader 持有），空数组。
+        // 必须补齐——*4 声明 4 元素，缺第 4 元素会让严格 RESP 解析器（redis-cli/
+        // Lettuce/Jedis）永久等待，拓扑刷新挂起（对齐 Redis 7.0 clusterSlotsCommand）。
+        sb.append("*0\r\n");
         return sb.toString().getBytes(StandardCharsets.ISO_8859_1);
     }
 
