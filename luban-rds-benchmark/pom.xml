@@ -77,6 +77,12 @@
             <artifactId>luban-rds-client</artifactId>
             <version>${project.version}</version>
         </dependency>
+        <!-- mesh 强一致集群（进程内起 mesh-enabled server） -->
+        <dependency>
+            <groupId>com.janeluo</groupId>
+            <artifactId>luban-rds-mesh</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
 
     <build>

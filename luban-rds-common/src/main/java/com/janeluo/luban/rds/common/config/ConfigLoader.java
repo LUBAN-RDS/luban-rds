@@ -403,6 +403,9 @@ public class ConfigLoader {
                     case "mesh-snapshot-log-threshold":
                         config.setMeshSnapshotLogThreshold(Long.parseLong(value));
                         break;
+                    case "mesh-persist":
+                        config.setMeshPersistEnabled("yes".equalsIgnoreCase(value));
+                        break;
 
                     default:
                         logger.debug("未知配置项: {} = {}", key, value);

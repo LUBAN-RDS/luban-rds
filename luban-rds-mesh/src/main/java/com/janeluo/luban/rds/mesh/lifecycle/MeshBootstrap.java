@@ -133,13 +133,17 @@ public class MeshBootstrap {
         logger.info("mesh 总线消息消费者已注册: nodeId={}, consumer=MeshNode::onMessage", topo.selfNodeId);
 
         // persistHook：MeshState 变更时落盘 raft-nodes.conf（term/votedFor/log/lastIncluded）
-        meshNode.setPersistHook(() -> {
-            try {
-                persister.save(state, topo.selfNodeId);
-            } catch (IOException e) {
-                throw new RuntimeException("raft-nodes.conf 保存失败", e);
-            }
-        });
+        // 每次 propose/append 全量序列化 logTail + fsync，是写路径主要成本；
+        // config.mesh-persist=no 时跳过（测试/低持久性场景，崩溃后状态不完整）。
+        if (config.isMeshPersistEnabled()) {
+            meshNode.setPersistHook(() -> {
+                try {
+                    persister.save(state, topo.selfNodeId);
+                } catch (IOException e) {
+                    throw new RuntimeException("raft-nodes.conf 保存失败", e);
+                }
+            });
+        }
 
         // 7. SnapshotManager（chunked 发送/接收 + 周期快照）
         RdbSnapshotGenerator snapshotGenerator = new RdbSnapshotGenerator(rdbPersistService, dbDir);

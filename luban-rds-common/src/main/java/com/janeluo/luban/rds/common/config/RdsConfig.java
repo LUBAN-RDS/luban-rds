@@ -324,6 +324,13 @@ public class RdsConfig {
     /** 周期快照阈值（log 条目数），默认 100000。 */
     private long meshSnapshotLogThreshold = 100000;
 
+    /**
+     * 是否落盘 raft-nodes.conf（term/votedFor/logTail 持久化），默认 true。
+     * <p>每次 propose/append 都会全量序列化 logTail + fsync，是写路径主要成本；
+     * 置 {@code no} 可关闭（测试/低持久性场景，崩溃后状态由 dump.rdb + 重放重建不完整）。</p>
+     */
+    private boolean meshPersistEnabled = true;
+
     // ==================== 主从复制配置 ====================
 
     /**
@@ -914,6 +921,14 @@ public class RdsConfig {
 
     public void setMeshSnapshotLogThreshold(long meshSnapshotLogThreshold) {
         this.meshSnapshotLogThreshold = meshSnapshotLogThreshold;
+    }
+
+    public boolean isMeshPersistEnabled() {
+        return meshPersistEnabled;
+    }
+
+    public void setMeshPersistEnabled(boolean meshPersistEnabled) {
+        this.meshPersistEnabled = meshPersistEnabled;
     }
 
     public String getReplicaof() {
