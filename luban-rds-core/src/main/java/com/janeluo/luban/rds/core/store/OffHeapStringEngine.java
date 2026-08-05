@@ -173,8 +173,21 @@ public class OffHeapStringEngine implements StoreEngine {
 
     @Override
     public int expireBatch(int database, int budget) {
-        // T2.3 实现
-        return 0;
+        if (budget <= 0) return 0;
+        ConcurrentMap<String, OffHeapEntry> map = db(database);
+        if (map.isEmpty()) return 0;
+        java.util.List<String> keys = new java.util.ArrayList<>(map.keySet());
+        java.util.Collections.shuffle(keys);
+        int removed = 0;
+        for (String k : keys) {
+            if (removed >= budget) break;
+            OffHeapEntry e = map.get(k);
+            if (e != null && e.isExpired()) {
+                del(database, k);
+                removed++;
+            }
+        }
+        return removed;
     }
 
     @Override

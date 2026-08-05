@@ -76,4 +76,24 @@ class OffHeapStringEngineTest {
         assertEquals(1, vol.size()); // 只有 k2
         assertEquals("k2", vol.get(0).key);
     }
+
+    @Test
+    void expireBatchRemovesExpiredEntries() throws Exception {
+        engine.setWithExpire(0, "k1", "a".repeat(300), System.currentTimeMillis() + 50);
+        engine.set(0, "k2", "b".repeat(300)); // 不过期
+        Thread.sleep(80);
+        int removed = engine.expireBatch(0, 100);
+        assertEquals(1, removed);
+        assertNull(engine.get(0, "k1"));
+        assertNotNull(engine.get(0, "k2"));
+    }
+
+    @Test
+    void expireBatchRespectsBudget() {
+        for (int i = 0; i < 50; i++) {
+            engine.setWithExpire(0, "k" + i, "x".repeat(300), System.currentTimeMillis() - 1);
+        }
+        int removed = engine.expireBatch(0, 10);
+        assertEquals(10, removed);
+    }
 }
