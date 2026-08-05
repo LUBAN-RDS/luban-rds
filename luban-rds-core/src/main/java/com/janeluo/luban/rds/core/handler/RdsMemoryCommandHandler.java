@@ -1,6 +1,5 @@
 package com.janeluo.luban.rds.core.handler;
 
-import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.common.context.InfoProvider;
 import com.janeluo.luban.rds.common.context.ServerContext;
@@ -166,15 +165,10 @@ public class RdsMemoryCommandHandler implements CommandHandler {
         stats.add(overhead);
         
         // 10. keys.count
+        // S1: getMaxDatabases() 已提升到 MemoryStore 接口，不再需要 instanceof DefaultMemoryStore 强转
         long keysCount = 0;
-        if (store instanceof DefaultMemoryStore) {
-            DefaultMemoryStore defaultStore = (DefaultMemoryStore) store;
-            for (int i = 0; i < defaultStore.getMaxDatabases(); i++) {
-                keysCount += defaultStore.dbsize(i);
-            }
-        } else {
-            // fallback
-            keysCount = store.dbsize(database);
+        for (int i = 0; i < store.getMaxDatabases(); i++) {
+            keysCount += store.dbsize(i);
         }
         stats.add("keys.count");
         stats.add(keysCount);

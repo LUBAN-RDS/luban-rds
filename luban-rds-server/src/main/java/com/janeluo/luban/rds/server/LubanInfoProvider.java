@@ -2,7 +2,6 @@ package com.janeluo.luban.rds.server;
 
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.context.InfoProvider;
-import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.persistence.PersistService;
 
@@ -151,23 +150,18 @@ public class LubanInfoProvider implements InfoProvider {
         int expiredKeysCount = 0;
         
         MemoryStore store = server.getMemoryStore();
-        if (store instanceof DefaultMemoryStore) {
-            DefaultMemoryStore ds = (DefaultMemoryStore) store;
-            used = ds.getUsedMemory();
-            peak = ds.getPeakUsedMemory();
-            maxMemConfig = ds.getMaxMemory();
-            policy = ds.getMaxMemoryPolicy();
-            fragmentationRatio = ds.getMemoryFragmentationRatio();
-            info.put("softmaxmemory_threshold_percent", ds.getSoftLimitPercent());
-            info.put("softmaxmemory_warning", ds.isSoftLimitExceeded() ? 1 : 0);
-            MemoryStore.MemoryStats stats = ds.getMemoryStats();
-            if (stats != null) {
-                totalKeys = stats.getTotalKeys();
-                expiredKeysCount = stats.getExpiredKeys();
-            }
-        } else {
-            info.put("softmaxmemory_threshold_percent", 0);
-            info.put("softmaxmemory_warning", 0);
+        // S1: 所有 MemoryStore 实现都提供这些 admin 方法，不再需要 instanceof DefaultMemoryStore 强转
+        used = store.getUsedMemory();
+        peak = store.getPeakUsedMemory();
+        maxMemConfig = store.getMaxMemory();
+        policy = store.getMaxMemoryPolicy();
+        fragmentationRatio = store.getMemoryFragmentationRatio();
+        info.put("softmaxmemory_threshold_percent", store.getSoftLimitPercent());
+        info.put("softmaxmemory_warning", store.isSoftLimitExceeded() ? 1 : 0);
+        MemoryStore.MemoryStats stats = store.getMemoryStats();
+        if (stats != null) {
+            totalKeys = stats.getTotalKeys();
+            expiredKeysCount = stats.getExpiredKeys();
         }
         
         info.put("used_memory", used);

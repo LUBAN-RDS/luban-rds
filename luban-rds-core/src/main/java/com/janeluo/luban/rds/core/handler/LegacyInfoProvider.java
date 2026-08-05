@@ -2,7 +2,6 @@ package com.janeluo.luban.rds.core.handler;
 
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.context.InfoProvider;
-import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 
 import java.util.HashMap;
@@ -96,17 +95,11 @@ public class LegacyInfoProvider implements InfoProvider {
 
     private Map<String, Object> getMemoryInfo() {
         Map<String, Object> info = new HashMap<>();
-        long used = 0;
-        long maxMem = 0;
-        long peak = 0;
-        double fragmentationRatio = 0.0;
-        if (store instanceof DefaultMemoryStore) {
-            DefaultMemoryStore ds = (DefaultMemoryStore) store;
-            used = ds.getUsedMemory();
-            maxMem = ds.getMaxMemory();
-            peak = ds.getPeakUsedMemory();
-            fragmentationRatio = ds.getMemoryFragmentationRatio();
-        }
+        // S1: 所有 MemoryStore 实现都提供这些 admin 方法，不再需要 instanceof DefaultMemoryStore 强转
+        long used = store.getUsedMemory();
+        long maxMem = store.getMaxMemory();
+        long peak = store.getPeakUsedMemory();
+        double fragmentationRatio = store.getMemoryFragmentationRatio();
         info.put("used_memory", used);
         info.put("used_memory_human", toHumanReadable(used));
         info.put("used_memory_rss", 0);
@@ -132,19 +125,13 @@ public class LegacyInfoProvider implements InfoProvider {
         info.put("number_of_cached_scripts", RuntimeConfig.getCachedScriptsCount());
         info.put("maxmemory", maxMem);
         info.put("maxmemory_human", toHumanReadable(maxMem));
-        String policy = "noeviction";
-        if (store instanceof DefaultMemoryStore) {
-            policy = ((DefaultMemoryStore) store).getMaxMemoryPolicy();
+        String policy = store.getMaxMemoryPolicy();
+        if (policy == null) {
+            policy = "noeviction";
         }
         info.put("maxmemory_policy", policy);
-        if (store instanceof DefaultMemoryStore) {
-            DefaultMemoryStore ds = (DefaultMemoryStore) store;
-            info.put("softmaxmemory_threshold_percent", ds.getSoftLimitPercent());
-            info.put("softmaxmemory_warning", ds.isSoftLimitExceeded() ? 1 : 0);
-        } else {
-            info.put("softmaxmemory_threshold_percent", 0);
-            info.put("softmaxmemory_warning", 0);
-        }
+        info.put("softmaxmemory_threshold_percent", store.getSoftLimitPercent());
+        info.put("softmaxmemory_warning", store.isSoftLimitExceeded() ? 1 : 0);
         info.put("allocator_frag_ratio", 0.00);
         info.put("allocator_frag_bytes", 0);
         info.put("allocator_rss_ratio", 0.00);
