@@ -170,8 +170,8 @@ public class MeshBootstrap {
         // 9. MeshClientRedirector（nodeId→serviceAddr 映射 + 本节点地址，自重定向守卫）
         MeshClientRedirector redirector = new MeshClientRedirector(topo.nodeIdToServiceAddr, topo.selfServiceAddr);
 
-        // 10. MeshClusterCommands（leader 供应商 + allNodes）
-        MeshClusterCommands clusterCommands = buildClusterCommands(meshConfig, meshNode, topo);
+        // 10. MeshClusterCommands（leader 供应商 + allNodes + 在线判定）
+        MeshClusterCommands clusterCommands = buildClusterCommands(meshConfig, meshNode, topo, busClient);
 
         // 11. MeshLifecycleListener + 注册到 MeshNode
         MeshLifecycleListener lifecycleListener =
@@ -401,10 +401,10 @@ public class MeshBootstrap {
     }
 
     /**
-     * 构建 {@link MeshClusterCommands}：leader 供应商 + allNodes 拓扑。
+     * 构建 {@link MeshClusterCommands}：leader 供应商 + allNodes 拓扑 + 在线判定。
      */
     private MeshClusterCommands buildClusterCommands(MeshConfig meshConfig, MeshNode meshNode,
-                                                     PeerTopology topo) {
+                                                     PeerTopology topo, MeshBusClient busClient) {
         // leader nodeId 供应商：动态读 meshNode.getLeaderId()
         java.util.function.Supplier<String> leaderNodeIdSupplier = meshNode::getLeaderId;
         // leader serviceAddr 供应商：leaderId → 查 nodeIdToServiceAddr 映射
@@ -430,7 +430,7 @@ public class MeshBootstrap {
         }
 
         return new MeshClusterCommands(leaderNodeIdSupplier, leaderAddrSupplier, allNodes,
-                topo.selfNodeId);
+                topo.selfNodeId, busClient::isConnected);
     }
 
     private static String hostOf(String hostPort) {
