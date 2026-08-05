@@ -43,8 +43,10 @@ import java.util.Map;
  * 阶段 10 保证本类写路径正确（{@link #writeDumpRdb}）；阶段 12 在 server 集成时 gate 掉 server 的 save 路径。</p>
  *
  * <h3>lastIncludedIndex 与 dump.rdb 非原子写（DESIGN §5.4）</h3>
- * <p>二者分别落盘：先写 dump.rdb 成功 → 再更新持久化 lastIncludedIndex。若中途崩溃，重启时
- * dump.rdb 索引 ≠ lastIncludedIndex → 触发全量追平（§5.5 常态容错，阶段 11 启动加载处理）。</p>
+ * <p>三份落盘（dump.rdb.index / dump.rdb / conf）非原子，顺序固定为 <b>index → rdb → conf</b>：
+ * 信任校验（index==conf）通过 ⟹ conf 已落盘 ⟹ 同轮 rdb 已写完 ⟹ 载入的 rdb 与新边界一致；
+ * 任何中间崩溃 → index≠conf → 不可信 → 全量追平（§5.5 常态容错，阶段 11 启动加载处理）。
+ * index 必须先写：若 rdb 先写而崩溃，index==conf==旧 + rdb==新 → 重启信任误判 → (旧,新] 条目重放双 apply。</p>
  *
  * <h3>线程模型</h3>
  * <p>本类所有方法必须在 {@code MeshNode.raftExecutor} 单线程上串行调用——与 {@link LogReplicator} 一致
@@ -91,9 +93,9 @@ public class SnapshotManager {
     private final Runnable persistHook;
 
     /**
-     * dump.rdb 索引写入 hook（阶段 11）：写完 dump.rdb 后调用，把 {@code lastIncludedIndex}
-     * 落盘到 {@code dump.rdb.index}（含 fsync + ATOMIC_MOVE）。{@code null} 时跳过
-     * （阶段 10 之前的测试兼容）。
+     * dump.rdb 索引写入 hook（阶段 11）：把 {@code lastIncludedIndex} 落盘到 {@code dump.rdb.index}
+     * （含 fsync + ATOMIC_MOVE）。<b>必须在 dump.rdb 写入之前调用</b>（fix：index 先于 rdb，
+     * 见 {@link #takePeriodicSnapshotIfNeeded}）。{@code null} 时跳过（阶段 10 之前的测试兼容）。
      * <p>用函数式回调而非直接依赖 lifecycle 包，保持 replication → lifecycle 的依赖方向不反转。</p>
      */
     private final java.util.function.LongConsumer dumpRdbIndexWriter;
@@ -280,15 +282,18 @@ public class SnapshotManager {
      * <p>流程：
      * <ol>
      *   <li>阈值检查：{@code state.log.size() >= snapshotLogThreshold}。未达阈值直接返回。</li>
+     *   <li>dump.rdb.index 落盘：先写索引记录本次快照边界（失败则中止快照）。</li>
      *   <li>生成 RDB 落盘 dump.rdb（唯一写者，{@link #writeDumpRdb}）。</li>
+     *   <li>截断 {@code state.log}：保留 lastIncludedIndex 之后的条目（{@link MeshState#discardUpToInclusive}）。</li>
      *   <li>更新 {@code state.lastIncludedIndex/Term} = 当前 lastApplied / 对应 term。</li>
-     *   <li>截断 {@code state.log}：保留 lastIncludedIndex 之后的条目（{@link MeshState#truncateAfter}）。</li>
      *   <li>持久化 MeshState（{@link #persistHook}，阶段 11 fsync）。</li>
      * </ol>
      * </p>
      *
-     * <p><b>非原子写容错（DESIGN §5.4）</b>：先写 dump.rdb → 再更新持久化 lastIncludedIndex。
-     * 若中途崩溃，重启时 dump.rdb 索引 ≠ lastIncludedIndex → 触发全量追平（§5.5）。</p>
+     * <p><b>非原子写容错（DESIGN §5.4）</b>：三份落盘（index / rdb / conf）非原子，顺序固定为
+     * <b>index → rdb → conf</b>。信任校验（index==conf）通过 ⟹ conf 已落盘 ⟹ 同轮 rdb 已写完 ⟹
+     * 载入的 rdb 与新边界一致；任何中间崩溃 → index≠conf → 不可信 → 全量追平（§5.5）。
+     * index 必须先于 rdb：若 rdb 先写而崩溃，index==conf==旧 + rdb==新 → 重启信任误判 → (旧,新] 条目重放双 apply。</p>
      *
      * <p>线程模型：必须在 raftExecutor 上调用。</p>
      *
@@ -311,26 +316,30 @@ public class SnapshotManager {
         logger.info("takePeriodicSnapshotIfNeeded: 触发周期快照 logSize={}, snapshotIndex={}, snapshotTerm={}",
                 logSize, snapshotIndex, snapshotTerm);
 
-        // 1. 生成 RDB 落盘 dump.rdb（唯一写者）
+        // 1. 先落盘 dump.rdb.index（fix：index 先于 rdb——信任通过 ⟹ conf 已落盘 ⟹ rdb 已写完；
+        //    若先写 rdb，崩溃后 index==conf==旧 + rdb==新 → 重启信任误判 → (旧,新] 条目双 apply）
+        if (!runDumpRdbIndexWriter(snapshotIndex)) {
+            logger.warn("takePeriodicSnapshotIfNeeded: dump.rdb.index 写入失败，中止本次快照");
+            return false;
+        }
+
+        // 2. 生成 RDB 落盘 dump.rdb（唯一写者）
         File dump = writeDumpRdb();
         if (dump == null) {
             logger.warn("takePeriodicSnapshotIfNeeded: dump.rdb 写入失败，跳过本次快照");
             return false;
         }
 
-        // 2. 丢弃已被快照覆盖的 log 条目（≤ snapshotIndex），保留 > snapshotIndex 的 tail
+        // 3. 丢弃已被快照覆盖的 log 条目（≤ snapshotIndex），保留 > snapshotIndex 的 tail
         //    必须在更新 lastIncludedIndex 之前调用（用旧 lastIncludedIndex 换算 list 索引）
         state.discardUpToInclusive(snapshotIndex);
 
-        // 3. 更新 lastIncludedIndex/Term（先 dump.rdb 后 lastIncluded，非原子；DESIGN §5.4）
+        // 4. 更新 lastIncludedIndex/Term（先 dump.rdb 后 lastIncluded，非原子；DESIGN §5.4）
         state.lastIncludedIndex = snapshotIndex;
         state.lastIncludedTerm = snapshotTerm;
 
-        // 4. 持久化 MeshState（阶段 11 fsync；阶段 10 no-op）
+        // 5. 持久化 MeshState（WAL 重写 + conf 新边界）
         runPersistHook();
-
-        // 5. 落盘 dump.rdb.index（阶段 11：记录 dump.rdb 对应的 snapshotIndex，供启动比对衔接）
-        runDumpRdbIndexWriter(snapshotIndex);
 
         logger.info("takePeriodicSnapshotIfNeeded: 完成, lastIncluded={}/{}, logSizeAfter={}",
                 state.lastIncludedIndex, state.lastIncludedTerm, state.log.size());
@@ -411,6 +420,7 @@ public class SnapshotManager {
      *   <li>{@code done=true} 时：
      *     <ul>
      *       <li>关闭临时文件输出流。</li>
+     *       <li>先落盘 dump.rdb.index（记录新边界；失败则中止安装、回 success=false，Leader 重发快照）。</li>
      *       <li>用 {@link RdbDataLoader} 加载临时 RDB 到内存 + 落盘 dump.rdb。</li>
      *       <li>截断本地 log 保留 lastIncludedIndex 之后的条目。</li>
      *       <li>更新 {@code commitIndex=lastApplied=lastIncludedIndex}。</li>
@@ -506,6 +516,13 @@ public class SnapshotManager {
                     sendSnapshotAck(fromNodeId, state.currentTerm, false, state.lastApplied);
                     return;
                 }
+                // 4a.0 先落盘 dump.rdb.index（fix：index 先于 rdb 写入，关闭「rdb 新 + index/conf 旧」信任误判窗口；
+                //     写失败 → ACK false 让 Leader 重发快照，绝不带着旧 index 继续）
+                if (!runDumpRdbIndexWriter(done.lastIncludedIndex)) {
+                    logger.error("handleInstallSnapshot: dump.rdb.index 写入失败，中止快照安装");
+                    sendSnapshotAck(fromNodeId, state.currentTerm, false, state.lastApplied);
+                    return;
+                }
                 // 4a. 加载到内存 + 落盘 dump.rdb（RdbDataLoader 内部完成 copy 到 dump.rdb + load）
                 boolean loaded = loadIncomingSnapshot(done.tempFile);
                 if (!loaded) {
@@ -517,11 +534,8 @@ public class SnapshotManager {
                 // 4b. 截断 log + 更新 commitIndex/lastApplied/lastIncluded*
                 applySnapshotToState(done.lastIncludedIndex, done.lastIncludedTerm);
 
-                // 4c. 持久化 MeshState（阶段 11）
+                // 4c. 持久化 MeshState（WAL 重写 + conf 新边界）
                 runPersistHook();
-
-                // 4c.1 落盘 dump.rdb.index（阶段 11：记录 dump.rdb 对应的 lastIncludedIndex）
-                runDumpRdbIndexWriter(done.lastIncludedIndex);
 
                 logger.info("handleInstallSnapshot: 快照加载完成 lastIncluded={}/{}, bytes={}, 回 ACK 给 {}",
                         done.lastIncludedIndex, done.lastIncludedTerm, receivedBytes, fromNodeId);
@@ -672,20 +686,25 @@ public class SnapshotManager {
     }
 
     /**
-     * 落盘 dump.rdb.index（阶段 11）：记录 dump.rdb 对应的 lastIncludedIndex，供启动时比对衔接。
-     * <p>在 dump.rdb 写完 <b>且</b> lastIncludedIndex 更新之后调用。{@code dumpRdbIndexWriter} 为
-     * {@code null} 时跳过（阶段 10 之前的测试兼容）。异常不抛出（仅 warn），避免索引落盘失败中断快照
-     * ——即使索引没落盘，下次启动也只是触发「不可信衔接 → Leader INSTALL_SNAPSHOT 追平」（常态容错）。</p>
+     * 落盘 dump.rdb.index：记录 dump.rdb 对应的 lastIncludedIndex，供启动时比对衔接。
+     * <p><b>必须在 dump.rdb 写入之前调用</b>（fix：index 先于 rdb——信任校验通过 ⟹ conf 已落盘 ⟹ 同轮 rdb 已写完；
+     * 若 rdb 先写，崩溃后 index==conf==旧 + rdb==新 → 重启信任误判 → (旧,新] 条目双 apply）。
+     * 失败返回 false，调用方必须中止快照（若继续写 rdb，index 仍为旧值 → 信任误判窗口复开）。
+     * {@code dumpRdbIndexWriter} 为 {@code null} 时跳过（阶段 10 之前的测试兼容），视为成功。</p>
+     *
+     * @return true=写入成功（或索引写入未启用）；false=写入失败（调用方应中止快照流程）
      */
-    private void runDumpRdbIndexWriter(long lastIncludedIndex) {
+    private boolean runDumpRdbIndexWriter(long lastIncludedIndex) {
         if (dumpRdbIndexWriter == null) {
-            return;
+            return true;
         }
         try {
             dumpRdbIndexWriter.accept(lastIncludedIndex);
+            return true;
         } catch (Exception e) {
-            logger.warn("runDumpRdbIndexWriter: 写 dump.rdb.index 失败 lastIncludedIndex={}",
+            logger.error("runDumpRdbIndexWriter: 写 dump.rdb.index 失败 lastIncludedIndex={}",
                     lastIncludedIndex, e);
+            return false;
         }
     }
 
