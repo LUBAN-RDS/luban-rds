@@ -73,7 +73,7 @@ version: 1.0.15
 
 ### 🛰️ Mesh 集群（v1.0.15+）
 **[3 节点 Raft 强一致 →](./mesh/index.md)** — 用 3 台机器替代 Redis Cluster 的 6 节点实现强一致高可用  
-[快速上手](./mesh/setup.md) · [协议设计要点](./mesh/design.md) · [模块完整文档](../luban-rds-mesh/README.md)
+[快速上手](./mesh/setup.md) · [协议设计要点](./mesh/design.md) · [模块完整文档](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md)
 
 ### ⚡ 性能基准测试（v1.0.15+）
 **[benchmark 使用指南 →](./guide/benchmarking.md)** — 单节点 / Cluster / Mesh 三类基准套件 + Redis 7 对比  
@@ -102,7 +102,7 @@ version: 1.0.15
 - ✅ **CLI 参数**：`--mesh-enabled` / `--mesh-peers` / `--mesh-self-node-id` / `--mesh-bus-port`
 - ✅ **关键约束**：`mesh-enabled` 与 `cluster-enabled` 互斥；BLOCK 命令 v1 禁用；Lua/EVAL 当写；mesh 模式不写 AOF（Raft log 即 WAL）；dump.rdb 唯一写者 = SnapshotManager
 
-> 完整 mesh 文档：[luban-rds-mesh/README.md](../luban-rds-mesh/README.md) · [docs/mesh/](./mesh/index.md) · [luban-rds-mesh/docs/DESIGN.md](../luban-rds-mesh/docs/DESIGN.md) v1.2
+> 完整 mesh 文档：[luban-rds-mesh/README.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md) · [docs/mesh/](./mesh/index.md) · [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) v1.2
 
 ### v1.0.14 (已发布 · 2026-08-03)
 

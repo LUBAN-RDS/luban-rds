@@ -6,7 +6,7 @@ version: 1.0.15
 
 # Mesh 集群快速上手
 
-> 本节配套 [luban-rds-mesh/README.md](../../luban-rds-mesh/README.md) 一起阅读——本节强调**站点侧配置 + 启动 + 客户端 + 运维**全流程，`luban-rds-mesh/README.md` 更深入讲解模块内部状态。
+> 本节配套 [luban-rds-mesh/README.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md) 一起阅读——本节强调**站点侧配置 + 启动 + 客户端 + 运维**全流程，`luban-rds-mesh/README.md` 更深入讲解模块内部状态。
 
 ## 1. 前置要求
 
@@ -230,5 +230,5 @@ redis-cli -p 6379 CLUSTER INFO
 ## 8. 下一步
 
 - [协议设计要点](./design.md)：状态机、RPC、Lease、read-index、chunked snapshot
-- [luban-rds-mesh/README.md](../../luban-rds-mesh/README.md)：模块完整文档
-- [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计
+- [luban-rds-mesh/README.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md)：模块完整文档
+- [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计

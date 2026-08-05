@@ -542,7 +542,7 @@ Luban-RDS 提供哨兵模式实现自动故障转移：
 - **客户端零侵入**：JedisCluster / lettuce / Redisson 经 `CLUSTER SLOTS` 引导 + `MOVED` 自动跟随；普通客户端连 Leader 即可
 - **与 cluster 互斥**：`mesh-enabled` 与 `cluster-enabled` 启动时校验，同一进程只能启用其一
 
-详细协议设计、子包结构、关键流程与约束见 [功能架构 §21 Mesh 集群](./features.md#21-mesh-集群luban-rds-mesh) 与 [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2；部署见 [docs/mesh/setup.md](../mesh/setup.md)。
+详细协议设计、子包结构、关键流程与约束见 [功能架构 §21 Mesh 集群](./features.md#21-mesh-集群luban-rds-mesh) 与 [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) v1.2；部署见 [docs/mesh/setup.md](../mesh/setup.md)。
 
 ## 18. 部署架构
 

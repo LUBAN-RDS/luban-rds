@@ -242,5 +242,5 @@ java -cp luban-rds-benchmark.jar com.janeluo.luban.rds.benchmark.LubanBenchmarkM
 ## 8. 下一步
 
 - [Mesh 快速上手](../mesh/setup.md)
-- [luban-rds-benchmark 模块源码](../../luban-rds-benchmark)（详见各 benchmark 类注释）
-- [Redis 7 兼容性审计报告](../../AUDIT-REPORT-vs-Redis7.md)（性能对比参考）
+- [luban-rds-benchmark 模块源码](https://github.com/LUBAN-RDS/luban-rds/tree/master/luban-rds-benchmark)（详见各 benchmark 类注释）
+- [Redis 7 兼容性审计报告](https://github.com/LUBAN-RDS/luban-rds/blob/master/AUDIT-REPORT-vs-Redis7.md)（性能对比参考）

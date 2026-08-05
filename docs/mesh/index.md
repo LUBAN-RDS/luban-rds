@@ -79,9 +79,9 @@ version: 1.0.15
 |------|------|
 | [快速上手](./setup.md) | 3 节点配置、启动、客户端连接、运维命令速查 |
 | [协议设计要点](./design.md) | 拓扑、状态机、RPC、Lease、read-index、chunked snapshot 摘要 |
-| [luban-rds-mesh/README.md](../../luban-rds-mesh/README.md) | 模块完整快速上手（与本节互补） |
-| [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) | 完整协议设计 v1.2（DESIGN 经两轮评审定案） |
-| [luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](../../luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md) | 13 阶段实施计划 v1.2 |
+| [luban-rds-mesh/README.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md) | 模块完整快速上手（与本节互补） |
+| [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) | 完整协议设计 v1.2（DESIGN 经两轮评审定案） |
+| [luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md) | 13 阶段实施计划 v1.2 |
 
 ## 7. 当前状态
 
@@ -106,4 +106,4 @@ version: 1.0.15
 
 - [快速上手](./setup.md)
 - [协议设计要点](./design.md)
-- [luban-rds-mesh/README.md](../../luban-rds-mesh/README.md)
+- [luban-rds-mesh/README.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md)

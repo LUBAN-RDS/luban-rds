@@ -453,8 +453,8 @@ redis-cli -p 6379 CLUSTER SLOTS
 
 - [docs/mesh/setup.md](../mesh/setup.md)：完整快速上手（配置 / 启动 / 客户端 / 运维命令）
 - [docs/mesh/design.md](../mesh/design.md)：协议设计要点（拓扑、状态机、RPC、Lease、read-index、chunked snapshot）
-- [luban-rds-mesh/README.md](../../luban-rds-mesh/README.md)：模块入口
-- [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计
+- [luban-rds-mesh/README.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md)：模块入口
+- [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计
 
 ## 9. 下一步
 

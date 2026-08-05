@@ -15,6 +15,15 @@ export default defineConfig({
       sourcemap: false
     }
   },
+  // docs/ 之外的源仓库链接（luban-rds-mesh、luban-rds-benchmark、AUDIT-REPORT-*），
+  // 真实存在于仓库根目录但不在 vitepress srcDir（docs/）扫描范围内。
+  // 这些链接在站点 build 时被静态检查为 "dead link"，但实际可在 GitHub 仓库 / 本地仓库中访问，
+  // 通过 ignoreDeadLinks 白名单放行。
+  ignoreDeadLinks: [
+    /^\.\.\/\.\.\/luban-rds-mesh(\/|$)/,
+    /^\.\.\/\.\.\/luban-rds-benchmark(\/|$)/,
+    /^\.\.\/\.\.\/AUDIT-REPORT-/,
+  ],
   themeConfig: {
     nav: [
       {

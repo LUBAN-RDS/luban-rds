@@ -6,7 +6,7 @@ version: 1.0.15
 
 # Mesh 协议设计要点
 
-> 本节是 [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2 的摘要，配套阅读以获得完整的协议设计细节（拓扑、状态机、RPC、时序、关键决策 17 条等）。
+> 本节是 [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) v1.2 的摘要，配套阅读以获得完整的协议设计细节（拓扑、状态机、RPC、时序、关键决策 17 条等）。
 
 ## 1. 节点拓扑
 
@@ -152,7 +152,7 @@ version: 1.0.15
 
 ## 9. 关键决策一览（DESIGN §11 摘要）
 
-> 完整 17 条见 [DESIGN.md §十一](../../luban-rds-mesh/docs/DESIGN.md)；本节列出对外可见性最高的 8 条：
+> 完整 17 条见 [DESIGN.md §十一](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md)；本节列出对外可见性最高的 8 条：
 
 | 决策 | 理由 |
 |------|------|
@@ -201,6 +201,6 @@ luban-rds-mesh/
 
 ## 11. 下一步
 
-- [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计（含全部 17 条关键决策 + 时序图）
-- [luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](../../luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md) v1.2：13 阶段实施计划
+- [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计（含全部 17 条关键决策 + 时序图）
+- [luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md) v1.2：13 阶段实施计划
 - [Mesh 快速上手](./setup.md)：配置 / 启动 / 客户端 / 运维命令

@@ -678,7 +678,7 @@ f6e5d4c3b2a1 192.168.8.161:9739@19739 master - 0 1234567890 2 connected
 
 `luban-rds-mesh` 是 v1.0.15 引入的 **3 节点 Raft 强一致集群模块**，用 3 台机器（3 节点互为副本）替代 Redis Cluster 的 6 节点（3 主 3 从），任一时刻只有 1 个 Leader 处理写入，写入需经多数派（2/3）ACK + 落盘后才返回 OK，**已确认的写入永不丢失**。
 
-> 完整协议设计见 [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2；本节给出与现有 cluster 模块并列的能力视图。
+> 完整协议设计见 [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) v1.2；本节给出与现有 cluster 模块并列的能力视图。
 
 ### 21.1 核心卖点（vs Redis Cluster）
 
@@ -715,7 +715,7 @@ mesh 模块的源码位于 `luban-rds-mesh/src/main/java/com/janeluo/luban/rds/m
 - **多数派 → Leader**：获得 2/3 投票转 Leader，开始接收客户端写入
 - **Leader Lease**：每 100ms 发送心跳续租；默认租约时长 ≈ 2 × electionTimeout（600ms）；租约有效期内本地读，超时退化 read-index
 
-> 详细规则与 RPC 字段见 [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) §三 §四。
+> 详细规则与 RPC 字段见 [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) §三 §四。
 
 #### 日志复制
 
@@ -816,6 +816,6 @@ mesh 模块的源码位于 `luban-rds-mesh/src/main/java/com/janeluo/luban/rds/m
 
 - [部署指南 - Mesh 集群](../mesh/setup.md)：3 节点配置与启动
 - [Mesh 协议设计要点](../mesh/design.md)：状态机、RPC、Lease、read-index 摘要
-- [luban-rds-mesh/README.md](../../luban-rds-mesh/README.md)：模块快速上手
-- [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计
-- [luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](../../luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md) v1.2：13 阶段实施计划
+- [luban-rds-mesh/README.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md)：模块快速上手
+- [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计
+- [luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md) v1.2：13 阶段实施计划

@@ -65,13 +65,13 @@ Luban-RDS 是一款轻量级、高性能、完全兼容 RESP 协议的 Java 内�
 
 - 与 v1.0.10 ~ v1.0.14 完全兼容，cluster / mesh 互斥启动校验
 - mesh 模式客户端零侵入（JedisCluster / lettuce / Redisson 经 `CLUSTER SLOTS` + `MOVED` 自动跟随）
-- 与 `luban-rds-mesh/README.md` 协同（291 测试用例详见 mesh 模块）
+- 与 [luban-rds-mesh/README.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md) 协同（291 测试用例详见 mesh 模块）
 
 ### 文档
 
-- **[luban-rds-mesh/README.md](../luban-rds-mesh/README.md)**：模块快速上手
-- **[luban-rds-mesh/docs/DESIGN.md](../luban-rds-mesh/docs/DESIGN.md)**：完整协议设计 v1.2
-- **[luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](../luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md)**：13 阶段实施计划 v1.2
+- **[luban-rds-mesh/README.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/README.md)**：模块快速上手
+- **[luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md)**：完整协议设计 v1.2
+- **[luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md)**：13 阶段实施计划 v1.2
 
 ---
 
