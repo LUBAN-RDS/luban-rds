@@ -12,11 +12,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -255,6 +257,194 @@ class MeshConfigPersisterTest {
         MeshState loaded = persister.load(NODE_ID);
         assertEquals(1, loaded.log.size(), "无换行结尾的完整 JSON 末行也应按未确认截断");
         assertEquals(1L, loaded.log.get(0).getIndex());
+    }
+
+    // ==================== WAL 增量落盘 ====================
+
+    @Test
+    void save_walIncremental_appendOnlyNewEntries() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        state.appendEntry(new LogEntry(1L, 1L, respFrame("SET", "a", "1"), 0, null));
+        persister.save(state, NODE_ID);
+        state.appendEntry(new LogEntry(1L, 2L, respFrame("SET", "b", "2"), 0, null));
+        persister.save(state, NODE_ID);
+        state.appendEntry(new LogEntry(1L, 3L, respFrame("SET", "c", "3"), 0, null));
+        persister.save(state, NODE_ID);
+
+        List<String> lines = Files.readAllLines(persister.getRaftLogFile(), StandardCharsets.UTF_8);
+        assertEquals(3, lines.size(), "三次 save 应恰好追加 3 行（增量，不重写）");
+        String confText = new String(Files.readAllBytes(persister.getRaftNodesFile()),
+                StandardCharsets.UTF_8);
+        assertFalse(confText.contains("logTail"), "新格式 conf 不应内嵌 logTail");
+
+        MeshState loaded = persister.load(NODE_ID);
+        assertEquals(3, loaded.log.size());
+        assertEquals(3L, loaded.log.get(2).getIndex());
+    }
+
+    @Test
+    void save_idempotentSameState_noDuplicateAppend() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        state.appendEntry(new LogEntry(1L, 1L, respFrame("SET", "a", "1"), 0, null));
+        state.appendEntry(new LogEntry(1L, 2L, respFrame("SET", "b", "2"), 0, null));
+        persister.save(state, NODE_ID);
+        persister.save(state, NODE_ID); // 同 state 再 save：幂等
+
+        List<String> lines = Files.readAllLines(persister.getRaftLogFile(), StandardCharsets.UTF_8);
+        assertEquals(2, lines.size(), "同 state 重复 save 不应重复追加");
+    }
+
+    @Test
+    void save_termChangeOnly_walUnchanged() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        state.appendEntry(new LogEntry(1L, 1L, respFrame("SET", "a", "1"), 0, null));
+        persister.save(state, NODE_ID);
+        state.currentTerm = 2L; // 仅 term 变化（选举路径）
+        persister.save(state, NODE_ID);
+
+        List<String> lines = Files.readAllLines(persister.getRaftLogFile(), StandardCharsets.UTF_8);
+        assertEquals(1, lines.size(), "仅头部变化不应追加 WAL");
+        MeshState loaded = persister.load(NODE_ID);
+        assertEquals(2L, loaded.currentTerm);
+        assertEquals(1, loaded.log.size());
+    }
+
+    @Test
+    void load_walHalfLineAtEnd_truncatedAndRestored() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        state.appendEntry(new LogEntry(1L, 1L, respFrame("SET", "a", "1"), 0, null));
+        state.appendEntry(new LogEntry(1L, 2L, respFrame("SET", "b", "2"), 0, null));
+        persister.save(state, NODE_ID);
+        // 模拟崩溃：WAL 尾部追加半行（无换行结尾）
+        Files.write(persister.getRaftLogFile(),
+                "{\"term\":1,\"index\":3,\"dbIndex\":0,\"payload\":\"AAAA\"".getBytes(StandardCharsets.UTF_8),
+                StandardOpenOption.APPEND);
+
+        MeshState loaded = persister.load(NODE_ID);
+        assertEquals(2, loaded.log.size(), "半行应被截断，前两条完整恢复");
+        String walText = new String(Files.readAllBytes(persister.getRaftLogFile()),
+                StandardCharsets.UTF_8);
+        assertFalse(walText.endsWith("AAAA"), "半行应被物理截断");
+        assertTrue(walText.endsWith("\n"), "截断后文件应以换行结尾");
+    }
+
+    @Test
+    void load_walMiddleLineCorrupt_throwsParseException() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        state.appendEntry(new LogEntry(1L, 1L, respFrame("SET", "a", "1"), 0, null));
+        state.appendEntry(new LogEntry(1L, 2L, respFrame("SET", "b", "2"), 0, null));
+        state.appendEntry(new LogEntry(1L, 3L, respFrame("SET", "c", "3"), 0, null));
+        persister.save(state, NODE_ID);
+        // 破坏中间行（第 2 行）
+        List<String> lines = Files.readAllLines(persister.getRaftLogFile(), StandardCharsets.UTF_8);
+        String corrupted = String.join("\n", lines.get(0), "{ broken json }", lines.get(2)) + "\n";
+        Files.write(persister.getRaftLogFile(), corrupted.getBytes(StandardCharsets.UTF_8));
+
+        assertThrows(MeshConfigPersister.MeshConfigParseException.class,
+                () -> persister.load(NODE_ID), "中间行损坏应抛异常，不静默丢弃");
+    }
+
+    @Test
+    void load_confNewerThanWal_filtersStaleEntries() throws IOException {
+        // conf-first 崩溃态：conf.lastIncluded=3 已落盘，WAL 仍含旧 tail（1..5，含 ≤3 条目）
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        for (long i = 1; i <= 5; i++) {
+            state.appendEntry(new LogEntry(1L, i, respFrame("SET", "k" + i, "v"), 0, null));
+        }
+        persister.save(state, NODE_ID);
+        // 手工把 conf 的 lastIncludedIndex 提到 3（模拟 conf-first 已写、WAL 未重写）
+        String confText = new String(Files.readAllBytes(persister.getRaftNodesFile()),
+                StandardCharsets.UTF_8);
+        Files.write(persister.getRaftNodesFile(),
+                confText.replace("\"lastIncludedIndex\":0", "\"lastIncludedIndex\":3")
+                        .getBytes(StandardCharsets.UTF_8));
+
+        MeshState loaded = persister.load(NODE_ID);
+        assertEquals(3L, loaded.lastIncludedIndex);
+        assertEquals(2, loaded.log.size(), "logTail 应仅含 > lastIncludedIndex 的条目 (4,5)");
+        assertEquals(4L, loaded.log.get(0).getIndex());
+        assertEquals(5L, loaded.log.get(1).getIndex());
+    }
+
+    @Test
+    void save_snapshotTruncation_rewritesWalToTail() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        for (long i = 1; i <= 5; i++) {
+            state.appendEntry(new LogEntry(1L, i, respFrame("SET", "k" + i, "v"), 0, null));
+        }
+        persister.save(state, NODE_ID);
+        // 快照截断：li=3，log 只剩 4,5（与 SnapshotManager 一致：先 discard 再推进边界）
+        state.discardUpToInclusive(3L);
+        state.lastIncludedIndex = 3L;
+        persister.save(state, NODE_ID);
+
+        List<String> lines = Files.readAllLines(persister.getRaftLogFile(), StandardCharsets.UTF_8);
+        assertEquals(2, lines.size(), "快照截断后 WAL 应重写为 tail（丢弃 ≤3 条目）");
+        MeshState loaded = persister.load(NODE_ID);
+        assertEquals(3L, loaded.lastIncludedIndex);
+        assertEquals(2, loaded.log.size());
+        assertEquals(4L, loaded.log.get(0).getIndex());
+    }
+
+    @Test
+    void save_conflictTruncation_rewritesWalNoStaleEntries() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        for (long i = 1; i <= 5; i++) {
+            state.appendEntry(new LogEntry(1L, i, respFrame("SET", "k" + i, "v"), 0, null));
+        }
+        persister.save(state, NODE_ID);
+        // 纯截断：保留 ≤2，新 term 追加 3（log 末条 3 < lastPersistedIndex 5 → 分支 3 全量重写）
+        state.truncateAfter(2L);
+        state.currentTerm = 2L;
+        state.appendEntry(new LogEntry(2L, 3L, respFrame("SET", "new", "v"), 0, null));
+        persister.save(state, NODE_ID);
+
+        List<String> lines = Files.readAllLines(persister.getRaftLogFile(), StandardCharsets.UTF_8);
+        assertEquals(3, lines.size(), "冲突截断后 WAL 应重写（不含陈旧 4,5）");
+        MeshState loaded = persister.load(NODE_ID);
+        assertEquals(3, loaded.log.size());
+        assertEquals(3L, loaded.log.get(2).getIndex());
+        assertEquals(2L, loaded.log.get(2).getTerm(), "新条目 term 应正确");
+    }
+
+    @Test
+    void load_legacyConfWithLogTail_noWal_migratesAndRestores() throws IOException {
+        // 手写旧格式 conf（内嵌 logTail）
+        String legacy = "{\"nodeId\":\"" + NODE_ID + "\",\"currentTerm\":5,"
+                + "\"votedFor\":\"xyz\",\"lastIncludedIndex\":10,\"lastIncludedTerm\":4,"
+                + "\"logTail\":[{\"term\":5,\"index\":11,\"dbIndex\":0,"
+                + "\"payload\":\"" + Base64.getEncoder().encodeToString(
+                        respFrame("SET", "k", "v")) + "\"},"
+                + "{\"term\":5,\"index\":12,\"dbIndex\":0,"
+                + "\"payload\":\"" + Base64.getEncoder().encodeToString(
+                        respFrame("INCR", "c")) + "\"}]}";
+        Files.write(persister.getRaftNodesFile(), legacy.getBytes(StandardCharsets.UTF_8));
+
+        MeshState loaded = persister.load(NODE_ID);
+        assertNotNull(loaded);
+        assertEquals(2, loaded.log.size(), "旧格式 logTail 应完整恢复");
+        assertEquals(12L, loaded.log.get(1).getIndex());
+        // 迁移产物：WAL 存在且含 2 行；conf 不再含 logTail
+        assertTrue(Files.exists(persister.getRaftLogFile()), "迁移应写 WAL");
+        List<String> lines = Files.readAllLines(persister.getRaftLogFile(), StandardCharsets.UTF_8);
+        assertEquals(2, lines.size());
+        String confText = new String(Files.readAllBytes(persister.getRaftNodesFile()),
+                StandardCharsets.UTF_8);
+        assertFalse(confText.contains("logTail"), "迁移后 conf 应去 logTail");
+        assertEquals("xyz", loaded.votedFor, "头部字段应保留");
+        // 迁移后 save 增量正常
+        loaded.appendEntry(new LogEntry(5L, 13L, respFrame("SET", "m", "1"), 0, null));
+        persister.save(loaded, NODE_ID);
+        assertEquals(3, Files.readAllLines(persister.getRaftLogFile(),
+                StandardCharsets.UTF_8).size());
     }
 
     // ==================== 文件不存在 → null ====================
