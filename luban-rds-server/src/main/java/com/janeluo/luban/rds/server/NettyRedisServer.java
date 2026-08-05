@@ -87,7 +87,7 @@ public class NettyRedisServer implements RedisServer {
     private EventLoopGroup workerGroup;
     private EventExecutorGroup businessGroup;
     private ChannelFuture channelFuture;
-    private boolean running;
+    private volatile boolean running;
     
     // ==================== 集群相关组件 ====================
     
@@ -1132,6 +1132,10 @@ public class NettyRedisServer implements RedisServer {
             return;
         }
         
+        // 先停周期任务循环条件（volatile 保证任务线程可见），再逐组件停止。
+        // 修复：原实现 persistExecutor.shutdown() 不打断 Thread.sleep，awaitTermination(5s) 必等满。
+        running = false;
+        
         try {
             // 停止 Gossip 协议
             if (gossipProtocol != null) {
@@ -1166,10 +1170,11 @@ public class NettyRedisServer implements RedisServer {
                 stopMeshComponents();
             }
 
-            // 停止定期持久化任务
-            persistExecutor.shutdown();
+            // 停止定期持久化任务：shutdownNow() 立即打断 sleep（任务经 InterruptedException 退出），
+            // awaitTermination 成为安全网（常态毫秒级返回，不再固定等满 5s）。
+            persistExecutor.shutdownNow();
             if (!persistExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                persistExecutor.shutdownNow();
+                logger.warn("定期持久化任务未能在超时内停止");
             }
             
             // 持久化数据（mesh 模式跳过：dump.rdb 由 SnapshotManager 管理，DESIGN D3）
