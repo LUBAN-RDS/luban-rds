@@ -27,7 +27,8 @@ import java.util.function.Supplier;
  *       {@code slave <leaderNodeId>}。行尾用裸 {@code \n}（对齐 Redis
  *       clusterGenNodesDescription，避免 Redisson split("\n") 残留 \r）。
  *       离线节点（bus 未连接，经 {@code onlinePredicate} 判定）linkState 标
- *       {@code disconnected}，避免集群感知客户端向死节点发起连接。</li>
+ *       {@code disconnected}，避免集群感知客户端向死节点发起连接；
+ *       本节点（myself）恒标 {@code connected}（正在响应请求）。</li>
  *   <li><b>CLUSTER INFO</b>：多行 {@code key:value}（{@code \r\n} 分隔），
  *       关键字段 {@code cluster_state:ok}、{@code cluster_known_nodes:3}、
  *       {@code cluster_slots_ok:16384}。无 Leader 时 {@code cluster_state:fail}。</li>
@@ -366,7 +367,8 @@ public class MeshClusterCommands {
             sb.append("1 ");
 
             // <linkState>
-            boolean online = onlinePredicate.test(nid);
+            // 本节点正在响应请求，恒 connected；其余节点按在线判定（出站 bus 链路活跃）
+            boolean online = isSelf || onlinePredicate.test(nid);
             sb.append(online ? "connected" : "disconnected");
 
             // <slot...>：仅 Leader（有 Leader 时）持 0-16383

@@ -384,6 +384,19 @@ class MeshClusterCommandsTest {
         assertTrue(!payload.contains("disconnected"), "旧构造器默认全部 connected");
     }
 
+    @Test
+    void clusterNodes_selfAlwaysConnectedEvenWhenPredicateSaysOffline() {
+        // 谓词恒 false（模拟出站链路全断），但 myself 行仍应 connected
+        Map<String, MeshClusterCommands.NodeInfo> nodes = buildThreeNodes();
+        MeshClusterCommands cmd = new MeshClusterCommands(
+                () -> NODE_A, () -> "192.168.1.1:6379", nodes, NODE_A,
+                id -> false);
+        String s = new String(cmd.clusterNodes(), StandardCharsets.ISO_8859_1);
+        assertTrue(s.contains(NODE_A + " 192.168.1.1:6379@16379 myself,master - 0 0 1 connected"),
+                "myself 行应恒 connected: " + s);
+        assertTrue(s.contains("disconnected"), "其他节点按谓词标 disconnected");
+    }
+
     // ==================== CLUSTER INFO ====================
 
     @Test
