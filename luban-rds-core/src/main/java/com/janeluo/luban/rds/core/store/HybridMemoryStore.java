@@ -773,6 +773,21 @@ public class HybridMemoryStore implements MemoryStore {
         return maxDatabases;
     }
 
+    @Override
+    public int getLruSampleSize() {
+        return onheap.getLruSampleSize();
+    }
+
+    @Override
+    public void setLruSampleSize(int size) {
+        onheap.setLruSampleSize(size);
+    }
+
+    @Override
+    public void setSoftLimitPercent(int percent) {
+        onheap.setSoftLimitPercent(percent);
+    }
+
     // ==================== 生命周期 ====================
 
     public void close() {

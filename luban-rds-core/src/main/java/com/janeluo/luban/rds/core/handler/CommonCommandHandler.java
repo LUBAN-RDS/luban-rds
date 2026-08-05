@@ -6,7 +6,6 @@ import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.context.InfoProvider;
 import com.janeluo.luban.rds.common.context.ServerContext;
-import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -516,29 +515,13 @@ public class CommonCommandHandler implements CommandHandler {
         } else if ("lua-max-script-bytes".equalsIgnoreCase(parameter)) {
             value = String.valueOf(RuntimeConfig.getLuaMaxScriptBytes());
         } else if ("maxmemory".equalsIgnoreCase(parameter)) {
-            if (store instanceof DefaultMemoryStore) {
-                value = String.valueOf(((DefaultMemoryStore) store).getMaxMemory());
-            } else {
-                value = "0";
-            }
+            value = String.valueOf(store.getMaxMemory());
         } else if ("maxmemory-policy".equalsIgnoreCase(parameter)) {
-            if (store instanceof DefaultMemoryStore) {
-                value = ((DefaultMemoryStore) store).getMaxMemoryPolicy();
-            } else {
-                value = "noeviction";
-            }
+            value = store.getMaxMemoryPolicy();
         } else if ("maxmemory-samples".equalsIgnoreCase(parameter)) {
-            if (store instanceof DefaultMemoryStore) {
-                value = String.valueOf(((DefaultMemoryStore) store).getLruSampleSize());
-            } else {
-                value = "5";
-            }
+            value = String.valueOf(store.getLruSampleSize());
         } else if ("softmaxmemory-threshold".equalsIgnoreCase(parameter)) {
-            if (store instanceof DefaultMemoryStore) {
-                value = String.valueOf(((DefaultMemoryStore) store).getSoftLimitPercent());
-            } else {
-                value = "0";
-            }
+            value = String.valueOf(store.getSoftLimitPercent());
         } else if ("lua-max-ops-per-script".equalsIgnoreCase(parameter)) {
             value = String.valueOf(RuntimeConfig.getLuaMaxOpsPerScript());
         } else if ("lua-yield-ms".equalsIgnoreCase(parameter)) {
@@ -622,25 +605,18 @@ public class CommonCommandHandler implements CommandHandler {
         } else if ("maxmemory".equalsIgnoreCase(parameter)) {
             try {
                 long m = Long.parseLong(value);
-                if (store instanceof DefaultMemoryStore) {
-                    ((DefaultMemoryStore) store).setMaxMemory(m);
-                }
+                store.setMaxMemory(m);
                 return "+OK\r\n";
             } catch (NumberFormatException e) {
                 return "-ERR value is not an integer or out of range\r\n";
             }
         } else if ("maxmemory-policy".equalsIgnoreCase(parameter)) {
-            if (store instanceof DefaultMemoryStore) {
-                ((DefaultMemoryStore) store).setMaxMemoryPolicy(value);
-                return "+OK\r\n";
-            }
+            store.setMaxMemoryPolicy(value);
             return "+OK\r\n";
         } else if ("maxmemory-samples".equalsIgnoreCase(parameter)) {
             try {
                 int s = Integer.parseInt(value);
-                if (store instanceof DefaultMemoryStore) {
-                    ((DefaultMemoryStore) store).setLruSampleSize(s);
-                }
+                store.setLruSampleSize(s);
                 return "+OK\r\n";
             } catch (NumberFormatException e) {
                 return "-ERR value is not an integer or out of range\r\n";
@@ -648,9 +624,7 @@ public class CommonCommandHandler implements CommandHandler {
         } else if ("softmaxmemory-threshold".equalsIgnoreCase(parameter)) {
             try {
                 int p = Integer.parseInt(value);
-                if (store instanceof DefaultMemoryStore) {
-                    ((DefaultMemoryStore) store).setSoftLimitPercent(p);
-                }
+                store.setSoftLimitPercent(p);
                 return "+OK\r\n";
             } catch (NumberFormatException e) {
                 return "-ERR value is not an integer or out of range\r\n";

@@ -417,10 +417,12 @@ public class DefaultMemoryStore implements MemoryStore {
     // LRU 采样数量（参考 Redis 默认值为 5）
     private int lruSampleSize = 5;
     
+    @Override
     public int getLruSampleSize() {
         return lruSampleSize;
     }
-    
+
+    @Override
     public void setLruSampleSize(int size) {
         if (size > 0) {
             this.lruSampleSize = size;
@@ -435,6 +437,7 @@ public class DefaultMemoryStore implements MemoryStore {
         return softLimitPercent;
     }
     
+    @Override
     public void setSoftLimitPercent(int percent) {
         if (percent < 0) percent = 0;
         if (percent > 100) percent = 100;

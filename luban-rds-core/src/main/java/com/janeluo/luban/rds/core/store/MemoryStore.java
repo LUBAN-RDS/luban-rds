@@ -667,6 +667,21 @@ public interface MemoryStore {
      */
     int getMaxDatabases();
 
+    /**
+     * LRU 采样数量（参考 Redis maxmemory-samples）。
+     */
+    int getLruSampleSize();
+
+    /**
+     * 设置 LRU 采样数量。
+     */
+    void setLruSampleSize(int size);
+
+    /**
+     * 设置软限制百分比（0-100）。
+     */
+    void setSoftLimitPercent(int percent);
+
     // ==================== Stream 操作接口 ====================
     
     /**
