@@ -11,10 +11,6 @@ import com.janeluo.luban.rds.core.stream.Stream;
 import com.janeluo.luban.rds.core.stream.StreamConsumerGroupManager;
 import com.janeluo.luban.rds.core.stream.StreamEntry;
 import com.janeluo.luban.rds.core.stream.StreamId;
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
-import com.github.benmanes.caffeine.cache.RemovalCause;
-import com.github.benmanes.caffeine.cache.RemovalListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -278,33 +274,43 @@ public class DefaultMemoryStore implements MemoryStore {
     
     // 每个数据库的存储结构
     private static class DatabaseStore {
-        final Cache<String, StoreValue> storage;
+        final ConcurrentHashMap<String, StoreValue> storage;
         final ConcurrentHashMap<String, Boolean> keySet; // 用于跟踪所有键，支持SCAN命令
         final ConcurrentHashMap<String, AtomicLong> keyVersions; // 键版本，用于WATCH
         final ConcurrentHashMap<Integer, Set<String>> slotToKeys; // 槽位到键的映射索引
-        
+
         public DatabaseStore() {
             this.keySet = new ConcurrentHashMap<>(64); // 初始容量
             this.keyVersions = new ConcurrentHashMap<>(64);
             this.slotToKeys = new ConcurrentHashMap<>();
-            this.storage = Caffeine.newBuilder()
-                    .initialCapacity(256) // 设置初始容量，减少扩容
-                    .removalListener(new RemovalListener<String, StoreValue>() {
-                        @Override
-                        public void onRemoval(String key, StoreValue value, RemovalCause cause) {
-                            // REPLACED 表示 entry 被新值覆盖（如 pexpire/lrem 的 storage.put），
-                            // key 仍在 cache 中，不应从 keySet/slotToKeys 移除。
-                            // 仅在 key 真正离开 cache 时（显式删除、GC 回收、过期、容量淘汰）
-                            // 清理辅助索引，避免 scan/dbsize/RDB 持久化扫不到仍存在的 key。
-                            if (cause == RemovalCause.REPLACED) {
-                                return;
-                            }
-                            // 当键被移除时，从keySet和slotToKeys中也移除
-                            keySet.remove(key);
-                            removeFromSlotIndex(key);
-                        }
-                    })
-                    .build();
+            this.storage = new ConcurrentHashMap<>(256); // 初始容量，减少扩容
+        }
+
+        /**
+         * 写入 entry 并同步辅助索引（替代原 Caffeine removalListener 的索引维护）。
+         * 仅当 key 为新增（storage 中无旧值）时加入 keySet/slotToKeys；
+         * 若是替换已有 entry（如 pexpire/lrem 的覆盖写），不改动索引——
+         * 与原 Caffeine RemovalCause.REPLACED 时跳过索引清理的语义一致。
+         */
+        StoreValue putEntry(String key, StoreValue val) {
+            StoreValue prev = storage.put(key, val);
+            if (prev == null) {
+                keySet.put(key, Boolean.TRUE);
+                addToSlotIndex(key);
+            }
+            return prev;
+        }
+
+        /**
+         * 移除 key 并同步辅助索引（替代原 Caffeine removalListener 对显式删除/过期/淘汰的索引清理）。
+         */
+        StoreValue removeEntry(String key) {
+            StoreValue prev = storage.remove(key);
+            if (prev != null) {
+                keySet.remove(key);
+                removeFromSlotIndex(key);
+            }
+            return prev;
         }
         
         /**
@@ -636,7 +642,7 @@ public class DefaultMemoryStore implements MemoryStore {
                     // 验证键是否仍然存在
                     DatabaseStore store = databaseStores.get(bestEntry.database);
                     if (store != null) {
-                        StoreValue value = store.storage.getIfPresent(bestEntry.key);
+                        StoreValue value = store.storage.get(bestEntry.key);
                         if (value != null) {
                             // 再次检查 volatile 条件
                             if (!volatileOnly || value.hasExpireTime()) {
@@ -691,7 +697,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 DatabaseStore currentStore = databaseStores.get(dbKey);
                 if (currentStore == null) continue;
                 
-                StoreValue value = currentStore.storage.getIfPresent(key);
+                StoreValue value = currentStore.storage.get(key);
                 if (value == null) continue;
                 
                 if (volatileOnly && !value.hasExpireTime()) {
@@ -754,7 +760,7 @@ public class DefaultMemoryStore implements MemoryStore {
             DatabaseStore store = databaseStores.get(database);
             if (store == null) continue;
             
-            StoreValue value = store.storage.getIfPresent(key);
+            StoreValue value = store.storage.get(key);
             if (value == null) continue;
             
             if (volatileOnly && !value.hasExpireTime()) {
@@ -786,7 +792,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 DatabaseStore store = dbEntry.getValue();
                 int keyIndex = 0;
                 for (String key : store.keySet.keySet()) {
-                    StoreValue value = store.storage.getIfPresent(key);
+                    StoreValue value = store.storage.get(key);
                     if (value == null) continue;
                     
                     if (volatileOnly && !value.hasExpireTime()) {
@@ -840,7 +846,7 @@ public class DefaultMemoryStore implements MemoryStore {
             for (Map.Entry<Integer, DatabaseStore> dbEntry : databaseStores.entrySet()) {
                 DatabaseStore store = dbEntry.getValue();
                 for (String key : store.keySet.keySet()) {
-                    StoreValue value = store.storage.getIfPresent(key);
+                    StoreValue value = store.storage.get(key);
                     if (value == null || !value.hasExpireTime()) continue;
                     
                     Long expireTime = value.getExpireTime();
@@ -874,7 +880,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public Object get(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         if (storeValue == null) {
             RuntimeConfig.incKeyspaceMisses();
             return null;
@@ -882,10 +888,10 @@ public class DefaultMemoryStore implements MemoryStore {
         
         if (storeValue.isExpired()) {
             synchronized (getLockForKey(database, key)) {
-                storeValue = store.storage.getIfPresent(key);
+                storeValue = store.storage.get(key);
                 if (storeValue != null && storeValue.isExpired()) {
                     long freedMemory = storeValue.getEstimatedSize();
-                    store.storage.invalidate(key);
+                    store.removeEntry(key);
                     store.keySet.remove(key);
                     updateMemory(-freedMemory);
                 }
@@ -908,7 +914,7 @@ public class DefaultMemoryStore implements MemoryStore {
         long requiredSize = newValue.getEstimatedSize();
         
         // 检查是否已存在该键，如果存在则先减去旧值的内存
-        StoreValue oldValue = store.storage.getIfPresent(key);
+        StoreValue oldValue = store.storage.get(key);
         if (oldValue != null) {
             updateMemory(-oldValue.getEstimatedSize());
         }
@@ -923,7 +929,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         // 写入新值
-        store.storage.put(key, newValue);
+        store.putEntry(key, newValue);
         store.keySet.put(key, Boolean.TRUE);
         store.addToSlotIndex(key); // 更新槽位索引
         updateMemory(requiredSize);
@@ -939,7 +945,7 @@ public class DefaultMemoryStore implements MemoryStore {
         long requiredSize = newValue.getEstimatedSize();
         
         // 检查是否已存在该键，如果存在则先减去旧值的内存
-        StoreValue oldValue = store.storage.getIfPresent(key);
+        StoreValue oldValue = store.storage.get(key);
         if (oldValue != null) {
             updateMemory(-oldValue.getEstimatedSize());
         }
@@ -954,7 +960,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         // 写入新值
-        store.storage.put(key, newValue);
+        store.putEntry(key, newValue);
         store.keySet.put(key, Boolean.TRUE);
         store.addToSlotIndex(key); // 更新槽位索引
         updateMemory(requiredSize);
@@ -970,7 +976,7 @@ public class DefaultMemoryStore implements MemoryStore {
         long requiredSize = newValue.getEstimatedSize();
         
         // 检查是否已存在该键，如果存在则先减去旧值的内存
-        StoreValue oldValue = store.storage.getIfPresent(key);
+        StoreValue oldValue = store.storage.get(key);
         if (oldValue != null) {
             updateMemory(-oldValue.getEstimatedSize());
         }
@@ -985,7 +991,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         // 写入新值
-        store.storage.put(key, newValue);
+        store.putEntry(key, newValue);
         store.keySet.put(key, Boolean.TRUE);
         store.addToSlotIndex(key); // 更新槽位索引
         updateMemory(requiredSize);
@@ -1013,7 +1019,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 newValues.put(key, newValue);
                 totalRequiredSize += newValue.getEstimatedSize();
                 
-                StoreValue oldValue = store.storage.getIfPresent(key);
+                StoreValue oldValue = store.storage.get(key);
                 if (oldValue != null) {
                     oldValues.put(key, oldValue);
                     totalRequiredSize -= oldValue.getEstimatedSize();
@@ -1027,7 +1033,7 @@ public class DefaultMemoryStore implements MemoryStore {
             for (java.util.Map.Entry<String, StoreValue> entry : newValues.entrySet()) {
                 String key = entry.getKey();
                 StoreValue newValue = entry.getValue();
-                store.storage.put(key, newValue);
+                store.putEntry(key, newValue);
                 store.keySet.put(key, Boolean.TRUE);
                 store.addToSlotIndex(key); // 更新槽位索引
                 updateMemory(newValue.getEstimatedSize());
@@ -1051,7 +1057,7 @@ public class DefaultMemoryStore implements MemoryStore {
 
         // 使用同步块确保原子性
         synchronized (getLockForKey(database, key)) {
-            StoreValue storeValue = store.storage.getIfPresent(key);
+            StoreValue storeValue = store.storage.get(key);
             long currentValue = 0;
 
             if (storeValue != null && !storeValue.isExpired()) {
@@ -1129,7 +1135,7 @@ public class DefaultMemoryStore implements MemoryStore {
                     return;
                 }
                 
-                StoreValue value = store.storage.getIfPresent(key);
+                StoreValue value = store.storage.get(key);
                 if (value != null && value.isExpired()) {
                     del(dbEntry.getKey(), key);
                     expired++;
@@ -1166,11 +1172,11 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public boolean del(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         if (storeValue != null) {
             // 更新内存统计
             updateMemory(-storeValue.getEstimatedSize());
-            store.storage.invalidate(key);
+            store.removeEntry(key);
             store.keySet.remove(key);
             bumpKeyVersion(database, key);
             return true;
@@ -1186,7 +1192,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public boolean pexpire(int database, String key, long milliseconds) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         if (storeValue == null) {
             logger.debug("pexpire failed: key={} not found", key);
             return false;
@@ -1195,7 +1201,7 @@ public class DefaultMemoryStore implements MemoryStore {
         long expireTime = System.currentTimeMillis() + milliseconds;
         logger.debug("pexpire: key={} ms={} expireTime={}", key, milliseconds, expireTime);
         StoreValue newStoreValue = new StoreValue(storeValue.value, storeValue.getType(), expireTime);
-        store.storage.put(key, newStoreValue);
+        store.putEntry(key, newStoreValue);
         bumpKeyVersion(database, key);
         return true;
     }
@@ -1203,14 +1209,14 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public boolean exists(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         if (storeValue == null) {
             RuntimeConfig.incKeyspaceMisses();
             return false;
         }
         
         if (storeValue.isExpired()) {
-            store.storage.invalidate(key);
+            store.removeEntry(key);
             RuntimeConfig.incKeyspaceMisses();
             return false;
         }
@@ -1231,14 +1237,14 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public long pttl(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         if (storeValue == null) {
             RuntimeConfig.incKeyspaceMisses();
             return -2;
         }
         
         if (storeValue.isExpired()) {
-            store.storage.invalidate(key);
+            store.removeEntry(key);
             RuntimeConfig.incKeyspaceMisses();
             return -2;
         }
@@ -1258,7 +1264,7 @@ public class DefaultMemoryStore implements MemoryStore {
     public void flushAll() {
         // 清空所有数据库并重置内存统计
         for (DatabaseStore store : databaseStores.values()) {
-            store.storage.invalidateAll();
+            store.storage.clear();
             store.keySet.clear();
             store.slotToKeys.clear(); // 清空槽位索引
         }
@@ -1268,14 +1274,14 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public String type(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         if (storeValue == null) {
             RuntimeConfig.incKeyspaceMisses();
             return RdsDataTypeConstant.NONE;
         }
         
         if (storeValue.isExpired()) {
-            store.storage.invalidate(key);
+            store.removeEntry(key);
             RuntimeConfig.incKeyspaceMisses();
             return RdsDataTypeConstant.NONE;
         }
@@ -1327,11 +1333,11 @@ public class DefaultMemoryStore implements MemoryStore {
         
         for (String key : store.keySet.keySet()) {
             // 检查键是否过期
-            StoreValue storeValue = store.storage.getIfPresent(key);
+            StoreValue storeValue = store.storage.get(key);
             if (storeValue == null || storeValue.isExpired()) {
                 // 键不存在或已过期，从keySet中移除
                 store.keySet.remove(key);
-                store.storage.invalidate(key);
+                store.removeEntry(key);
                 continue;
             }
             
@@ -1388,13 +1394,13 @@ public class DefaultMemoryStore implements MemoryStore {
         
         // 遍历所有键，统计未过期的键数量
         for (String key : store.keySet.keySet()) {
-            StoreValue storeValue = store.storage.getIfPresent(key);
+            StoreValue storeValue = store.storage.get(key);
             if (storeValue != null && !storeValue.isExpired()) {
                 count++;
             } else {
                 // 键不存在或已过期，从keySet中移除
                 store.keySet.remove(key);
-                store.storage.invalidate(key);
+                store.removeEntry(key);
             }
         }
         
@@ -1406,12 +1412,12 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         // 更新内存统计
         for (String key : store.keySet.keySet()) {
-            StoreValue storeValue = store.storage.getIfPresent(key);
+            StoreValue storeValue = store.storage.get(key);
             if (storeValue != null) {
                 updateMemory(-storeValue.getEstimatedSize());
             }
         }
-        store.storage.invalidateAll();
+        store.storage.clear();
         store.keySet.clear();
         store.slotToKeys.clear(); // 清空槽位索引
         // 清空时仅标记版本变化，不逐个键处理
@@ -1437,7 +1443,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int hset(int database, String key, String field, String value) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         java.util.concurrent.ConcurrentHashMap<String, String> hash;
         boolean isNew = false;
@@ -1486,7 +1492,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int hsetnx(int database, String key, String field, String value) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         java.util.concurrent.ConcurrentHashMap<String, String> hash;
         boolean isNew = false;
@@ -1531,7 +1537,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         java.util.concurrent.ConcurrentHashMap<String, String> hash;
         boolean isNew = false;
@@ -1583,7 +1589,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public String hget(int database, String key, String field) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return null;
@@ -1603,7 +1609,7 @@ public class DefaultMemoryStore implements MemoryStore {
     public java.util.List<String> hmget(int database, String key, String... fields) {
         java.util.List<String> result = new java.util.ArrayList<>(fields.length);
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         java.util.Map<?, ?> hash = null;
         if (storeValue != null && !storeValue.isExpired() && storeValue.value instanceof java.util.Map) {
@@ -1625,7 +1631,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int hdel(int database, String key, String... fields) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -1658,7 +1664,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public boolean hexists(int database, String key, String field) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null) {
             logger.debug("hexists: key={} not found", key);
@@ -1683,7 +1689,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public long hincrby(int database, String key, String field, long increment) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         java.util.concurrent.ConcurrentHashMap<String, String> hash;
         boolean isNew = false;
@@ -1739,7 +1745,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public java.util.Map<String, String> hgetall(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return java.util.Collections.emptyMap();
@@ -1761,7 +1767,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int hlen(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -1779,7 +1785,7 @@ public class DefaultMemoryStore implements MemoryStore {
     public java.util.List<Object> hscan(int database, String key, long cursor, String pattern, int count) {
         java.util.List<Object> result = new java.util.ArrayList<>();
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         java.util.Map<String, String> hash = new java.util.HashMap<>();
         if (storeValue != null && !storeValue.isExpired() && storeValue.value instanceof java.util.Map) {
@@ -1834,7 +1840,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int lpush(int database, String key, String... values) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         java.util.concurrent.CopyOnWriteArrayList<String> list;
         boolean isNew = false;
@@ -1876,7 +1882,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int rpush(int database, String key, String... values) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         java.util.concurrent.CopyOnWriteArrayList<String> list;
         boolean isNew = false;
@@ -1918,7 +1924,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public String lpop(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -1948,7 +1954,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public String rpop(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -1978,7 +1984,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int lrem(int database, String key, int count, String value) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -2040,7 +2046,7 @@ public class DefaultMemoryStore implements MemoryStore {
             long newSize = newValue.getEstimatedSize();
             updateMemory(newSize - oldSize);
             
-            store.storage.put(key, newValue);
+            store.putEntry(key, newValue);
             bumpKeyVersion(database, key);
         }
         
@@ -2050,7 +2056,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int llen(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2070,7 +2076,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public String lindex(int database, String key, int index) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return null;
@@ -2100,7 +2106,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public void lset(int database, String key, int index, String value) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             throw new RuntimeException("ERR no such key");
@@ -2132,7 +2138,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public java.util.List<String> lrange(int database, String key, long start, long stop) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2175,7 +2181,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public void ltrim(int database, String key, long start, long stop) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return;
@@ -2263,7 +2269,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int sadd(int database, String key, String... members) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> set;
         boolean isNew = false;
@@ -2308,7 +2314,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int srem(int database, String key, String... members) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2342,7 +2348,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public boolean sismember(int database, String key, String member) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2362,7 +2368,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public java.util.Set<String> smembers(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2387,7 +2393,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int scard(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2454,7 +2460,7 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         java.util.List<Object> result = new java.util.ArrayList<>();
         
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         if (storeValue == null || storeValue.isExpired()) {
             result.add(0L);
             return result;
@@ -2636,7 +2642,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int zadd(int database, String key, double score, String member) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         ZSetStore zset;
         boolean isNew = false;
@@ -2675,7 +2681,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int zrem(int database, String key, String... members) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -2700,7 +2706,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public Double zscore(int database, String key, String member) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2720,7 +2726,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public java.util.List<String> zrange(int database, String key, long start, long stop) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2740,7 +2746,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int zcard(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2760,7 +2766,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public java.util.List<String> zrangeByScore(int database, String key, double min, double max, int offset, int count) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2780,7 +2786,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public java.util.Map<String, Double> zgetAllWithScores(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -2802,7 +2808,7 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         java.util.List<Object> result = new java.util.ArrayList<>();
         
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         if (storeValue == null || storeValue.isExpired()) {
             result.add(0L);
             return result;
@@ -2868,7 +2874,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int zremrangeByScore(int database, String key, double min, double max) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -2910,7 +2916,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int zremrangeByRank(int database, String key, long start, long stop) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -2969,7 +2975,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public Long zrank(int database, String key, String member) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -3020,7 +3026,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         if (storeValue == null || storeValue.isExpired()) {
             return null;
         }
@@ -3037,7 +3043,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public double zincrby(int database, String key, double increment, String member) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         ZSetStore zset;
         boolean isNew = false;
@@ -3077,7 +3083,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public int zcount(int database, String key, double min, double max) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -3107,7 +3113,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public java.util.List<String> zpopmax(int database, String key, int count) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -3159,7 +3165,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public java.util.List<String> zpopmin(int database, String key, int count) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -3211,7 +3217,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public java.util.List<String> zrevrange(int database, String key, long start, long stop) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             RuntimeConfig.incKeyspaceMisses();
@@ -3260,14 +3266,14 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public Long getMemoryUsage(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null) {
             return null;
         }
         
         if (storeValue.isExpired()) {
-            store.storage.invalidate(key);
+            store.removeEntry(key);
             store.keySet.remove(key);
             updateMemory(-storeValue.getEstimatedSize());
             return null;
@@ -3295,7 +3301,7 @@ public class DefaultMemoryStore implements MemoryStore {
         long effectiveMemory = 0;
         for (DatabaseStore store : databaseStores.values()) {
             for (String key : store.keySet.keySet()) {
-                StoreValue value = store.storage.getIfPresent(key);
+                StoreValue value = store.storage.get(key);
                 if (value != null && !value.isExpired()) {
                     effectiveMemory += value.getEstimatedSize();
                 }
@@ -3319,12 +3325,9 @@ public class DefaultMemoryStore implements MemoryStore {
         
         // 1. Clean all expired keys
         freedMemory += cleanExpiredKeys();
-        
-        // 2. Compress Caffeine Cache (via cleanUp)
-        for (DatabaseStore store : databaseStores.values()) {
-            store.storage.cleanUp();
-        }
-        
+
+        // 2. (Caffeine cleanUp 已移除：storage 现为 ConcurrentHashMap，无需清理)
+
         // 3. Suggest JVM to perform garbage collection
         System.gc();
         
@@ -3344,17 +3347,17 @@ public class DefaultMemoryStore implements MemoryStore {
             List<String> keysToRemove = new ArrayList<>();
             
             for (String key : store.keySet.keySet()) {
-                StoreValue value = store.storage.getIfPresent(key);
+                StoreValue value = store.storage.get(key);
                 if (value != null && value.isExpired()) {
                     keysToRemove.add(key);
                 }
             }
             
             for (String key : keysToRemove) {
-                StoreValue value = store.storage.getIfPresent(key);
+                StoreValue value = store.storage.get(key);
                 if (value != null) {
                     freed += value.getEstimatedSize();
-                    store.storage.invalidate(key);
+                    store.removeEntry(key);
                     store.keySet.remove(key);
                 }
             }
@@ -3378,7 +3381,7 @@ public class DefaultMemoryStore implements MemoryStore {
         
         for (DatabaseStore store : databaseStores.values()) {
             for (String key : store.keySet.keySet()) {
-                StoreValue value = store.storage.getIfPresent(key);
+                StoreValue value = store.storage.get(key);
                 if (value != null) {
                     if (value.isExpired()) {
                         expiredKeys++;
@@ -3410,7 +3413,7 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         
         synchronized (getLockForKey(database, key)) {
-            StoreValue storeValue = store.storage.getIfPresent(key);
+            StoreValue storeValue = store.storage.get(key);
             
             Stream stream;
             boolean isNew = false;
@@ -3461,7 +3464,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public long xlen(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -3482,7 +3485,7 @@ public class DefaultMemoryStore implements MemoryStore {
     public List<StreamEntry> xrange(int database, String key, StreamId start, StreamId end,
                                     boolean exclusiveStart, boolean exclusiveEnd, int count, boolean reverse) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return Collections.emptyList();
@@ -3512,7 +3515,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -3545,7 +3548,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public long xtrim(int database, String key, Long maxLen, StreamId minId, Integer limit, boolean approximate) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -3579,7 +3582,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public Stream getStream(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return null;
@@ -3601,7 +3604,7 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         
         synchronized (getLockForKey(database, key)) {
-            StoreValue storeValue = store.storage.getIfPresent(key);
+            StoreValue storeValue = store.storage.get(key);
             
             Stream stream;
             boolean isNew = false;
@@ -3655,7 +3658,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public boolean xgroupDestroy(int database, String key, String group) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return false;
@@ -3687,7 +3690,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public long xgroupDelConsumer(int database, String key, String group, String consumer) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -3725,7 +3728,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public boolean xgroupSetId(int database, String key, String group, StreamId id) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return false;
@@ -3765,7 +3768,7 @@ public class DefaultMemoryStore implements MemoryStore {
             String key = keys.get(i);
             StreamId id = ids.get(i);
             
-            StoreValue storeValue = getOrCreateDatabaseStore(database).storage.getIfPresent(key);
+            StoreValue storeValue = getOrCreateDatabaseStore(database).storage.get(key);
             if (storeValue == null || storeValue.isExpired()) {
                 continue;
             }
@@ -3800,7 +3803,7 @@ public class DefaultMemoryStore implements MemoryStore {
     public Map<String, List<StreamEntry>> xreadGroup(int database, String key, String group, String consumer,
                                                        StreamId id, int count, boolean noack) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             throw new IllegalStateException("NOGROUP No such key '" + key + "' or consumer group '" + group + "'");
@@ -3877,7 +3880,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return 0;
@@ -3920,7 +3923,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public Map<String, Object> xpendingSummary(int database, String key, String group) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return Collections.emptyMap();
@@ -3964,7 +3967,7 @@ public class DefaultMemoryStore implements MemoryStore {
                                                    StreamId start, StreamId end, int count, 
                                                    String consumer, long minIdleTime) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return Collections.emptyList();
@@ -4014,7 +4017,7 @@ public class DefaultMemoryStore implements MemoryStore {
         }
         
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return Collections.emptyList();
@@ -4087,7 +4090,7 @@ public class DefaultMemoryStore implements MemoryStore {
     public Map<String, Object> xautoclaim(int database, String key, String group, String consumer,
                                           long minIdleTime, StreamId start, int count) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             Map<String, Object> result = new HashMap<>();
@@ -4160,7 +4163,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public StreamConsumerGroupManager getStreamConsumerGroupManager(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return null;
@@ -4181,7 +4184,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public Map<String, Object> xinfoStream(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return Collections.emptyMap();
@@ -4226,7 +4229,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public List<Map<String, Object>> xinfoGroups(int database, String key) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return Collections.emptyList();
@@ -4263,7 +4266,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public List<Map<String, Object>> xinfoConsumers(int database, String key, String group) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return Collections.emptyList();
@@ -4301,7 +4304,7 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public StreamId getGroupLastDeliveredId(int database, String key, String group) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        StoreValue storeValue = store.storage.getIfPresent(key);
+        StoreValue storeValue = store.storage.get(key);
         
         if (storeValue == null || storeValue.isExpired()) {
             return null;
@@ -4349,7 +4352,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 break;
             }
             // 验证键是否仍然存在（可能已被删除但索引尚未清理）
-            if (store.storage.getIfPresent(key) != null) {
+            if (store.storage.get(key) != null) {
                 result.add(key);
                 added++;
             }
@@ -4374,7 +4377,7 @@ public class DefaultMemoryStore implements MemoryStore {
         // 统计实际存在的键数量（排除已过期或被删除的键）
         int count = 0;
         for (String key : keysInSlot) {
-            StoreValue storeValue = store.storage.getIfPresent(key);
+            StoreValue storeValue = store.storage.get(key);
             if (storeValue != null && !storeValue.isExpired()) {
                 count++;
             }
