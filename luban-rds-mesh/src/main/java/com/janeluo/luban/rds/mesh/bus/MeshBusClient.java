@@ -255,7 +255,7 @@ public class MeshBusClient {
         }
         channel.writeAndFlush(frame).addListener((future) -> {
             if (future.isSuccess()) {
-                logger.debug("MeshFrame 已发往节点 {}: {}", targetNodeId, frame);
+                logger.trace("MeshFrame 已发往节点 {}: {}", targetNodeId, frame);
             } else {
                 logger.error("发送 MeshFrame 到节点 {} 失败", targetNodeId, future.cause());
                 PeerEndpoint ep = nodeEndpoints.get(targetNodeId);

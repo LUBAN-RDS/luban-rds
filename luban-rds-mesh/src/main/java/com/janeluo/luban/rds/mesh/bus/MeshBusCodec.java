@@ -87,8 +87,8 @@ public final class MeshBusCodec {
                 out.writeBytes(body);
             }
 
-            if (logger.isDebugEnabled()) {
-                logger.debug("编码 MeshFrame: type=0x{}, bodyLength={}, total={}, sender={}",
+            if (logger.isTraceEnabled()) {
+                logger.trace("编码 MeshFrame: type=0x{}, bodyLength={}, total={}, sender={}",
                         Integer.toHexString(msg.getType() & 0xFF), bodyLength,
                         MeshFrame.HEADER_LENGTH + bodyLength, senderNodeId);
             }
@@ -154,8 +154,8 @@ public final class MeshBusCodec {
                 MeshFrame frame = new MeshFrame(senderNodeId, type.getCode(), body);
                 out.add(frame);
 
-                if (logger.isDebugEnabled()) {
-                    logger.debug("解码 MeshFrame: type={}, bodyLength={}, sender={}",
+                if (logger.isTraceEnabled()) {
+                    logger.trace("解码 MeshFrame: type={}, bodyLength={}, sender={}",
                             type, bodyLength, senderNodeId);
                 }
             }

@@ -158,7 +158,8 @@ public class ElectionTimer {
     public synchronized void onElectionFailed() {
         if (consecutiveFailures < MAX_BACKOFF_SHIFT) {
             consecutiveFailures++;
-            logger.info("选举退避: consecutiveFailures={}, 下次区间=[{},{}]ms",
+            // 退避细节降为 debug（选举失败本身由 MeshNode「PreVote/正式选举未达多数派」info 覆盖）
+            logger.debug("选举退避: consecutiveFailures={}, 下次区间=[{},{}]ms",
                     consecutiveFailures, minMs << consecutiveFailures, maxMs << consecutiveFailures);
         }
     }

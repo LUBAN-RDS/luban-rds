@@ -405,7 +405,7 @@ public class MeshNode {
         // 3. 构造 LogEntry 并追加
         LogEntry entry = new LogEntry(term, index, respPayload, dbIndex, extra);
         state.appendEntry(entry);
-        logger.debug("propose: append entry index={}, term={}, dbIndex={}", index, term, dbIndex);
+        logger.trace("propose: append entry index={}, term={}, dbIndex={}", index, term, dbIndex);
 
         // 4. 持久化（自身日志落盘，fsync 完成后才继续；阶段 4 为 persistHook no-op）
         //    DESIGN §5.1：Leader 必须在自身日志落盘后才 complete future 回客户端。
@@ -877,7 +877,8 @@ public class MeshNode {
         }
 
         sendResponse(fromNodeId, MessageType.APPEND_ENTRIES_RESP, decision.response);
-        logger.debug("回复 AppendEntries: from={}, success={}, match={}",
+        // 心跳响应每 100ms 一次，trace 级别（帧级噪声，与 MeshBusCodec 一致）
+        logger.trace("回复 AppendEntries: from={}, success={}, match={}",
                 abbrev(fromNodeId), decision.response.isSuccess(), decision.response.getMatchIndex());
     }
 

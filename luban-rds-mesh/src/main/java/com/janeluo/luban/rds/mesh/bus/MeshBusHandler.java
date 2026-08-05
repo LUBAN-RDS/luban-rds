@@ -44,8 +44,8 @@ public class MeshBusHandler extends SimpleChannelInboundHandler<MeshFrame> {
     protected void channelRead0(ChannelHandlerContext ctx, MeshFrame frame) {
         String fromNodeId = frame.getSenderNodeId();
 
-        // 阶段 1：先打日志，确认总线通路
-        logger.info("收到 MeshFrame: type=0x{}, from={}, bodyLen={}, remote={}",
+        // 每帧日志放 trace：心跳/复制帧 10~100/s，info 会淹没真正的业务日志
+        logger.trace("收到 MeshFrame: type=0x{}, from={}, bodyLen={}, remote={}",
                 Integer.toHexString(frame.getType() & 0xFF),
                 fromNodeId,
                 frame.getBodyLength(),
@@ -67,12 +67,13 @@ public class MeshBusHandler extends SimpleChannelInboundHandler<MeshFrame> {
 
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
-        logger.info("Mesh 总线连接建立: remote={}", formatRemoteAddress(ctx));
+        // 连接生命周期降为 debug（MeshBusClient 侧已有 info 级的连接/断开日志）
+        logger.debug("Mesh 总线连接建立: remote={}", formatRemoteAddress(ctx));
     }
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
-        logger.info("Mesh 总线连接断开: remote={}", formatRemoteAddress(ctx));
+        logger.debug("Mesh 总线连接断开: remote={}", formatRemoteAddress(ctx));
     }
 
     @Override

@@ -162,8 +162,8 @@ public class MeshConfigPersister {
                 Files.move(tmp, raftNodesFile, StandardCopyOption.REPLACE_EXISTING);
             }
 
-            if (logger.isDebugEnabled()) {
-                logger.debug("raft-nodes.conf 保存成功: term={}, votedFor={}, logTail={}, lastIncluded={}/{}",
+            if (logger.isTraceEnabled()) {
+                logger.trace("raft-nodes.conf 保存成功: term={}, votedFor={}, logTail={}, lastIncluded={}/{}",
                         state.currentTerm, state.votedFor, state.log.size(),
                         state.lastIncludedIndex, state.lastIncludedTerm);
             }

@@ -331,7 +331,7 @@ public class LogReplicator {
             return false;
         }
         state.commitIndex = candidate;
-        logger.debug("commitIndex 推进 → {} (term={})", candidate, state.currentTerm);
+        logger.trace("commitIndex 推进 → {} (term={})", candidate, state.currentTerm);
         return true;
     }
 

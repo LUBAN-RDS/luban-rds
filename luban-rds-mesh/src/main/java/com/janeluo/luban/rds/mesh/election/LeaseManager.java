@@ -84,7 +84,7 @@ public class LeaseManager {
         } finally {
             lock.unlock();
         }
-        logger.debug("租约续租: expireAt={}, duration={}ms", newExpire, leaseDurationMs);
+        logger.trace("租约续租: expireAt={}, duration={}ms", newExpire, leaseDurationMs);
     }
 
     /**
