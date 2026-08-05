@@ -358,6 +358,32 @@ class MeshClusterCommandsTest {
                 "busPort=0 时应用 port+10000：10.0.0.1:7000@17000，实际: " + line);
     }
 
+    // ==================== CLUSTER NODES 死节点标记（P2）====================
+
+    @Test
+    void clusterNodes_offlineNodeMarkedDisconnected() {
+        Map<String, MeshClusterCommands.NodeInfo> nodes = buildThreeNodes();
+        // node-C 离线
+        MeshClusterCommands cmd = new MeshClusterCommands(
+                () -> NODE_A, () -> "192.168.1.1:6379", nodes, NODE_A,
+                id -> !NODE_C.equals(id));
+        String s = new String(cmd.clusterNodes(), StandardCharsets.ISO_8859_1);
+        assertTrue(s.contains(NODE_C + " 192.168.1.3:6381@16381 slave " + NODE_A
+                        + " 0 0 1 disconnected"),
+                "离线节点 linkState 应为 disconnected: " + s);
+        assertTrue(s.contains("connected"), "在线节点仍应 connected");
+        // 主节点槽位输出不受影响
+        assertTrue(s.contains("0-16383"), "Leader 应仍持 0-16383");
+    }
+
+    @Test
+    void clusterNodes_defaultPredicateAllConnected() {
+        MeshClusterCommands cmd = withLeaderA(); // 旧构造器
+        String payload = extractBulkPayload(new String(cmd.clusterNodes(), StandardCharsets.ISO_8859_1));
+        assertEquals(3, payload.split("\n").length, "3 行节点");
+        assertTrue(!payload.contains("disconnected"), "旧构造器默认全部 connected");
+    }
+
     // ==================== CLUSTER INFO ====================
 
     @Test
