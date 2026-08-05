@@ -210,12 +210,12 @@ public class MeshConfigPersister {
      *
      * <p><b>分支</b>（幂等，synchronized 串行）：
      * <ol>
-     *   <li>lastIncludedIndex 变化（快照截断）→ 重写 WAL 为 log（丢弃 ≤ 边界陈旧条目）；</li>
-     *   <li>log 为空 → WAL 清空（已空则跳过）；</li>
-     *   <li>log 末条 index &lt; lastPersistedIndex（纯截断）→ 重写 WAL（去除陈旧条目）；</li>
-     *   <li>log 首条 index &gt; lastPersistedIndex+1（间隙，防御）→ 重写 WAL；</li>
-     *   <li>frontier 条目任期 ≠ 上次落盘任期（截断+重追加）→ 重写 WAL（去除被替换的陈旧条目）；</li>
-     *   <li>常态 → 仅追加 index &gt; lastPersistedIndex 的条目 + fsync（O(1)）。</li>
+     *   <li>分支 1：lastIncludedIndex 变化（快照截断）→ 重写 WAL 为 log（丢弃 ≤ 边界陈旧条目）；</li>
+     *   <li>分支 2：log 为空 → WAL 清空（已空则跳过）；</li>
+     *   <li>分支 3：log 末条 index &lt; lastPersistedIndex（纯截断）→ 重写 WAL（去除陈旧条目）；</li>
+     *   <li>分支 4：log 首条 index &gt; lastPersistedIndex+1（间隙，防御）→ 重写 WAL；</li>
+     *   <li>分支 5'：frontier 条目任期 ≠ 上次落盘任期（截断+重追加）→ 重写 WAL（去除被替换的陈旧条目）；</li>
+     *   <li>分支 6：常态 → 仅追加 index &gt; lastPersistedIndex 的条目 + fsync（O(1)）。</li>
      * </ol>
      * <b>任期对比（分支 5'）正确性</b>：Raft 截断只在 localTerm ≠ entry.term 时触发 → 被替换的
      * frontier 条目任期必与旧持久化不同 → 任期对比精确识别「截断+重追加」；幂等重 save 与纯追加的
@@ -475,7 +475,7 @@ public class MeshConfigPersister {
      *   <li>WAL 存在 → logTail = WAL 中 index &gt; lastIncludedIndex 的条目（过滤陈旧条目，多余者 warn）；
      *       旧格式 conf.logTail 同时存在时以 WAL 为准。</li>
      *   <li>WAL 缺失且 conf 有旧格式 logTail → 用之并<b>立即迁移</b>（写 WAL + 重写 conf 去 logTail）。</li>
-     *   <li>WAL 最后一行无换行结尾且解析失败（崩溃半行）→ 物理截断到该行起点 + warn；
+     *   <li>WAL 最后一段无换行结尾（完整 JSON 与否，从未 ACK）→ 物理截断到该段起点 + warn；
      *       中间行损坏 → 抛 {@link MeshConfigParseException}（不静默丢弃）。</li>
      * </ul>
      * 对齐 lastPersistedIndex / lastHeader，供后续 save 增量。</p>
@@ -552,8 +552,9 @@ public class MeshConfigPersister {
 
     /**
      * 解析 WAL 全部行到 state.log（writeLock 内追加）。
-     * <p>最后一行无换行结尾且解析失败 → 物理截断到该行起点（崩溃半行，从未 ACK，Raft 复制自愈）；
-     * 中间行损坏 → 抛异常。过滤 index &lt;= lastIncludedIndex 的陈旧条目（conf-first 崩溃态，warn 记录）。</p>
+     * <p>末尾一段无换行结尾（完整 JSON 与否）一律按未确认截断到该段起点——serializeEntry 恒以 '\n'
+     * 结尾且 save 成功时 force 已刷入，无 '\n' 必为从未 ACK 的写入（I1b）；中间行损坏 → 抛异常。
+     * 过滤 index &lt;= lastIncludedIndex 的陈旧条目（conf-first 崩溃态，warn 记录）。</p>
      */
     private void loadWalInto(MeshState state) throws IOException {
         byte[] bytes = Files.readAllBytes(raftLogFile);
@@ -571,6 +572,14 @@ public class MeshConfigPersister {
                 boolean hasNl = nl >= 0;
                 int lineEnd = hasNl ? nl : text.length();
                 String line = text.substring(pos, lineEnd);
+                if (!hasNl) {
+                    // 无换行结尾的末行：从未确认（serializeEntry 恒以 '\n' 结尾且 save 成功时 force 已刷入），
+                    // 与 truncateBrokenWalTail 保持一致语义：无 '\n' ⇒ 未确认 ⇒ 截断。
+                    // （此前仅解析失败才截断——完整 JSON 但无 '\n' 的行会被保留，下次 save 又会被截掉 → WAL 空洞）
+                    truncateWalTo(pos);
+                    logger.warn("raft-nodes.log 末尾无换行结尾（从未确认），已截断: {}", raftLogFile);
+                    break;
+                }
                 if (!line.isEmpty()) {
                     try {
                         LogEntry entry = parseWalLine(line);
@@ -580,19 +589,11 @@ public class MeshConfigPersister {
                             state.log.add(entry);
                         }
                     } catch (MeshConfigParseException e) {
-                        if (hasNl) {
-                            throw new MeshConfigParseException(
-                                    "raft-nodes.log 第 " + (lineNo + 1) + " 行 JSON 损坏: "
-                                            + raftLogFile, e);
-                        }
-                        // 无换行结尾的末行解析失败 → 半行截断
-                        truncateWalTo(pos);
-                        logger.warn("raft-nodes.log 末尾半行已截断（该条目从未 ACK）: {}", raftLogFile);
-                        break;
+                        // 中间行损坏 → 抛异常（无换行分支已在上方守卫处理，此处必为中间行）
+                        throw new MeshConfigParseException(
+                                "raft-nodes.log 第 " + (lineNo + 1) + " 行 JSON 损坏: "
+                                        + raftLogFile, e);
                     }
-                }
-                if (!hasNl) {
-                    break;
                 }
                 pos = nl + 1;
                 lineNo++;

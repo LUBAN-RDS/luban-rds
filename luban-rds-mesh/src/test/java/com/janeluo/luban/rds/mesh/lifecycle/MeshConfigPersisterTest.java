@@ -241,6 +241,22 @@ class MeshConfigPersisterTest {
         assertEquals(2L, loaded.log.get(1).getIndex());
     }
 
+    @Test
+    void load_walCompleteLineNoNewline_truncatedAsUnconfirmed() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        state.appendEntry(new LogEntry(1L, 1L, respFrame("SET", "a", "1"), 0, null));
+        persister.save(state, NODE_ID);
+        // 模拟崩溃：完整 JSON 行但无换行结尾（从未 ACK）
+        String fullLine = Files.readAllLines(persister.getRaftLogFile(), StandardCharsets.UTF_8).get(0);
+        Files.write(persister.getRaftLogFile(),
+                (fullLine + "\n" + fullLine.replace("\"index\":1", "\"index\":2")).getBytes(StandardCharsets.UTF_8));
+
+        MeshState loaded = persister.load(NODE_ID);
+        assertEquals(1, loaded.log.size(), "无换行结尾的完整 JSON 末行也应按未确认截断");
+        assertEquals(1L, loaded.log.get(0).getIndex());
+    }
+
     // ==================== 文件不存在 → null ====================
 
     @Test
