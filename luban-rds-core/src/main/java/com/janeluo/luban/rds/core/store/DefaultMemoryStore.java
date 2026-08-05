@@ -4411,4 +4411,107 @@ public class DefaultMemoryStore implements MemoryStore {
     public int getKeySlot(String key) {
         return SlotUtils.getSlot(key);
     }
+
+    // ==================== OnHeapStructEngine 钩子（T3.3）====================
+    // 以下 protected 方法供 OnHeapStructEngine（extends 本类）实现 StoreEngine 回调时调用。
+    // 因 StoreValue / DatabaseStore.storage 均为 private，通过 StoreEngineCand 桥接类
+    // 避免私有内部结构泄露给子类。
+
+    /**
+     * 供 OnHeapStructEngine 调用的淘汰采样钩子。
+     *
+     * <p>随机抽样至多 n 个候选：跳过已过期键；当 policy 为 volatile-* 时只返回设置了 TTL 的 key。
+     * 复用与 OffHeapStringEngine 一致的 volatileOnly 判定，保持跨引擎淘汰语义统一。
+     *
+     * @param database 数据库索引
+     * @param policy   淘汰策略（取值见 POLICY_* 常量）
+     * @param n        采样上限
+     * @return 桥接候选列表（不含已过期条目）
+     */
+    protected List<StoreEngineCand> sampleForEvictionOnHeap(int database, String policy, int n) {
+        if (n <= 0) {
+            return Collections.emptyList();
+        }
+        boolean volatileOnly = POLICY_VOLATILE_LRU.equals(policy)
+                || POLICY_VOLATILE_RANDOM.equals(policy)
+                || POLICY_VOLATILE_TTL.equals(policy);
+
+        DatabaseStore ds = databaseStores.get(database);
+        if (ds == null || ds.storage.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<String> keys = new ArrayList<>(ds.storage.keySet());
+        Collections.shuffle(keys);
+
+        List<StoreEngineCand> result = new ArrayList<>();
+        int picked = 0;
+        for (String k : keys) {
+            if (picked >= n) {
+                break;
+            }
+            StoreValue sv = ds.storage.get(k);
+            if (sv == null || sv.isExpired()) {
+                continue;
+            }
+            if (volatileOnly && !sv.hasExpireTime()) {
+                continue;
+            }
+            Long expire = sv.getExpireTime(); // 可能为 null（NO_EXPIRE）
+            result.add(new StoreEngineCand(k, sv.getLastAccessTime(), expire == null ? 0L : expire));
+            picked++;
+        }
+        return result;
+    }
+
+    /**
+     * 供 OnHeapStructEngine 调用的过期扫描钩子。
+     *
+     * <p>随机抽样至多 budget 个 key，删除其中已过期的（懒过期）。返回实际删除数。
+     *
+     * @param database 数据库索引
+     * @param budget   本轮扫描预算（最多检查/删除的键数上限）
+     * @return 实际删除的过期键数量
+     */
+    protected int expireBatchOnHeap(int database, int budget) {
+        if (budget <= 0) {
+            return 0;
+        }
+        DatabaseStore ds = databaseStores.get(database);
+        if (ds == null || ds.storage.isEmpty()) {
+            return 0;
+        }
+
+        List<String> keys = new ArrayList<>(ds.storage.keySet());
+        Collections.shuffle(keys);
+
+        int removed = 0;
+        for (String k : keys) {
+            if (removed >= budget) {
+                break;
+            }
+            StoreValue sv = ds.storage.get(k);
+            if (sv != null && sv.isExpired()) {
+                del(database, k);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    /**
+     * 淘汰候选桥接数据载体（避免 StoreValue 私有内部类泄露给子类）。
+     * 由 {@link #sampleForEvictionOnHeap} 产出，OnHeapStructEngine 再转换为 {@link EvictionCandidate}。
+     */
+    protected static final class StoreEngineCand {
+        final String key;
+        final long lastAccessTime;
+        final long expireTime;
+
+        StoreEngineCand(String key, long lastAccessTime, long expireTime) {
+            this.key = key;
+            this.lastAccessTime = lastAccessTime;
+            this.expireTime = expireTime;
+        }
+    }
 }
