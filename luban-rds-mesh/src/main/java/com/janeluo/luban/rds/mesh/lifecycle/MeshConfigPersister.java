@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -99,6 +100,9 @@ public class MeshConfigPersister {
 
     /** 上次已落盘的 log 末条 index（-1=未知，需 initFromWal；volatile 供快照线程可见）。 */
     private volatile long lastPersistedIndex = -1L;
+
+    /** 上次已落盘的 log 末条 term（log 空时为 lastIncludedTerm；-1=未知，需 initFromWal；volatile 供快照线程可见）。 */
+    private volatile long lastPersistedTerm = -1L;
 
     /** 上次已落盘的头部快照（用于检测 term/votedFor/lastIncluded 变化）。 */
     private volatile HeaderSnapshot lastHeader;
@@ -204,14 +208,18 @@ public class MeshConfigPersister {
     /**
      * 持久化 {@link MeshState}（WAL 增量 + 纯头部 conf）。
      *
-     * <p><b>四分支</b>（幂等，synchronized 串行）：
+     * <p><b>分支</b>（幂等，synchronized 串行）：
      * <ol>
      *   <li>lastIncludedIndex 变化（快照截断）→ 重写 WAL 为 log（丢弃 ≤ 边界陈旧条目）；</li>
      *   <li>log 为空 → WAL 清空（已空则跳过）；</li>
-     *   <li>log 末条 index &lt; lastPersistedIndex（冲突截断 truncateAfter）→ 重写 WAL（去除陈旧条目）；</li>
+     *   <li>log 末条 index &lt; lastPersistedIndex（纯截断）→ 重写 WAL（去除陈旧条目）；</li>
      *   <li>log 首条 index &gt; lastPersistedIndex+1（间隙，防御）→ 重写 WAL；</li>
+     *   <li>frontier 条目任期 ≠ 上次落盘任期（截断+重追加）→ 重写 WAL（去除被替换的陈旧条目）；</li>
      *   <li>常态 → 仅追加 index &gt; lastPersistedIndex 的条目 + fsync（O(1)）。</li>
      * </ol>
+     * <b>任期对比（分支 5'）正确性</b>：Raft 截断只在 localTerm ≠ entry.term 时触发 → 被替换的
+     * frontier 条目任期必与旧持久化不同 → 任期对比精确识别「截断+重追加」；幂等重 save 与纯追加的
+     * frontier 任期不变 → 仍走 O(1) 追加；纯截断（log.last &lt; lastPersistedIndex）由分支 3 覆盖。
      * <b>conf-first</b>：头部（term/votedFor/lastIncluded）变化时先写纯头部 conf，再改 WAL——
      * WAL 追加失败不会留下「已追加但未确认」的条目（propose 失败 truncateAfter 后磁盘与内存一致）。</p>
      *
@@ -222,7 +230,7 @@ public class MeshConfigPersister {
         if (state == null) {
             throw new IllegalArgumentException("state 不能为 null");
         }
-        // readLock 内拷贝：头部字段 + log 切片（防遍历期间并发 append/truncate）
+        // readLock 内拷贝 log 切片（防遍历期间并发 append/truncate）；头部字段为 volatile 标量，锁外读无撕裂
         long term = state.currentTerm;
         String votedFor = state.votedFor;
         long lastIncludedIndex = state.lastIncludedIndex;
@@ -237,7 +245,7 @@ public class MeshConfigPersister {
 
         synchronized (persistLock) {
             if (lastPersistedIndex < 0) {
-                initFromWal(lastIncludedIndex);
+                initFromWal(lastIncludedIndex, lastIncludedTerm);
             }
             HeaderSnapshot prev = lastHeader;
             boolean headerChanged = prev == null
@@ -257,14 +265,19 @@ public class MeshConfigPersister {
             } else if (log.isEmpty()) {
                 rewriteWal(log, lastIncludedIndex);                       // 分支 2：清空
             } else if (log.get(log.size() - 1).getIndex() < lastPersistedIndex) {
-                rewriteWal(log, lastIncludedIndex);                       // 分支 3：冲突截断
+                rewriteWal(log, lastIncludedIndex);                       // 分支 3：纯截断
             } else if (log.get(0).getIndex() > lastPersistedIndex + 1) {
                 rewriteWal(log, lastIncludedIndex);                       // 分支 4：间隙（防御）
+            } else if (lastPersistedTerm >= 0
+                    && lastPersistedIndex > lastIncludedIndex
+                    && log.get((int) (lastPersistedIndex - lastIncludedIndex - 1)).getTerm() != lastPersistedTerm) {
+                rewriteWal(log, lastIncludedIndex);                       // 分支 5'：截断+重追加（frontier 任期发散）
             } else {
-                appendWalEntries(log, lastPersistedIndex);                // 分支 5：常态 O(1)
+                appendWalEntries(log, lastPersistedIndex);                // 分支 6：常态 O(1)
             }
 
             lastPersistedIndex = log.isEmpty() ? lastIncludedIndex : log.get(log.size() - 1).getIndex();
+            lastPersistedTerm = log.isEmpty() ? lastIncludedTerm : log.get(log.size() - 1).getTerm();
             lastHeader = new HeaderSnapshot(term, votedFor, lastIncludedIndex, lastIncludedTerm);
         }
     }
@@ -274,7 +287,9 @@ public class MeshConfigPersister {
     /**
      * 常态增量追加：把 log 中 index &gt; fromIndex 的条目逐行追加到 WAL 末尾并 fsync。
      * <p>追加路径每次 open/append/force/close（Windows 开销 µs 级，远小于全量序列化；见 DESIGN §6 优化项）。
-     * force(true) 同时刷数据 + 文件大小元数据（尾部追加改变 EOF）。</p>
+     * force(true) 同时刷数据 + 文件大小元数据（尾部追加改变 EOF）。
+     * 追加前先校验文件末字节：上次追加中断残留的断行（无换行结尾）先截断，避免断行被接续成中间行、
+     * 下次启动 load 因中间行损坏硬失败（I1）。</p>
      */
     private void appendWalEntries(List<LogEntry> log, long fromIndex) throws IOException {
         List<LogEntry> toAppend = new ArrayList<>();
@@ -290,6 +305,8 @@ public class MeshConfigPersister {
         if (parent != null) {
             Files.createDirectories(parent);
         }
+        // 断行修复：上次追加中断可能残留无换行结尾的断行 → 先截断（否则断行被接续成中间行，load 硬失败）
+        truncateBrokenWalTail();
         try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(
                 raftLogFile, StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE)) {
             for (LogEntry e : toAppend) {
@@ -304,8 +321,53 @@ public class MeshConfigPersister {
     }
 
     /**
+     * 修复 WAL 末尾断行（上次追加中断留下的无换行结尾字节）。
+     * <p>断行从未被确认（追加失败即 save 抛异常、propose 回滚），追加前先物理截断到最后一个
+     * '\n' 之后（全文无 '\n' 则清空），避免断行被下一次追加接续成中间行、下次启动 load 硬失败。
+     * 末字节为 '\n' 时 O(1) 返回（无断行）。</p>
+     *
+     * @return true=实际截断了断行
+     */
+    private boolean truncateBrokenWalTail() throws IOException {
+        if (!Files.exists(raftLogFile) || Files.size(raftLogFile) == 0) {
+            return false;
+        }
+        try (RandomAccessFile raf = new RandomAccessFile(raftLogFile.toFile(), "rw")) {
+            long size = raf.length();
+            raf.seek(size - 1);
+            if (raf.read() == '\n') {
+                return false;
+            }
+            // 从尾部向前找最后一个 '\n'（断行至多一行长；分块扫描防御极端情况）
+            long cut = size;
+            byte[] chunk = new byte[4096];
+            while (cut > 0) {
+                long start = Math.max(0, cut - chunk.length);
+                int len = (int) (cut - start);
+                raf.seek(start);
+                raf.readFully(chunk, 0, len);
+                for (int i = len - 1; i >= 0; i--) {
+                    if (chunk[i] == '\n') {
+                        cut = start + i + 1; // 保留该 '\n'，断行起点在它之后
+                        raf.setLength(cut);
+                        raf.getFD().sync();
+                        logger.warn("raft-nodes.log 末尾断行已截断（该条目从未确认）: {}", raftLogFile);
+                        return true;
+                    }
+                }
+                cut = start;
+            }
+            // 全文无 '\n'（整个文件都是断行）→ 清空
+            raf.setLength(0);
+            raf.getFD().sync();
+            logger.warn("raft-nodes.log 全文为断行，已清空（该条目从未确认）: {}", raftLogFile);
+            return true;
+        }
+    }
+
+    /**
      * 全量重写 WAL（快照截断/冲突截断/防御分支）：tmp + fsync + ATOMIC_MOVE（复用 conf 原子写模式）。
-     * <p>log 为空且文件已不存在或已为空时返回 false（无需重写，调用方据此不标记 walRewritten）。</p>
+     * <p>log 为空且文件已不存在或已为空时返回 false（避免无意义重写）。</p>
      *
      * @return true=实际重写了文件
      */
@@ -347,12 +409,13 @@ public class MeshConfigPersister {
     }
 
     /**
-     * 首次 save 对齐：扫 WAL 取已落盘末条 index（文件缺失/空 → lastIncludedIndex）。
+     * 首次 save 对齐：扫 WAL 取已落盘末条 index 与其 term（文件缺失/空 → lastIncludedIndex/lastIncludedTerm）。
      * <p>正常路径 load() 已对齐；本方法仅防御「未 load 直接 save」（测试直构 persister 场景）。
-     * 损坏行忽略（只读 index 字段，不中断）。</p>
+     * 损坏行忽略（只读 index/term 字段，不中断）。</p>
      */
-    private void initFromWal(long lastIncludedIndex) throws IOException {
+    private void initFromWal(long lastIncludedIndex, long lastIncludedTerm) throws IOException {
         long maxIndex = lastIncludedIndex;
+        long maxTerm = lastIncludedTerm;
         if (Files.exists(raftLogFile)) {
             byte[] bytes = Files.readAllBytes(raftLogFile);
             if (bytes.length > 0) {
@@ -364,7 +427,11 @@ public class MeshConfigPersister {
                     try {
                         JsonNode n = mapper.readTree(line);
                         if (n != null && n.isObject() && n.has("index")) {
-                            maxIndex = Math.max(maxIndex, n.get("index").asLong());
+                            long idx = n.get("index").asLong();
+                            if (idx >= maxIndex) {
+                                maxIndex = idx;
+                                maxTerm = n.has("term") ? n.get("term").asLong() : maxTerm;
+                            }
                         }
                     } catch (IOException e) {
                         // 损坏行忽略（防御路径）
@@ -373,6 +440,7 @@ public class MeshConfigPersister {
             }
         }
         lastPersistedIndex = maxIndex;
+        lastPersistedTerm = maxTerm;
     }
 
     /** 单条 LogEntry → 一行 JSON（payload/extra base64；extra 为 null 写 null，行格式统一）。 */
@@ -474,6 +542,8 @@ public class MeshConfigPersister {
         synchronized (persistLock) {
             this.lastPersistedIndex = state.log.isEmpty()
                     ? state.lastIncludedIndex : state.log.get(state.log.size() - 1).getIndex();
+            this.lastPersistedTerm = state.log.isEmpty()
+                    ? state.lastIncludedTerm : state.log.get(state.log.size() - 1).getTerm();
             this.lastHeader = new HeaderSnapshot(state.currentTerm, state.votedFor,
                     state.lastIncludedIndex, state.lastIncludedTerm);
         }
@@ -556,7 +626,10 @@ public class MeshConfigPersister {
         return new LogEntry(term, index, payload, dbIndex, extra);
     }
 
-    /** 物理截断 WAL 到指定字节偏移（半行清理）。 */
+    /**
+     * 物理截断 WAL 到指定字节偏移（半行清理）。
+     * <p>前提：WAL 内容全 ASCII（JSON 数字 + base64），String 字符偏移 == 字节偏移。</p>
+     */
     private void truncateWalTo(int byteOffset) throws IOException {
         try (java.nio.channels.FileChannel channel =
                      java.nio.channels.FileChannel.open(raftLogFile, StandardOpenOption.WRITE)) {

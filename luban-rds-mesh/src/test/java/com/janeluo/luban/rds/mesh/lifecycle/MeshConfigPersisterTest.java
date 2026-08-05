@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.Comparator;
 import java.util.List;
 
@@ -193,6 +194,51 @@ class MeshConfigPersisterTest {
         assertNotNull(loaded);
         assertEquals(9L, loaded.currentTerm, "二次 save 应覆盖第一次");
         assertEquals("b", loaded.votedFor);
+    }
+
+    // ==================== 冲突截断+重追加 / 断行恢复（WAL 正确性回归）====================
+
+    @Test
+    void save_conflictTruncateAndReappend_rewritesWalNoStaleEntries() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        for (long i = 1; i <= 5; i++) {
+            state.appendEntry(new LogEntry(1L, i, respFrame("SET", "k" + i, "v"), 0, null));
+        }
+        persister.save(state, NODE_ID);
+        // 模拟 decideAppendEntries 冲突修复：截断(3) + 新任期重追加 4',5',6'
+        state.truncateAfter(3L);
+        state.currentTerm = 2L;
+        state.appendEntry(new LogEntry(2L, 4L, respFrame("SET", "n4", "v"), 0, null));
+        state.appendEntry(new LogEntry(2L, 5L, respFrame("SET", "n5", "v"), 0, null));
+        state.appendEntry(new LogEntry(2L, 6L, respFrame("SET", "n6", "v"), 0, null));
+        persister.save(state, NODE_ID);
+
+        MeshState loaded = persister.load(NODE_ID);
+        assertEquals(6, loaded.log.size());
+        assertEquals(2L, loaded.log.get(3).getTerm(), "index 4 应为新任期（无陈旧 term1 残留）");
+        assertEquals(2L, loaded.log.get(4).getTerm(), "index 5 应为新任期");
+        assertEquals(2L, loaded.log.get(5).getTerm(), "index 6 应为新任期");
+    }
+
+    @Test
+    void save_afterBrokenWalTail_recoversAndAppends() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        state.appendEntry(new LogEntry(1L, 1L, respFrame("SET", "a", "1"), 0, null));
+        persister.save(state, NODE_ID);
+        // 模拟追加中途 IO 失败：WAL 尾部残留断行
+        Files.write(persister.getRaftLogFile(),
+                "{\"term\":1,\"index\":2,\"dbIndex\":0,\"payload\":\"AA".getBytes(StandardCharsets.UTF_8),
+                StandardOpenOption.APPEND);
+        // 下一次 save：应截断断行后追加，而非在断行后接续
+        state.appendEntry(new LogEntry(1L, 2L, respFrame("SET", "b", "2"), 0, null));
+        persister.save(state, NODE_ID);
+
+        MeshState loaded = persister.load(NODE_ID); // 不抛异常
+        assertEquals(2, loaded.log.size());
+        assertEquals(1L, loaded.log.get(0).getIndex());
+        assertEquals(2L, loaded.log.get(1).getIndex());
     }
 
     // ==================== 文件不存在 → null ====================
