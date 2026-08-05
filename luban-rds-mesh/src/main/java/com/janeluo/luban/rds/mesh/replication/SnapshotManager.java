@@ -334,7 +334,7 @@ public class SnapshotManager {
         //    必须在更新 lastIncludedIndex 之前调用（用旧 lastIncludedIndex 换算 list 索引）
         state.discardUpToInclusive(snapshotIndex);
 
-        // 4. 更新 lastIncludedIndex/Term（先 dump.rdb 后 lastIncluded，非原子；DESIGN §5.4）
+        // 4. 更新 lastIncludedIndex/Term（index → rdb → conf 顺序，非原子；DESIGN §5.4）
         state.lastIncludedIndex = snapshotIndex;
         state.lastIncludedTerm = snapshotTerm;
 
@@ -516,14 +516,14 @@ public class SnapshotManager {
                     sendSnapshotAck(fromNodeId, state.currentTerm, false, state.lastApplied);
                     return;
                 }
-                // 4a.0 先落盘 dump.rdb.index（fix：index 先于 rdb 写入，关闭「rdb 新 + index/conf 旧」信任误判窗口；
+                // 4a.1 先落盘 dump.rdb.index（fix：index 先于 rdb 写入，关闭「rdb 新 + index/conf 旧」信任误判窗口；
                 //     写失败 → ACK false 让 Leader 重发快照，绝不带着旧 index 继续）
                 if (!runDumpRdbIndexWriter(done.lastIncludedIndex)) {
                     logger.error("handleInstallSnapshot: dump.rdb.index 写入失败，中止快照安装");
                     sendSnapshotAck(fromNodeId, state.currentTerm, false, state.lastApplied);
                     return;
                 }
-                // 4a. 加载到内存 + 落盘 dump.rdb（RdbDataLoader 内部完成 copy 到 dump.rdb + load）
+                // 4a.2 加载到内存 + 落盘 dump.rdb（RdbDataLoader 内部完成 copy 到 dump.rdb + load）
                 boolean loaded = loadIncomingSnapshot(done.tempFile);
                 if (!loaded) {
                     logger.error("handleInstallSnapshot: 加载快照失败, 会话={}", sessionId);

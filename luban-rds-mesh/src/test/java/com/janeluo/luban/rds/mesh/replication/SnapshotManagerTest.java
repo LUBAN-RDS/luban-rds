@@ -9,6 +9,8 @@ import com.janeluo.luban.rds.mesh.bus.MeshFrame;
 import com.janeluo.luban.rds.mesh.bus.MessageType;
 import com.janeluo.luban.rds.mesh.core.LogEntry;
 import com.janeluo.luban.rds.mesh.core.MeshState;
+import com.janeluo.luban.rds.mesh.lifecycle.MeshConfigPersister;
+import com.janeluo.luban.rds.mesh.lifecycle.MeshStartupLoader;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesResponse;
 import com.janeluo.luban.rds.mesh.rpc.InstallSnapshotMessage;
 import com.janeluo.luban.rds.mesh.rpc.MeshRpcMessage;
@@ -20,14 +22,18 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.LongConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -43,6 +49,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li><b>周期快照</b>：log 达阈值触发 takePeriodicSnapshotIfNeeded，落盘 dump.rdb、截断 log、
  *       更新 lastIncludedIndex/Term。</li>
  *   <li><b>任期校验</b>：过期 term 的 INSTALL_SNAPSHOT 被拒绝（回 success=false）。</li>
+ *   <li><b>崩溃时序（index 先落盘修复）</b>：index 新 + conf 旧边界 → loader 判不可信（杜绝双 apply）；
+ *       dump.rdb.index 写失败 → 周期快照中止（dump.rdb 不落盘）/ INSTALL_SNAPSHOT 完成路径 ACK false。</li>
  * </ul>
  *
  * <p>使用真实 RdbPersistService + RdbSnapshotGenerator + RdbDataLoader（小数据集 + 临时目录），
@@ -52,6 +60,7 @@ class SnapshotManagerTest {
 
     private static final String LEADER = "nodeLeader";
     private static final String FOLLOWER = "nodeFollower";
+    private static final String NODE_ID = "nodeSnapshotCrashWindow";
     private static final String DATA_DIR = "./target/test-data/snapshot-mgr-test";
 
     private RdbPersistService persistService;
@@ -137,11 +146,17 @@ class SnapshotManagerTest {
 
     /** 构造一个 Follower 视角 SnapshotManager，并返回其内部 bus（可读取 ACK 帧）。 */
     private FollowerFixture newFollowerManager(MeshState state, MemoryStore rawStore, int chunkSize) {
+        return newFollowerManager(state, rawStore, chunkSize, null);
+    }
+
+    /** 同上，但可注入自定义 dumpRdbIndexWriter hook（测试 index 写失败路径）。 */
+    private FollowerFixture newFollowerManager(MeshState state, MemoryStore rawStore, int chunkSize,
+                                               LongConsumer dumpRdbIndexWriter) {
         RdbDataLoader loader = new RdbDataLoader(persistService, DATA_DIR);
         FollowerCaptureBus fbus = new FollowerCaptureBus();
         SnapshotManager mgr = new SnapshotManager(FOLLOWER, state, fbus, rawStore,
                 snapshotGenerator, loader, DATA_DIR, chunkSize,
-                SnapshotManager.DEFAULT_SNAPSHOT_LOG_THRESHOLD, null);
+                SnapshotManager.DEFAULT_SNAPSHOT_LOG_THRESHOLD, null, dumpRdbIndexWriter);
         return new FollowerFixture(mgr, fbus);
     }
 
@@ -415,6 +430,89 @@ class SnapshotManagerTest {
         assertFalse(triggered, "snapshotIndex <= lastIncluded 应跳过");
     }
 
+    // ==================== 崩溃时序（index 先落盘修复，Task 4）====================
+
+    @Test
+    void snapshotCrashWindow_indexNewerThanConf_loaderMarksUntrusted() throws Exception {
+        // 崩溃磁盘态（修复后 index 先落盘，d18c6a6）：
+        //   dump.rdb.index=新(3) 已先落盘、dump.rdb=新快照(3) 已写完、raft-nodes.conf=旧边界(0，conf 未更新)
+        //   → loader 比对 dump.rdb.index(3) != lastIncludedIndex(0) → 判不可信 → 全量追平，
+        //     杜绝「信任误判 → 载入新 rdb + 重放 (旧,新] 条目 → 双 apply」（INCR 等非幂等命令）
+        MeshState state = new MeshState();
+        state.currentTerm = 1L;
+        for (long i = 1; i <= 5; i++) {
+            state.appendEntry(new LogEntry(1L, i, respFrame("SET", "k" + i, "v"), 0, null));
+        }
+        MeshConfigPersister persister = new MeshConfigPersister(DATA_DIR);
+        persister.save(state, NODE_ID);
+
+        // 模拟崩溃前已完成的写入：新快照 rdb（边界 3）+ index=3 先落盘；conf 仍为旧边界 0
+        DefaultMemoryStore snapStore = new DefaultMemoryStore();
+        for (long i = 1; i <= 3; i++) {
+            snapStore.set(0, "k" + i, "v");
+        }
+        assertTrue(generateDumpRdb(snapStore).exists(), "dump.rdb（新快照）应已落盘");
+        persister.saveDumpRdbIndex(3L); // index 先落盘（新值 3），conf 仍为旧边界 0
+
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        LogApplier applier = new LogApplier(new DefaultCommandHandler(), rawStore);
+        MeshStartupLoader loader = new MeshStartupLoader(
+                persister, persistService, applier, rawStore, DATA_DIR);
+        MeshStartupLoader.StartupResult result = loader.load(NODE_ID);
+
+        assertFalse(result.isTrusted, "index≠lastIncludedIndex 应判不可信，避免载入新快照后双 apply");
+        assertEquals(0L, result.replayedCount, "不可信时不应重放 logTail");
+        assertNull(rawStore.get(0, "k1"), "不可信时内存为空（不载入新 dump.rdb）");
+    }
+
+    @Test
+    void takePeriodicSnapshot_indexWriteFails_abortsBeforeWritingDumpRdb() {
+        MeshState state = new MeshState();
+        state.currentTerm = 3;
+        state.lastApplied = 5; // 快照到 index 5
+        for (int i = 1; i <= 5; i++) {
+            state.appendEntry(new LogEntry(3, i, new byte[]{(byte) i}, 0, null));
+        }
+        MemoryStore store = new DefaultMemoryStore();
+        store.set(0, "k1", "v1");
+
+        // dump.rdb.index 写入失败（模拟磁盘错误）→ 必须中止快照，dump.rdb 不得被写入
+        //（若继续写 rdb，index 仍为旧值 → 重启信任误判窗口复开）
+        SnapshotManager mgr = new SnapshotManager(LEADER, state, bus, store,
+                snapshotGenerator, new RdbDataLoader(persistService, DATA_DIR), DATA_DIR,
+                4096, 5, null,
+                idx -> { throw new IllegalStateException("simulated index write failure"); });
+
+        boolean triggered = mgr.takePeriodicSnapshotIfNeeded();
+        assertFalse(triggered, "dump.rdb.index 写失败应中止快照");
+
+        File dump = new File(DATA_DIR, "dump.rdb");
+        assertFalse(dump.exists(), "index 写失败时 dump.rdb 不得被写入");
+        assertEquals(0L, state.lastIncludedIndex, "lastIncludedIndex 不应推进");
+        assertEquals(5, state.log.size(), "log 不应被截断");
+    }
+
+    @Test
+    void handleInstallSnapshot_done_indexWriteFails_acksFalse() {
+        MeshState state = new MeshState();
+        state.currentTerm = 5;
+        MemoryStore store = new DefaultMemoryStore();
+        FollowerFixture ff = newFollowerManager(state, store, 1024,
+                idx -> { throw new IllegalStateException("simulated index write failure"); });
+
+        // done=true 完成路径：先落盘 dump.rdb.index 失败 → 中止安装、回 success=false（Leader 重发快照），
+        // 绝不带着旧 index 继续加载/应用快照
+        ff.mgr.handleInstallSnapshot(LEADER, new InstallSnapshotMessage(
+                6L, LEADER, 5L, 10L, 0L, new byte[0], true));
+
+        List<MeshFrame> acks = ff.bus.framesTo(LEADER);
+        assertFalse(acks.isEmpty(), "应回了 ACK");
+        AppendEntriesResponse ack = decodeAppendResp(acks.get(0));
+        assertFalse(ack.isSuccess(), "index 写失败应回 success=false");
+        assertEquals(0L, state.lastIncludedIndex, "快照不应被应用（lastIncluded 不变）");
+        assertNull(ff.mgr.getIncoming(), "失败后会话应被清理");
+    }
+
     // ==================== 工具 ====================
 
     private static InstallSnapshotMessage decodeSnapshot(MeshFrame f) {
@@ -426,5 +524,52 @@ class SnapshotManagerTest {
     private static AppendEntriesResponse decodeAppendResp(MeshFrame f) {
         MeshRpcMessage msg = MeshRpcMessage.decode(MessageType.fromCode(f.getType()), f.getBody());
         return (AppendEntriesResponse) msg;
+    }
+
+    /** 用 RdbSnapshotGenerator 生成 dump.rdb（模拟崩溃前已落盘的新快照）。 */
+    private File generateDumpRdb(MemoryStore source) {
+        File temp = snapshotGenerator.generateTempRdbFile(source);
+        if (temp == null || !temp.exists()) {
+            throw new IllegalStateException("生成 RDB 临时文件失败");
+        }
+        File target = new File(DATA_DIR, "dump.rdb");
+        if (target.exists() && !target.delete()) {
+            target.deleteOnExit();
+        }
+        if (!temp.renameTo(target)) {
+            // rename 失败时 copy
+            try {
+                copyFile(temp, target);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            temp.delete();
+        }
+        return target;
+    }
+
+    private void copyFile(File src, File dst) throws IOException {
+        try (java.io.FileInputStream fis = new java.io.FileInputStream(src);
+             java.io.FileOutputStream fos = new java.io.FileOutputStream(dst);
+             java.io.BufferedInputStream bis = new java.io.BufferedInputStream(fis);
+             java.io.BufferedOutputStream bos = new java.io.BufferedOutputStream(fos)) {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = bis.read(buf)) != -1) {
+                bos.write(buf, 0, n);
+            }
+        }
+    }
+
+    /** 构造一个完整 RESP 命令帧。 */
+    private static byte[] respFrame(String... parts) {
+        StringBuilder sb = new StringBuilder();
+        sb.append('*').append(parts.length).append("\r\n");
+        for (String p : parts) {
+            byte[] b = p.getBytes(StandardCharsets.ISO_8859_1);
+            sb.append('$').append(b.length).append("\r\n")
+                    .append(p).append("\r\n");
+        }
+        return sb.toString().getBytes(StandardCharsets.ISO_8859_1);
     }
 }
