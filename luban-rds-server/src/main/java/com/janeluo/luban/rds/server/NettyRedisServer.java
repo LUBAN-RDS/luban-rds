@@ -21,6 +21,7 @@ import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.context.ServerContext;
 import com.janeluo.luban.rds.core.handler.DefaultCommandHandler;
 import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
+import com.janeluo.luban.rds.core.store.HybridMemoryStore;
 import com.janeluo.luban.rds.core.store.MemoryStore;
 import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.persistence.PersistServiceFactory;
@@ -244,11 +245,18 @@ public class NettyRedisServer implements RedisServer {
         this.config = config;
         this.port = config.getPort();
         
-        // 使用配置创建内存存储，应用数据库数量、最大内存、淘汰策略等配置
-        this.memoryStore = new DefaultMemoryStore(
-                config.getDatabases(),
-                config.getMaxmemory(),
-                config.getMaxmemoryPolicy());
+        // 使用配置创建内存存储，按 memoryStoreKind 分发 Hybrid (堆外) 或 Default (堆上)
+        String kind = config.getMemoryStoreKind();
+        if (kind != null && "hybrid".equalsIgnoreCase(kind)) {
+            this.memoryStore = new HybridMemoryStore(config);
+            logger.info("使用 HybridMemoryStore (off-heap threshold={}B)", config.getOffheapThreshold());
+        } else {
+            this.memoryStore = new DefaultMemoryStore(
+                    config.getDatabases(),
+                    config.getMaxmemory(),
+                    config.getMaxmemoryPolicy());
+            logger.info("使用 DefaultMemoryStore (on-heap)");
+        }
         
         // 创建命令处理器，传入密码配置用于AUTH命令验证
         this.commandHandler = new DefaultCommandHandler(config.getRequirepass());
