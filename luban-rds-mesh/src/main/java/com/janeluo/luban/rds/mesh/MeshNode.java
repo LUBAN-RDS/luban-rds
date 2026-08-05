@@ -391,10 +391,10 @@ public class MeshNode {
             // 只携带 leaderNodeId（serviceAddr 留空），由 MeshClientRedirector 经
             // nodeIdToServiceAddr 映射解析真实 ip:port。此前用单参构造器把 nodeId 塞进
             // serviceAddr 字段，导致 MOVED 地址无端口 → Redisson "Redis url doesn't contain a port"。
-            // 写路径此时无 key（rawFrame 未解析），slot 由 redirector 取 0（无害，集群感知客户端
-            // 收到 MOVED 即刷新拓扑，slot 仅用于本地路由缓存更新）。
+            // 写路径从 RESP 帧提取真实 key（此前恒为 null → slot 0，与读路径 MOVED 的 slot 不一致；
+            // 集群感知客户端靠 slot 更新本地路由缓存，恒 0 会导致重定向风暴）。
             future.completeExceptionally(
-                    new MovedToLeaderException(state.leaderId, null, null));
+                    new MovedToLeaderException(state.leaderId, null, extractFirstKey(respPayload)));
             return;
         }
 
@@ -427,6 +427,103 @@ public class MeshNode {
 
         // 7. 单节点集群：无 peer，propose 后立即自检 commit + apply（future 由 onEntryApplied complete）
         //    （replicate 内部已处理单节点 case，这里无需重复）
+    }
+
+    /**
+     * 从完整 RESP 命令帧中提取第一个 key（args[1]，命令名后第一个参数）。
+     * <p>
+     * 仅解析数组头 + 前两个参数（{@code *N\r\n$len\r\nCMD\r\n$len\r\nkey\r\n}），
+     * 不持有帧、不做完整解析；供非 Leader 写路径生成 MOVED 的真实 slot 用
+     * （读路径已有 args[1] 口径一致）。事务帧（MULTI）取第一条子命令的 key——
+     * slot 只需合理近似。帧畸形/不可解析返回 {@code null}（回退 slot 0，不抛异常）。
+     * </p>
+     *
+     * @param respFrame 客户端原始 RESP 帧字节（propose 的 respPayload）
+     * @return 第一个 key；不可解析时为 {@code null}
+     */
+    private static String extractFirstKey(byte[] respFrame) {
+        if (respFrame == null || respFrame.length < 4) {
+            return null;
+        }
+        try {
+            int pos = 0;
+            // 数组头：*N\r\n
+            if (respFrame[pos++] != '*') {
+                return null;
+            }
+            while (pos < respFrame.length && respFrame[pos] != '\r') {
+                pos++;
+            }
+            if (pos + 1 >= respFrame.length || respFrame[pos + 1] != '\n') {
+                return null;
+            }
+            pos += 2;
+            // 第 1 个元素：命令名 bulk string
+            String cmd = parseBulkAt(respFrame, pos);
+            if (cmd == null) {
+                return null;
+            }
+            pos = bulkEnd(respFrame, pos);
+            // 第 2 个元素：key bulk string
+            return parseBulkAt(respFrame, pos);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 解析 pos 处的 bulk string（$len\r\n<data>），返回数据；非法返回 null。 */
+    private static String parseBulkAt(byte[] frame, int pos) {
+        if (pos >= frame.length || frame[pos] != '$') {
+            return null;
+        }
+        int i = pos + 1;
+        long len = 0;
+        boolean hasLen = false;
+        while (i < frame.length && frame[i] != '\r') {
+            char c = (char) (frame[i] & 0xFF);
+            if (c < '0' || c > '9') {
+                return null;
+            }
+            len = len * 10 + (c - '0');
+            hasLen = true;
+            i++;
+        }
+        if (!hasLen || i + 1 >= frame.length || frame[i + 1] != '\n') {
+            return null;
+        }
+        i += 2;
+        if (i + len > frame.length) {
+            return null;
+        }
+        return new String(frame, i, (int) len, java.nio.charset.StandardCharsets.ISO_8859_1);
+    }
+
+    /** 返回 pos 处 bulk string 之后的偏移（数据末尾 + CRLF）；非法返回原 pos。 */
+    private static int bulkEnd(byte[] frame, int pos) {
+        if (pos >= frame.length || frame[pos] != '$') {
+            return pos;
+        }
+        int i = pos + 1;
+        while (i < frame.length && frame[i] != '\r') {
+            i++;
+        }
+        if (i + 1 >= frame.length || frame[i + 1] != '\n') {
+            return pos;
+        }
+        i += 2;
+        long len = 0;
+        for (int j = pos + 1; j < i - 2; j++) {
+            char c = (char) (frame[j] & 0xFF);
+            if (c < '0' || c > '9') {
+                return pos;
+            }
+            len = len * 10 + (c - '0');
+        }
+        long end = i + len;
+        if (end + 2 > frame.length) {
+            return pos;
+        }
+        return (int) end + 2;
     }
 
     /**
