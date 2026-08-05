@@ -624,11 +624,49 @@ public interface MemoryStore {
     
     /**
      * Get memory statistics
-     * 
+     *
      * @return MemoryStats object containing memory usage information
      */
     MemoryStats getMemoryStats();
-    
+
+    // ===== 内存管理 admin 方法（S1：从 DefaultMemoryStore 专有提升到接口）=====
+
+    /**
+     * 最大内存上限（字节）。0 表示不限制。
+     */
+    long getMaxMemory();
+
+    /**
+     * 设置最大内存上限（字节）。0 表示不限制。
+     */
+    void setMaxMemory(long maxMemory);
+
+    /**
+     * 当前淘汰策略（noeviction / allkeys-lru / volatile-lru / allkeys-random /
+     * volatile-random / volatile-ttl）。
+     */
+    String getMaxMemoryPolicy();
+
+    /**
+     * 设置淘汰策略。
+     */
+    void setMaxMemoryPolicy(String policy);
+
+    /**
+     * 软限制百分比（0-100），超过时触发告警。
+     */
+    int getSoftLimitPercent();
+
+    /**
+     * 是否已超过软限制。
+     */
+    boolean isSoftLimitExceeded();
+
+    /**
+     * 最大 db 数量。
+     */
+    int getMaxDatabases();
+
     // ==================== Stream 操作接口 ====================
     
     /**

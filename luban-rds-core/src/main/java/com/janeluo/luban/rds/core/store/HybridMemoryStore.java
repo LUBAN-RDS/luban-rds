@@ -730,6 +730,49 @@ public class HybridMemoryStore implements MemoryStore {
         return onheap.getKeySlot(key);
     }
 
+    // ==================== 内存管理 admin 方法（S1：接口提升）====================
+
+    @Override
+    public long getMaxMemory() {
+        return onheap.getMaxMemory();
+    }
+
+    @Override
+    public void setMaxMemory(long maxMemory) {
+        onheap.setMaxMemory(maxMemory);
+    }
+
+    @Override
+    public String getMaxMemoryPolicy() {
+        return onheap.getMaxMemoryPolicy();
+    }
+
+    @Override
+    public void setMaxMemoryPolicy(String policy) {
+        onheap.setMaxMemoryPolicy(policy);
+    }
+
+    @Override
+    public int getSoftLimitPercent() {
+        return onheap.getSoftLimitPercent();
+    }
+
+    @Override
+    public boolean isSoftLimitExceeded() {
+        long max = getMaxMemory();
+        if (max <= 0) {
+            return false;
+        }
+        // 聚合两引擎 usedMemory 与单引擎语义一致
+        long threshold = (max * getSoftLimitPercent()) / 100;
+        return getUsedMemory() >= threshold;
+    }
+
+    @Override
+    public int getMaxDatabases() {
+        return maxDatabases;
+    }
+
     // ==================== 生命周期 ====================
 
     public void close() {

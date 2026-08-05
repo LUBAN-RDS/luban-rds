@@ -383,10 +383,12 @@ public class DefaultMemoryStore implements MemoryStore {
     // 内存淘汰策略
     private String maxMemoryPolicy = POLICY_NOEVICTION;
     
+    @Override
     public String getMaxMemoryPolicy() {
         return maxMemoryPolicy;
     }
-    
+
+    @Override
     public void setMaxMemoryPolicy(String policy) {
         if (policy == null) return;
         switch (policy) {
@@ -428,6 +430,7 @@ public class DefaultMemoryStore implements MemoryStore {
     // 软阈值（百分比，0-100）
     private int softLimitPercent = 90;
     
+    @Override
     public int getSoftLimitPercent() {
         return softLimitPercent;
     }
@@ -438,6 +441,7 @@ public class DefaultMemoryStore implements MemoryStore {
         this.softLimitPercent = percent;
     }
     
+    @Override
     public boolean isSoftLimitExceeded() {
         if (maxMemory <= 0) return false;
         long threshold = (maxMemory * softLimitPercent) / 100;
@@ -519,6 +523,7 @@ public class DefaultMemoryStore implements MemoryStore {
     /**
      * 获取数据库数量限制
      */
+    @Override
     public int getMaxDatabases() {
         return maxDatabases;
     }
@@ -556,10 +561,12 @@ public class DefaultMemoryStore implements MemoryStore {
     /**
      * 获取最大内存限制
      */
+    @Override
     public long getMaxMemory() {
         return maxMemory;
     }
-    
+
+    @Override
     public void setMaxMemory(long maxMemory) {
         this.maxMemory = Math.max(0, maxMemory);
     }
