@@ -1,7 +1,7 @@
 ---
 title: 集群部署
-last_updated: 2026-07-30
-version: 1.0.10
+last_updated: 2026-08-05
+version: 1.0.15
 ---
 
 # 集群部署
@@ -9,6 +9,8 @@ version: 1.0.10
 本指南介绍如何部署、初始化、扩缩容和运维 Luban-RDS 集群模式（Redis Cluster 协议）。协议层组件、槽位算法与重定向语义参见 [功能架构 - Redis Cluster 集群](../architecture/features.md#17-redis-cluster-集群)；配置项参考参见 [配置指南 - 集群模式配置](./configuration.md#95-集群模式配置)。
 
 > **v1.0.3 新增**：Luban-RDS 自带 `redis-cli --cluster create` 兼容 CLI，可一键完成集群搭建，跳过下文的 `MEET` + `ADDSLOTS` 手动编排（详见 [§2.5 一键搭建集群](#25-一键搭建集群-v103)）。
+>
+> **v1.0.15 新增**：除 Redis Cluster 外，Luban-RDS 还提供 **3 节点 Raft 强一致 mesh 集群**作为替代方案——3 台机器替代 6 节点，强一致保证已确认写入不丢。详见 [§10 Mesh 集群部署](#10-mesh-集群部署-v1015) 与 [docs/mesh/setup.md](../mesh/setup.md)。
 
 ## 1. 前置要求
 
@@ -343,8 +345,120 @@ v1.0.4 起，`cluster-config-file`（默认 `nodes.conf`）由 `ClusterConfigPer
 - 控制 `cluster-node-timeout` 至少为 RTT × 3
 - 至少保证一个机房拥有多数主节点（≥ N/2 + 1）以避免脑裂
 
+## 10. Mesh 集群部署（v1.0.15+）
+
+Luban-RDS 自 v1.0.15 起提供 `luban-rds-mesh` 模块——**3 节点 Raft 强一致集群**，用 3 台机器替代 Redis Cluster 的 6 节点；写入需多数派 ACK + 落盘后才返回 OK，**已确认写入不丢**。本节给出速查，详细文档见 [docs/mesh/setup.md](../mesh/setup.md) 与 [docs/mesh/](../mesh/index.md)。
+
+### 10.1 与 Redis Cluster 的差异
+
+| 维度 | Redis Cluster（本文 1-9 节） | **Mesh（v1.0.15）** |
+|------|-----------------------------|----------------------|
+| 节点数 | 6+（3 主 3 从） | **3**（互为副本） |
+| 数据分布 | 16384 slot 分片 | 全量，无分片 |
+| 一致性 | 最终一致 | **强一致**（多数派 ACK + 落盘） |
+| 启动编排 | `redis-cli --cluster create` 或手动 MEET+ADDSLOTS | 三节点各自 `mesh-enabled` + `mesh-peers` 静态 meet |
+| 客户端接口 | `CLUSTER *` 全套 + `MOVED/ASK` | `CLUSTER SLOTS/NODES/INFO` + `MOVED/MESHDOWN` |
+| 互斥关系 | 与 mesh 互斥（启动校验） | 与 cluster 互斥（启动校验） |
+
+### 10.2 快速启动（3 节点示例）
+
+以 3 台机器 `10.0.0.1` / `10.0.0.2` / `10.0.0.3` 为例，各自 `servicePort = 6379`、`busPort = 11000`：
+
+```ini
+# 节点 A / B / C 共用的 luban-rds.conf
+mesh-enabled yes
+
+# peers 列表：nodeId@host:busPort 逗号分隔，含自身
+mesh-peers a1b2c3d4e5f60718293a4b5c6d7e8f900a1b2c3d@10.0.0.1:11000,\
+c3d4e5f60718293a4b5c6d7e8f900a1b2c3d4e5f6@10.0.0.2:11000,\
+e5f60718293a4b5c6d7e8f900a1b2c3d4e5f60718@10.0.0.3:11000
+
+# 本节点 nodeId（未配取 peers 首个；生产建议显式指定）
+mesh-self-node-id a1b2c3d4e5f60718293a4b5c6d7e8f900a1b2c3d
+
+mesh-bus-port 11000
+mesh-service-port 6379
+```
+
+或用 CLI 参数：
+
+```bash
+# 节点 A（10.0.0.1）
+java -jar luban-rds-bin.jar --port 6379 \
+  --mesh-enabled \
+  --mesh-peers "a1b2...@10.0.0.1:11000,c3d4...@10.0.0.2:11000,e5f6...@10.0.0.3:11000" \
+  --mesh-self-node-id a1b2c3d4e5f60718293a4b5c6d7e8f900a1b2c3d \
+  --mesh-bus-port 11000
+
+# 节点 B / C 类似，仅 --mesh-self-node-id 不同
+```
+
+### 10.3 客户端连接
+
+**集群感知客户端（JedisCluster / lettuce / Redisson）— 推荐**
+
+经 `CLUSTER SLOTS` 引导 + `MOVED` 自动跟随，**对客户端零侵入**：
+
+```java
+Set<HostAndPort> nodes = new HashSet<>();
+nodes.add(new HostAndPort("10.0.0.1", 6379));
+nodes.add(new HostAndPort("10.0.0.2", 6379));
+nodes.add(new HostAndPort("10.0.0.3", 6379));
+try (JedisCluster jedis = new JedisCluster(nodes)) {
+    jedis.set("foo", "bar");
+}
+```
+
+**普通客户端（new Jedis / redis-cli）**
+
+连到 Follower 时会收到 `MOVED`，需手动重连 Leader：
+
+```bash
+redis-cli -h 10.0.0.1 -p 6379 CLUSTER NODES   # 查谁是 Leader（myself,master 行）
+redis-cli -h <leader-host> -p 6379 SET foo bar
+```
+
+### 10.4 运维命令速查
+
+```bash
+redis-cli -p 6379 CLUSTER INFO
+# cluster_state:ok           # 有 Leader 时为 ok，选举中为 fail
+# cluster_known_nodes:3
+
+redis-cli -p 6379 CLUSTER NODES
+# <node-id> 10.0.0.1:6379@11000 myself,master ... connected   # 当前 Leader（linkState 恒 connected）
+# <node-id> 10.0.0.2:6379@11000 slave ... connected
+# <node-id> 10.0.0.3:6379@11000 slave ... connected
+
+redis-cli -p 6379 CLUSTER SLOTS
+# [[0, 16383, ["10.0.0.1", "6379", "a1b2..."]], [], []]       # 包含空 replicas 数组
+```
+
+错误响应：
+
+| 场景 | 响应 |
+|------|------|
+| 写打到 Follower | `-MOVED <slot> <leaderAddr>\r\n`（slot 为 key 的真实 CRC16） |
+| 选举中无 Leader | `-MESHDOWN The mesh cluster has no leader\r\n` |
+
+### 10.5 关键约束
+
+- **`mesh-enabled` 与 `cluster-enabled` 互斥**：同一进程只能启用其一
+- **BLOCK 命令禁用**：`BLPOP / BRPOP / BLMOVE / WAIT` v1 返回错误（Raft 化阻塞唤醒留待 v2）
+- **Lua 当写**：`EVAL / EVALSHA` 统一按写处理走 Raft 复制
+- **AOF 退役**：mesh 模式不写 AOF（Raft log 即 WAL）；dump.rdb 唯一写者 = `SnapshotManager`
+- **NTP 时钟**：Leader Lease 读依赖时钟；漂移过大需切 `mesh-read-consistency READ_INDEX`
+
+### 10.6 部署文档
+
+- [docs/mesh/setup.md](../mesh/setup.md)：完整快速上手（配置 / 启动 / 客户端 / 运维命令）
+- [docs/mesh/design.md](../mesh/design.md)：协议设计要点（拓扑、状态机、RPC、Lease、read-index、chunked snapshot）
+- [luban-rds-mesh/README.md](../../luban-rds-mesh/README.md)：模块入口
+- [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计
+
 ## 9. 下一步
 
 - [配置指南 - 集群模式配置](./configuration.md#95-集群模式配置)
 - [监控维护](./monitoring.md)
 - [故障排查](./troubleshooting.md)
+- [Mesh 集群部署 - 完整版](../mesh/setup.md)

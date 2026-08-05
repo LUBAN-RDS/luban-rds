@@ -19,12 +19,54 @@ v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P
 - [x] **C11 AOF rewrite 期间数据一致性**: 修复 AOF rewrite 与主写入并发时的子进程快照可能丢失最新写入的问题，引入追加双写与重写完成校验。
 - [x] **C12 ZSet 字典序比较修复**: 修正 `ZRANGEBYLEX` / `ZRANGEBYSCORE` 中对同分数成员的字典序比较逻辑，使其与 Redis 7.x 行为一致。
 
-### 2.1 v1.0.10 已发布功能（当前最新）
+### 2.1 v1.0.15 已发布功能（当前最新 · 2026-08-05）
+
+#### 🛰️ 分布式特性 - 3 节点 Raft 强一致集群（luban-rds-mesh）
+- [x] **luban-rds-mesh 模块（v1.0.15）**: 13 阶段全闭环实现（项目骨架 → MeshBus 传输层 → 状态机/RPC → 选举+PreVote+Lease → 日志复制 → MeshWriteGate → MOVED/MESHDOWN → Leader 读路径 Lease+read-index → CLUSTER SLOTS/NODES/INFO → MULTI 单条目+BLOCK 禁用 → chunked snapshot → 持久化/启动加载 → MeshBootstrap 装配 → 3 节点集成测试）；291 测试全过
+- [x] **mesh 13 项 hotfix（v1.0.15 内）**: nodeId 编码 40B 补齐 / 总线消息消费者注册 / PreVote timer reset / MOVED 地址带端口 / 自重定向死循环 / 选举退避 / CLUSTER SLOTS replicas 空数组 / 非 Leader MOVED 真实 key / CLUSTER NODES 死节点 disconnected / myself linkState 恒 connected / 日志降频 等
+- [x] **`mesh-*` 配置项与 CLI 参数**: `mesh-enabled` / `mesh-peers` / `mesh-self-node-id` / `mesh-bus-port` / `mesh-service-port` / 选举超时 / 心跳 / Lease / 读一致性模式 / snapshot 阈值
+- [x] **客户端零侵入**: JedisCluster / lettuce / Redisson 经 `CLUSTER SLOTS` 引导 + `MOVED` 自动跟随
+
+#### ⚡ 性能基准测试（luban-rds-benchmark）
+- [x] **Mesh 基准套件（v1.0.15）**: `MeshBenchmarkSuite` + `MeshScaleBenchmark`（节点规模）+ `MeshFailoverBenchmark`（failover 收敛）+ `MeshVsSingleGet/Set` + `RedisVsMeshBenchmark`（与 Redis 7.0.12 对比基线）
+- [x] **HTML/Markdown 报告输出**: `ReportGenerator` + `HtmlReportBuilder` + `MarkdownReportBuilder` 自动产出可分享报告
+- [x] **Cluster 基准套件（既有）**: `ClusterBenchmarkSuite` + `ClusterVsSingleGet/Set` + `ClusterScale` + `RedirectOverhead`
+- [x] **单节点基准（既有）**: `LubanBenchmarkMain` 提供 set/get/incr/lpush/lrange/hset/hget/sadd 等 12 类基准，CLI 丰富参数
+
+### 2.2 v1.0.14 已发布功能
+
+#### 🛡️ 核心特性 - Lua 脚本只读性分析器
+- [x] **LuaScriptAnalyzer (v1.0.14)**: 脚本级只读判定，扫描 `redis.call` / `redis.pcall` 调用识别写命令
+- [x] **从节点行为修正 (v1.0.14)**: `EVAL` / `EVALSHA` 仅当脚本判定为只读时按读命令处理（可路由从节点）；否则按写命令走 Raft 复制（消除 Redisson 等客户端的 `READONLY` 报错）
+- [x] **零回归**: 仅修改 slave 路径，master / 集群感知客户端零变化
+
+### 2.3 v1.0.13 已发布功能
+
+#### 🛡️ 分布式特性 - 集群 R2 审计修复批 1-6（N-1 ~ N-40）
+- [x] **协议面 (v1.0.13)**: MYSELF 守卫 / XREAD 键提取 / 事务路由 / destDb 透传 / zset+stream 序列化 / 位图上限
+- [x] **协议码与子命令 (v1.0.13)**: 消息码 0x40+ / vars 段+真实时间戳 / 迁移方括号 / CLUSTER 8 子命令补齐 / 错误串英文化
+- [x] **failover 深化 (v1.0.13)**: N-11 重试冷却 / N-12 votesCast 清理 / N-9 伪造防护 / N-13 降级收窄 / N-14 投票者持槽+voted_time / N-15 候选纪元裁决
+- [x] **运维可观测 (v1.0.13)**: N-26 状态单公式 / N-27/28 save 竞态+fsync / N-37 总线端口 / N-38 帧上限 / N-39/40 连接治理 / INFO·NODES 补全
+- 🧪 cluster 全套件 536 测试全绿
+
+### 2.4 v1.0.12 已发布功能
+
+#### 🛡️ 分布式特性 - 集群审计修复批 1-6（P0×4 + P1×24）
+- [x] **P0 数据安全 (v1.0.12)**: MYSELF replOffset 恒 0 致自动 failover 失效 / 手动 failover 写冻结自动恢复 / MIGRATE 复制分叉
+- [x] **双 master 根因收敛 (v1.0.12)**: onFailoverResult 消除 winner slots 双写路径 / processGossipNodes 角色切换立即对齐 slot 所有权 / syncSlotsFromNode 相等 epoch 行为回归保护
+- [x] **P1 闭环 (v1.0.12)**: N-24 / N-1 / P1-4 / N-25 / N-7 等
+
+### 2.5 v1.0.11 已发布功能
+
+#### 🛡️ 分布式特性 - 集群 FAIL 保护期
+- [x] **FAIL 状态保护期 (v1.0.11)**: failover 期间维护 `FAIL` 状态保护窗口，避免 PFAIL 抢先清除致选举被取消；归档为 `fix-fail-state-cleared-prematurely`
+
+### 2.6 v1.0.10 已发布功能
 
 #### 分布式特性 - 集群持久化并发安全
 - [x] **修复并发保存 `nodes.conf` 的竞态条件 (v1.0.10)**: `ClusterConfigPersister` 对拓扑变更与周期 `clusterSaveConfigIfNeeded` 共路径场景下的并发刷盘加锁与串行化，避免半写文件与状态丢失
 
-### 2.2 v1.0.9 已发布功能
+### 2.7 v1.0.9 已发布功能
 
 #### 分布式特性 - 复制 / 持久化补遗
 - [x] **C2 PSYNC / REPLCONF 链路 (v1.0.9)**: 激活 PSYNC 响应路由，REPLCONF 顺序等待 + 超时，握手失败原因日志输出，重新启用 `ReplicationIntegrationTest`
@@ -35,7 +77,7 @@ v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P
 - [x] **C10 RDB TTL 持久化 (v1.0.9)**: 补齐 RDB TTL 编码（`0xFD`）
 - [x] **持久化代码清理 (v1.0.9)**: 移除 `parseAndExecuteCommand` / `parseRespArray` 等死代码
 
-### 2.3 v1.0.8 已发布功能
+### 2.8 v1.0.8 已发布功能
 
 #### 分布式特性 - 集群高可用与运维友好
 - [x] **集群配置持久化与节点状态恢复 (v1.0.4 起，沿用至 v1.0.10)**:
@@ -47,7 +89,7 @@ v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P
   - 兼容旧版含 `fail` 标志的 `nodes.conf`，平滑升级
 - [x] **移除 FAIL/PFAIL 状态持久化 (v1.0.4 起)**: 运行时瞬时状态不应写入 `nodes.conf`，避免重启后误判节点状态
 
-### 2.4 v1.0.3 已发布功能
+### 2.9 v1.0.3 已发布功能
 
 #### 分布式特性 - 集群兼容性与可靠性
 - [x] **集群一键搭建 CLI (v1.0.3)**: `RedisCliMain` 对齐 `redis-cli --cluster create`，支持 `--cluster-replicas N`、`verbose` 静默模式与 Java 程序化调用 (`ClusterSetupCommand.createCluster(...)`)
@@ -65,14 +107,14 @@ v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P
 - [x] **非集群模式跳过 CLUSTER 拦截 (v1.0.2)**: 行为更明确，便于排查
 - [x] **集群调试日志降级 (v1.0.2)**: Gossip 调试日志调整为 `TRACE` 级，降低生产环境开销
 
-### 2.5 v1.0.1 已发布功能
+### 2.10 v1.0.1 已发布功能
 
 #### 分布式特性
 - [x] **Redis Cluster 集群**: 完整实现 Redis Cluster 协议，支持 16384 槽位、MOVED/ASK 重定向、Gossip 心跳。
 - [x] **主从复制**: 完整支持全量同步和增量同步，复制积压缓冲区。
 - [x] **哨兵模式**: 实现哨兵模式核心功能。
 
-### 2.6 v1.0.0 已发布功能
+### 2.11 v1.0.0 已发布功能
 
 #### 核心功能
 - [x] **Redis 协议 (RESP) 支持**: 完整的请求解析与响应编码，支持 RESP2 和 RESP3 协议协商。
@@ -123,10 +165,6 @@ v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P
 - [x] **Docker Compose**: 提供完整的 Docker Compose 配置，支持一键部署。
 - [x] **Kubernetes 部署**: 提供完整的 Kubernetes 部署清单，包括 Deployment、Service、ConfigMap 等。
 
-### 2.5 v1.0.1-SNAPSHOT 新增功能（已合并到 v1.0.1 发布）
-
-> 该节保留为历史变更说明，详情见上文 `2.3 v1.0.1 已发布功能`。
-
 ### 2.6 正在开发的功能 (In Progress)
 
 #### 安全特性
@@ -134,6 +172,10 @@ v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P
   - 已实现：`ACLManager`、`ACLCommandHandler`、`ACLPermissionChecker`，支持 `ACL WHOAMI`、`ACL LIST`、`ACL CAT`、`ACL GETUSER`、`ACL SETUSER`（子集）等基础命令与命令级/Key 模式级权限校验
   - 未完成：`ACL LOAD`、`ACL SAVE`、`ACL LOG` 等持久化与审计能力
 - [ ] **传输加密 (TLS/SSL)**: 支持 SSL/TLS 加密连接，保障数据传输安全。
+
+#### Mesh 集群深化（v2 规划）
+- [ ] **Raft 化阻塞唤醒**: `BLPOP / BRPOP / BLMOVE / WAIT` 等 v1 禁用的命令在 v2 实现（基于 Raft log 同步唤醒）
+- [ ] **多机房脑裂优化**: 进一步加固 NTP 漂移容忍度，提供 read-index 自动退化
 
 ### 2.7 计划中的功能 (Planned)
 

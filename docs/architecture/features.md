@@ -671,3 +671,151 @@ f6e5d4c3b2a1 192.168.8.161:9739@19739 master - 0 1234567890 2 connected
 - [设计决策](./design.md)：了解重要设计选择的理由和权衡
 - [部署指南](../deployment/)：学习如何部署和配置 Luban-RDS
 - [使用指南](../guide/)：学习如何使用 Luban-RDS 的各项功能
+
+---
+
+## 21. Mesh 集群（luban-rds-mesh）
+
+`luban-rds-mesh` 是 v1.0.15 引入的 **3 节点 Raft 强一致集群模块**，用 3 台机器（3 节点互为副本）替代 Redis Cluster 的 6 节点（3 主 3 从），任一时刻只有 1 个 Leader 处理写入，写入需经多数派（2/3）ACK + 落盘后才返回 OK，**已确认的写入永不丢失**。
+
+> 完整协议设计见 [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2；本节给出与现有 cluster 模块并列的能力视图。
+
+### 21.1 核心卖点（vs Redis Cluster）
+
+| 维度 | Redis Cluster（17 节） | **Mesh（本模块）** |
+|------|----------------------|----------------|
+| 机器数 | 6+（3 主 3 从） | **3**（互为副本，成本减半） |
+| 数据分片 | 16384 Slot 分片 | 全量数据，无分片 |
+| 一致性 | 最终一致（异步复制） | **强一致**（多数派 ACK + 落盘） |
+| Leader 切换丢数据 | 可能丢未复制的写入 | **不会**（未 commit 的写入不返回 OK） |
+| 客户端兼容 | Cluster aware 客户端 | **JedisCluster / lettuce / Redisson 零侵入**（经 `CLUSTER SLOTS` 引导 + `MOVED` 自动跟随）；普通客户端（Jedis 单机 / redis-cli）需连 Leader 或自行处理 `-MOVED` |
+
+### 21.2 子包结构
+
+mesh 模块的源码位于 `luban-rds-mesh/src/main/java/com/janeluo/luban/rds/mesh/`，按职责拆分为 8 个子包：
+
+| 子包 | 主要类 | 职责 |
+|------|--------|------|
+| (根) | `MeshNode`, `MeshConfig` | 节点入口与配置聚合 |
+| `bus/` | `MeshBusCodec`, `MeshBusClient`, `MeshBusServer`, `MeshFrame`, `MessageType` | MeshBus 传输层（Netty 私有协议，独立端口 = servicePort + 11000） |
+| `core/` | `LogEntry`, `RaftStateMachine`, `MeshRole`, `MeshState`, `FileBasedPersistentStateStore` | Raft 日志条目、状态机、角色 / 状态枚举、持久化状态存储 |
+| `election/` | `ElectionTimer`, `LeaseManager`, `VoteCollector` | 选举（PreVote 防 term 膨胀）+ Lease 心跳租约 + 投票收集 |
+| `gateway/` | `MeshWriteGate` | handler 级读写分流门面（写打 Follower 时抛 `-MOVED`） |
+| `lifecycle/` | `MeshBootstrap`, `MeshAssembly`, `MeshConfigPersister`, `MeshStartupLoader`, `MeshLifecycleListener` | 装配入口、与 `NettyRedisServer` 集成、配置持久化、启动加载 |
+| `replication/` | `LogApplier`, `LogReplicator`, `SnapshotManager`, `TransactionPayload` | 日志应用、多数派复制、chunked snapshot、事务载荷封装 |
+| `rpc/` | `AppendEntriesMessage`, `AppendEntriesResponse`, `RequestVoteMessage`, `RequestVoteResponse`, `InstallSnapshotMessage`, `MeshRpcMessage` | 5 类 RPC 消息（AppendEntries / 响应 / RequestVote / 响应 / InstallSnapshot） |
+| `client/` | `MeshClientRedirector`, `MeshClusterCommands`, `MovedToLeaderException`, `LeaseInvalidException` | 客户端重定向、`CLUSTER` 命令实现、异常类型 |
+
+### 21.3 关键流程
+
+#### 选举（PreVote + Lease）
+
+- **Follower → Candidate**：选举超时（默认 150~300ms 随机化）后转 Candidate
+- **PreVote 探测**：先发送 `RequestVote` 探测多数派响应，**不增 term**（防 term 膨胀）；预投通过后才正式增 term 并发起 `RequestVote`
+- **多数派 → Leader**：获得 2/3 投票转 Leader，开始接收客户端写入
+- **Leader Lease**：每 100ms 发送心跳续租；默认租约时长 ≈ 2 × electionTimeout（600ms）；租约有效期内本地读，超时退化 read-index
+
+> 详细规则与 RPC 字段见 [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) §三 §四。
+
+#### 日志复制
+
+- Leader 收到客户端写命令后封装为 `LogEntry`（含 `term` / `index` / `payload` / `clientRequestId`）
+- 通过 `AppendEntriesMessage` 向所有 Follower 并行复制（带心跳 / 探测）
+- 多数派 ACK + 本地落盘后 `commit`，由 `LogApplier` 顺序应用到状态机并返回客户端 OK
+- 未 commit 的写入在 Leader 切换时丢弃（保证已确认写入不丢）
+
+#### 读写分流（MeshWriteGate + MeshClientRedirector）
+
+- **写**：MeshWriteGate 检查当前角色
+  - Leader：本地提交 → 走日志复制
+  - Follower / Candidate：抛 `-MOVED <slot> <leaderAddr>`，集群感知客户端自动跟随
+  - 无 Leader（选举中）：返回 `-MESHDOWN The mesh cluster has no leader`，客户端退避重试
+- **读**：默认 Leader Lease 内本地读；租约失效退化 read-index（确认 Leader 仍是当前多数派的最新 Leader 后再读）
+
+#### CLUSTER 命令（单主视图）
+
+| 命令 | 行为 |
+|------|------|
+| `CLUSTER INFO` | `cluster_state:ok`（有 Leader 时）/ `fail`（选举中），`cluster_known_nodes:3` |
+| `CLUSTER NODES` | 3 行；`myself,master` 为当前 Leader（`linkState` 恒 `connected`），其余 2 行为 `slave`；离线节点标记 `disconnected` |
+| `CLUSTER SLOTS` | `[[0, 16383, ["<leader>", <port>, "<leader-id>"]], [], []]`（含空 `replicas` 数组，兼容严格解析器） |
+
+#### 持久化（chunked snapshot + dump.rdb）
+
+- **Raft log 即 WAL**：所有写入首先入日志
+- **dump.rdb 即快照**：每 `mesh-snapshot-log-threshold`（默认 100000）条日志由 `SnapshotManager` 触发，**chunked** 拆块传输给 Follower
+- **AOF 退役**：mesh 模式**不写 AOF**（避免与 Raft log 双写）；RDB 文件唯一写者 = `SnapshotManager`
+- **启动加载**：先加载最新 dump.rdb，再 replay Raft log 中 snapshot index 之后的条目
+
+### 21.4 MOVED / MESHDOWN 语义
+
+| 场景 | 响应 | 含义 |
+|------|------|------|
+| 写打到 Follower（已知 Leader） | `-MOVED <slot> <leaderServiceAddr>\r\n` | `slot` 为 key 的真实 CRC16；集群感知客户端自动跟随 |
+| 选举中（无 Leader） | `-MESHDOWN The mesh cluster has no leader\r\n` | 客户端应退避重试 |
+
+> `MOVED` 中的 slot 用 key 的真实 CRC16（非占位值），部分客户端依赖它更新本地路由缓存。
+
+### 21.5 关键约束
+
+| 约束 | 说明 |
+|------|------|
+| **NTP 时钟对齐** | Leader Lease 读依赖时钟（租约时长内本地读）；节点间时钟漂移过大需切 `mesh-read-consistency READ_INDEX` |
+| **BLOCK 命令禁用** | `BLPOP / BRPOP / BLMOVE / WAIT` 等 v1 返回错误（Raft 化阻塞唤醒留待 v2） |
+| **Lua 脚本当写** | `EVAL / EVALSHA` 统一按写处理（走 Raft 复制），即使脚本内只有读命令 |
+| **cluster / mesh 互斥** | 同一进程只能启用其一（`mesh-enabled` 与 `cluster-enabled` 启动时校验） |
+| **AOF 退役** | mesh 模式不写 AOF——Raft log 即 WAL、dump.rdb 即快照 |
+| **dump.rdb 唯一写者** | mesh 模式禁用 server 原 RDB save（BGSAVE），dump.rdb 唯一写者 = SnapshotManager |
+
+### 21.6 测试覆盖
+
+| 阶段 | 测试内容 | 测试数（累计） |
+|------|----------|--------|
+| 1 | MeshBusCodec 编解码 | 10 |
+| 2 | LogEntry / 5 种 RPC 序列化 | 34 |
+| 3 | 选举 / 租约 / PreVote | 106 |
+| 4 | LogApplier / LogReplicator | 149 |
+| 5 | MeshWriteGate（读写分流 / MOVED） | 168 |
+| 6 | MeshClientRedirector（MOVED/MESHDOWN） | 183 |
+| 7 | 读路径（Leader Lease / read-index） | 195 |
+| 8 | CLUSTER SLOTS/NODES/INFO | 221 |
+| 9 | MULTI/EXEC 事务 / BLOCK 禁用 | 243 |
+| 10 | chunked snapshot | 252 |
+| 11 | 持久化 / 启动加载 | 278 |
+| 12 | 装配（MeshBootstrap） | 286 |
+| **13** | **3 节点集成测试（真实选举 + 多数派写 + 一致性）** | **291** |
+
+阶段 13 的 `ThreeNodeIntegrationTest` 用内存路由总线连接 3 个真实 `MeshNode`，验证：选举出唯一 Leader → Leader 写 SET 经多数派确认 → 3 节点最终一致。
+
+> **3 进程集成测试 / 故障注入**（kill leader、网络分区、时钟偏移）需真实多进程环境，留作手动验证（见 DESIGN §十「测试策略」）。单元 + 内存集成测试已覆盖协议正确性主线。
+
+### 21.7 适用场景
+
+| 场景 | 推荐度 |
+|------|--------|
+| 中小规模生产部署（数据 < 100GB） | 强烈推荐 |
+| 金融 / 订单等强一致需求 | 强烈推荐 |
+| 跨机房容灾（3 机房各 1 节点） | 推荐 |
+| 超大规模数据（> 500GB） | 一般（建议 Redis Cluster 分片） |
+| 频繁动态扩缩容 | 一般（固定 3 节点静态 meet；建议 Redis Cluster） |
+
+### 21.8 与 cluster 模块的边界
+
+| 维度 | cluster（17 节） | mesh（21 节） |
+|------|------------------|---------------|
+| 拓扑 | 3+ 主，可加从 | 固定 3 节点，互为副本 |
+| 数据分布 | 16384 slot 分片 | 全量 |
+| 复制协议 | 异步 PSYNC | Raft 同步复制（多数派 ACK + 落盘） |
+| 一致性保证 | 最终一致 | 强一致（已确认写入不丢） |
+| 选举算法 | configEpoch + 多数派投票 | Raft term + PreVote + 多数派投票 |
+| 读路径 | 本地读 / replica-read | Leader Lease / read-index |
+| 持久化 | RDB + AOF | dump.rdb（chunked snapshot），**不写 AOF** |
+| 客户端接口 | `CLUSTER *` 全套 + `MOVED/ASK` | `CLUSTER SLOTS/NODES/INFO` + `MOVED/MESHDOWN` |
+
+### 21.9 下一步
+
+- [部署指南 - Mesh 集群](../mesh/setup.md)：3 节点配置与启动
+- [Mesh 协议设计要点](../mesh/design.md)：状态机、RPC、Lease、read-index 摘要
+- [luban-rds-mesh/README.md](../../luban-rds-mesh/README.md)：模块快速上手
+- [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2：完整协议设计
+- [luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](../../luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md) v1.2：13 阶段实施计划

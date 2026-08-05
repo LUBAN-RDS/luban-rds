@@ -1,7 +1,7 @@
 ---
 title: Luban-RDS 文档
-last_updated: 2026-07-30
-version: 1.0.10
+last_updated: 2026-08-05
+version: 1.0.15
 ---
 
 <div align="center">
@@ -69,11 +69,68 @@ version: 1.0.10
 
 ### 🛠️ 部署运维
 **[运维指南 →](./deployment/index.md)** — 生产环境部署与维护  
-[配置指南](./deployment/configuration.md) · [安装部署](./deployment/installation.md) · [监控维护](./deployment/monitoring.md) · [故障排查](./deployment/troubleshooting.md)
+[配置指南](./deployment/configuration.md) · [安装部署](./deployment/installation.md) · [集群部署](./deployment/cluster-setup.md) · [监控维护](./deployment/monitoring.md) · [故障排查](./deployment/troubleshooting.md)
+
+### 🛰️ Mesh 集群（v1.0.15+）
+**[3 节点 Raft 强一致 →](./mesh/index.md)** — 用 3 台机器替代 Redis Cluster 的 6 节点实现强一致高可用  
+[快速上手](./mesh/setup.md) · [协议设计要点](./mesh/design.md) · [模块完整文档](../luban-rds-mesh/README.md)
+
+### ⚡ 性能基准测试（v1.0.15+）
+**[benchmark 使用指南 →](./guide/benchmarking.md)** — 单节点 / Cluster / Mesh 三类基准套件 + Redis 7 对比  
+[LubanBenchmarkMain CLI](./guide/benchmarking.md#cli-参数) · [Mesh 基准套件](./guide/benchmarking.md#mesh-基准套件) · [报告输出](./guide/benchmarking.md#报告输出)
 
 ---
 
 ## ✨ 版本特性
+
+### v1.0.15 (已发布 · 2026-08-05)
+
+#### 🛰️ 3 节点 Raft 强一致集群（luban-rds-mesh）
+- ✅ **13 阶段全闭环实现**：MeshBus 传输层 → 状态机/RPC → 选举（PreVote + Lease）→ 日志复制 → MeshWriteGate → MOVED/MESHDOWN → Leader 读路径（Lease + read-index）→ `CLUSTER SLOTS/NODES/INFO` → MULTI 单条目 + BLOCK 禁用 → chunked snapshot → 持久化/启动加载 → MeshBootstrap 装配 → 3 节点集成测试
+- ✅ **291 测试全过**：含 3 节点真实选举 + 多数派写 + 一致性集成测试
+- ✅ **客户端零侵入**：JedisCluster / lettuce / Redisson 经 `CLUSTER SLOTS` 引导 + `MOVED` 自动跟随；普通客户端连 Leader 即可
+- ✅ **已确认写入不丢**：写入需多数派 ACK + 落盘后才返回 OK
+- 🔧 **v1.0.15 同步修复 13 项 hotfix**：nodeId 编码 40B 补齐、总线消息消费者注册、PreVote timer reset、MOVED 地址带端口、自重定向死循环、选举退避、`CLUSTER SLOTS` replicas 空数组、非 Leader MOVED 携带真实 key、`CLUSTER NODES` 死节点 disconnected 标记、myself 行 linkState 恒 connected、日志降频等
+
+#### ⚡ Mesh 全栈基准测试套件（luban-rds-benchmark）
+- ✅ **MeshBenchmarkSuite**：`MeshScaleBenchmark`（节点规模）、`MeshFailoverBenchmark`（failover 收敛）
+- ✅ **RedisVsMeshBenchmark**：与 Redis 7.0.12 同机对比基线
+- ✅ **HTML / Markdown 报告输出**：`ReportGenerator` + `HtmlReportBuilder` + `MarkdownReportBuilder`
+
+#### 🔧 Mesh 部署与运维
+- ✅ **`mesh-*` 配置项**：`mesh-enabled` / `mesh-peers` / `mesh-self-node-id` / `mesh-bus-port` / `mesh-service-port` / 选举超时 / 心跳 / Lease / 读一致性模式 / snapshot 阈值
+- ✅ **CLI 参数**：`--mesh-enabled` / `--mesh-peers` / `--mesh-self-node-id` / `--mesh-bus-port`
+- ✅ **关键约束**：`mesh-enabled` 与 `cluster-enabled` 互斥；BLOCK 命令 v1 禁用；Lua/EVAL 当写；mesh 模式不写 AOF（Raft log 即 WAL）；dump.rdb 唯一写者 = SnapshotManager
+
+> 完整 mesh 文档：[luban-rds-mesh/README.md](../luban-rds-mesh/README.md) · [docs/mesh/](./mesh/index.md) · [luban-rds-mesh/docs/DESIGN.md](../luban-rds-mesh/docs/DESIGN.md) v1.2
+
+### v1.0.14 (已发布 · 2026-08-03)
+
+#### 🛡️ Lua 脚本只读性分析器
+- ✅ **`LuaScriptAnalyzer`** 脚本级只读判定：从节点 EVAL 不再误拒纯读脚本（Redisson 等客户端消除 `READONLY` 报错）
+- ✅ 仅改 slave 路径，master 行为零回归
+
+### v1.0.13 (已发布 · 2026-08-03)
+
+#### 🛡️ 集群 R2 审计修复批 1-6（N-1 ~ N-40）
+- ✅ **协议面**：MYSELF 守卫 / XREAD 键提取 / 事务路由 / destDb 透传 / zset+stream 序列化 / 位图上限
+- ✅ **协议码**：消息码从 0x40 起避免冲突（vars 段、真实时间戳、迁移方括号）
+- ✅ **CLUSTER 8 子命令补齐** + 错误串英文化（Redisson 等严格客户端零异常）
+- ✅ **failover 深化**：N-11 重试冷却 / N-12 votesCast 清理 / N-9 伪造防护 / N-13 降级收窄 / N-14 投票者持槽+voted_time / N-15 候选纪元裁决
+- ✅ **运维可观测**：N-26 状态单公式 / N-27/28 save 竞态+fsync / N-37 总线端口 / N-38 帧上限 / N-39/40 连接治理 / INFO·NODES 补全
+- 🧪 cluster 全套件 536 测试全绿
+
+### v1.0.12 (已发布 · 2026-08-03)
+
+#### 🛡️ 集群审计修复批 1-6（P0×4 + P1×24）
+- ✅ **P0 数据安全**：MYSELF replOffset 恒 0 致自动 failover 失效 / 手动 failover 写冻结 / `MIGRATE` 复制分叉全修
+- ✅ **双 master 根因收敛**：failover 后 `winner slots` 双写路径消除；角色切换时 `processGossipNodes` 立即对齐 slot 所有权
+- ✅ **N-24/N-1/P1-4/N-25/N-7 等 P1 闭环**
+
+### v1.0.11 (已发布 · 2026-08-03)
+
+#### 🛡️ 集群 FAIL 保护期
+- ✅ **failover FAIL 保护期**：维护 FAIL 状态保护窗口，避免 PFAIL 抢先清除；归档为 `fix-fail-state-cleared-prematurely`
 
 ### v1.0.10 (已发布 · 2026-07-30)
 

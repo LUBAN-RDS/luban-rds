@@ -64,10 +64,11 @@ title: 系统架构
 | **luban-rds-common** | 公共工具 | `Constants`, `Utils`, `RuntimeConfig`, `InfoProvider` |
 | **luban-rds-bin** | 启动和基准测试 | `RedisServerMain`, `PerformanceBenchmark` |
 | **luban-rds-spring-boot-starter** | Spring Boot 集成 | 自动配置类 |
-| **luban-rds-benchmark** | 性能测试 | 性能测试工具 |
+| **luban-rds-benchmark** | 性能基准测试 | `LubanBenchmarkMain`, `ClusterBenchmarkSuite`, `MeshBenchmarkSuite`, `RedisVsMeshBenchmark`, `ReportGenerator` |
 | **luban-rds-cluster** | 集群支持 | `ClusterNode`, `SlotManager`, `ClusterBusServer`, `GossipProtocol` |
 | **luban-rds-replication** | 主从复制 | `MasterReplicationManager`, `SlaveReplicationService`, `ReplicationBacklog` |
 | **luban-rds-sentinel** | 哨兵模式 | `SentinelManager`, `SentinelCommandHandler` |
+| **luban-rds-mesh** | 3 节点 Raft 强一致集群 | `MeshNode`, `MeshBootstrap`, `MeshBusCodec`, `LogReplicator`, `LeaseManager`, `MeshWriteGate`, `SnapshotManager` |
 
 ## 2. 数据流
 
@@ -530,6 +531,18 @@ Luban-RDS 提供哨兵模式实现自动故障转移：
 - **哨兵节点**：监控主从节点的健康状态
 - **故障检测**：检测主节点是否故障
 - **故障转移**：当主节点故障时，自动选择从节点提升为主节点
+
+### 17.3 Mesh 强一致集群（luban-rds-mesh，v1.0.15+）
+
+`luban-rds-mesh` 是与 cluster 并列的另一类高可用方案——**3 节点 Raft 强一致集群**，用 3 台机器替代 Redis Cluster 的 6 节点：
+
+- **强一致保证**：写入需经多数派（2/3）ACK + 落盘后才返回 OK，**已确认写入永不丢失**
+- **Raft 协议**：term + PreVote 防膨胀 + Lease 心跳租约 + read-index 退化路径
+- **chunked snapshot**：Raft log 防无界增长；dump.rdb 唯一写者 = SnapshotManager（mesh 模式不写 AOF）
+- **客户端零侵入**：JedisCluster / lettuce / Redisson 经 `CLUSTER SLOTS` 引导 + `MOVED` 自动跟随；普通客户端连 Leader 即可
+- **与 cluster 互斥**：`mesh-enabled` 与 `cluster-enabled` 启动时校验，同一进程只能启用其一
+
+详细协议设计、子包结构、关键流程与约束见 [功能架构 §21 Mesh 集群](./features.md#21-mesh-集群luban-rds-mesh) 与 [luban-rds-mesh/docs/DESIGN.md](../../luban-rds-mesh/docs/DESIGN.md) v1.2；部署见 [docs/mesh/setup.md](../mesh/setup.md)。
 
 ## 18. 部署架构
 

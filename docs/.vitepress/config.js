@@ -27,7 +27,15 @@ export default defineConfig({
           { text: '快速开始', link: '/guide/quickstart' },
           { text: '基础操作', link: '/guide/basic-usage' },
           { text: '高级功能', link: '/guide/advanced' },
-          { text: '使用示例', link: '/guide/examples' }
+          { text: '使用示例', link: '/guide/examples' },
+          { text: '性能基准测试', link: '/guide/benchmarking' }
+        ]
+      },
+      {
+        text: '集群方案',
+        items: [
+          { text: 'Redis Cluster 集群部署', link: '/deployment/cluster-setup' },
+          { text: 'Mesh 集群（3 节点 Raft）', link: '/mesh/index' }
         ]
       },
       {
@@ -64,7 +72,8 @@ export default defineConfig({
             { text: '快速开始', link: '/guide/quickstart' },
             { text: '基础操作', link: '/guide/basic-usage' },
             { text: '高级功能', link: '/guide/advanced' },
-            { text: '使用示例', link: '/guide/examples' }
+            { text: '使用示例', link: '/guide/examples' },
+            { text: '性能基准测试', link: '/guide/benchmarking' }
           ]
         }
       ],
@@ -100,6 +109,17 @@ export default defineConfig({
           ]
         }
       ],
+      '/mesh/': [
+        {
+          text: 'Mesh 集群（3 节点 Raft）',
+          collapsible: true,
+          items: [
+            { text: '模块概览', link: '/mesh/index' },
+            { text: '快速上手', link: '/mesh/setup' },
+            { text: '协议设计要点', link: '/mesh/design' }
+          ]
+        }
+      ],
       '/deployment/': [
         {
           text: '部署运维',
@@ -107,7 +127,7 @@ export default defineConfig({
           items: [
             { text: '安装部署', link: '/deployment/installation' },
             { text: '配置指南', link: '/deployment/configuration' },
-            { text: '集群部署', link: '/deployment/cluster-setup' },
+            { text: '集群部署（Redis Cluster）', link: '/deployment/cluster-setup' },
             { text: '监控维护', link: '/deployment/monitoring' },
             { text: '故障排查', link: '/deployment/troubleshooting' }
           ]

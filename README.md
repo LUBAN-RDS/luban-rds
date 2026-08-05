@@ -41,10 +41,12 @@ Luban-RDS 是一款完全兼容 Redis 协议的轻量级高性能内存数据库
 - **Stream 数据类型**：完整支持 Stream 相关命令（XADD、XLEN、XRANGE、XREVRANGE、XREAD、XGROUP、XREADGROUP 等）
 - **Redis Cluster 集群**：完整实现 Redis Cluster 协议，支持 16384 槽位分配、MOVED/ASK 重定向、Gossip 协议、故障检测
 - **集群一键搭建**：内置 `redis-cli --cluster create` 兼容的 CLI 工具 `RedisCliMain`，一行命令完成多节点集群创建与主从划分
-- **集群配置持久化与节点恢复（v1.0.4）**：`nodes.conf` 自动持久化、节点 ID 复用、槽位表重建、启动主动建连，避免全集群重启后节点成孤岛
+- **集群配置持久化与节点恢复（v1.0.4+）**：`nodes.conf` 自动持久化、节点 ID 复用、槽位表重建、启动主动建连，避免全集群重启后节点成孤岛
+- **集群审计加固（v1.0.11 ~ v1.0.13）**：连续 6 批 P0/P1 修复覆盖 failover FAIL 保护期、replOffset 回填、写冻结自动恢复、MIGRATE 复制传播、CLUSTER 子命令/协议面/错误串英文/消息码 0x40+ 等
 - **主从复制**：完整支持主从复制功能，包括全量同步和增量同步
-- **3 节点 Raft 强一致集群（mesh 模块）**：只需 3 台机器（替代 Redis Cluster 的 6 节点）即可实现强一致高可用，已确认写入不丢，`CLUSTER SLOTS` + `MOVED` 兼容 JedisCluster/lettuce 等集群感知客户端（详见 [luban-rds-mesh/README.md](luban-rds-mesh/README.md)）
+- **3 节点 Raft 强一致集群（mesh 模块，v1.0.15）**：用 3 台机器替代 Redis Cluster 的 6 节点实现强一致高可用（多数派 ACK + 落盘），已确认写入不丢；`CLUSTER SLOTS` + `MOVED` 兼容 JedisCluster / lettuce / Redisson 集群感知客户端，13 阶段全闭环 + 291 测试全过（详见 [luban-rds-mesh/README.md](luban-rds-mesh/README.md) 与 [docs/mesh/](docs/mesh/index.md)）
 - **健壮的网络层**：NETTY 客户端与服务端协议解析器均修复了 TCP 半包/粘包问题，能够正确处理跨段 RESP 响应与多响应合包
+- **内置性能基准测试（v1.0.15）**：`luban-rds-benchmark` 提供单节点、Cluster、Mesh 三类基准套件（`LubanBenchmarkMain` / `ClusterBenchmarkSuite` / `MeshBenchmarkSuite`），支持与 Redis 7.x 对比，并输出 HTML/Markdown 报告（详见 [docs/guide/benchmarking.md](docs/guide/benchmarking.md)）
 
 ## 🚀 快速开始
 
@@ -114,7 +116,7 @@ OK
 <dependency>
     <groupId>com.janeluo.luban</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.4</version>
+    <version>1.0.15</version>
 </dependency>
 ```
 
@@ -245,9 +247,27 @@ luban-rds/
 │       └── ReplicationBacklog.java        # 复制积压缓冲区
 ├── luban-rds-mesh/                # 3 节点 Raft 强一致集群模块（强一致、不丢已确认写入）
 │   ├── README.md                                # 模块快速上手（配置/启动/客户端/运维命令）
+│   ├── src/main/java/.../mesh/
+│   │   ├── MeshNode.java MeshConfig.java        # 节点 + 配置
+│   │   ├── bus/                                 # MeshBus 传输层（Codec/Client/Server/Frame）
+│   │   ├── core/                                # LogEntry / RaftStateMachine / MeshRole / MeshState
+│   │   ├── election/                            # ElectionTimer / LeaseManager / VoteCollector
+│   │   ├── gateway/                             # MeshWriteGate（读写分流 / MOVED）
+│   │   ├── lifecycle/                           # MeshBootstrap / MeshStartupLoader / MeshConfigPersister
+│   │   ├── replication/                         # LogApplier / LogReplicator / SnapshotManager（chunked snapshot）
+│   │   ├── rpc/                                 # 5 类 RPC：AppendEntries / RequestVote / InstallSnapshot ...
+│   │   └── client/                              # MeshClientRedirector / MeshClusterCommands
 │   └── docs/
 │       ├── DESIGN.md                            # 完整协议设计文档 v1.2
 │       └── IMPLEMENTATION_PLAN.md               # 13 阶段实施计划 v1.2
+├── luban-rds-benchmark/           # 性能测试模块（单节点 / Cluster / Mesh / Redis 对比）
+│   └── src/main/java/.../benchmark/
+│       ├── LubanBenchmarkMain.java              # CLI 入口（commons-cli）
+│       ├── api/                                 # Benchmark / BenchmarkConfig / BenchmarkResult
+│       ├── cases/                               # 单节点 12 类基准（Get/Set/Incr/ListPush/Hash/...）
+│       ├── cluster/                             # ClusterBenchmarkSuite + ClusterVsSingle* / ClusterScale / RedirectOverhead
+│       ├── mesh/                                # MeshBenchmarkSuite + MeshScale / MeshFailover / RedisVsMesh
+│       └── report/                              # ReportGenerator + HtmlReportBuilder + MarkdownReportBuilder
 ├── luban-rds-sentinel/            # 哨兵模块
 │   └── src/main/java/.../sentinel/
 │       ├── SentinelManager.java   # 哨兵管理器
@@ -322,6 +342,20 @@ luban-rds/
 
 ### 集群命令
 `CLUSTER INFO` `CLUSTER NODES` `CLUSTER MEET` `CLUSTER FORGET` `CLUSTER ADDSLOTS` `CLUSTER DELSLOTS` `CLUSTER SETSLOT` `CLUSTER KEYSLOT` `CLUSTER COUNTKEYSINSLOT` `CLUSTER GETKEYSINSLOT` `CLUSTER REPLICATE` `CLUSTER FAILOVER` `CLUSTER RESET` `CLUSTER SAVECONFIG` `CLUSTER SLAVES` `CLUSTER REPLICAS` `CLUSTER MYID` `CLUSTER SLOTS` `CLUSTER COUNTFAILUREREPORTS` `ASKING` `READONLY` `READWRITE`
+
+### Mesh 集群命令（3 节点 Raft 强一致，v1.0.15+）
+
+mesh 模式复用 `CLUSTER INFO` / `CLUSTER NODES` / `CLUSTER SLOTS` 三条命令（语义与 Redis Cluster 不同——全量数据单主视图），外加错误协议：
+
+| 命令 / 响应 | 说明 |
+|------|------|
+| `CLUSTER INFO` | `cluster_state:ok`（有 Leader 时）/ `fail`（选举中），`cluster_known_nodes:3` |
+| `CLUSTER NODES` | 3 行；`myself,master` 为当前 Leader（linkState 恒 `connected`），其余 2 行为 `slave` |
+| `CLUSTER SLOTS` | `[[0, 16383, ["<leader>", <port>, "<leader-id>"]]]`（含 `*0\r\n` replicas 数组，兼容严格解析器） |
+| `-MOVED <slot> <leaderAddr>` | 写打到 Follower 时携带**真实 key 的 CRC16 slot**；集群感知客户端自动跟随 |
+| `-MESHDOWN The mesh cluster has no leader` | 选举中无 Leader；客户端退避重试 |
+
+Mesh 模式与 Cluster 模式**互斥**（`mesh-enabled` 与 `cluster-enabled` 启动时校验）。完整协议见 [luban-rds-mesh/README.md](luban-rds-mesh/README.md) 与 [docs/mesh/](docs/mesh/index.md)。
 
 #### 集群一键搭建 CLI（v1.0.3+）
 
@@ -453,6 +487,25 @@ ClusterSetupCommand.createCluster(nodes, /*replicas*/ 1, /*verbose*/ false);
 | `cluster-announce-ip` | 对外宣布的 IP | `""` |
 | `cluster-announce-port` | 对外宣布的端口 | `0` |
 | `cluster-announce-bus-port` | 对外宣布的总线端口 | `0` |
+
+### Mesh 配置（与 `cluster-enabled` 互斥）
+
+| 配置项 | 描述 | 默认值 |
+|-------|------|--------|
+| `mesh-enabled` | 是否启用 mesh 模式 | `false` |
+| `mesh-peers` | peers 列表（`nodeId@host:busPort` 逗号分隔，含自身） | `""` |
+| `mesh-self-node-id` | 本节点 nodeId（未配取 peers 首个） | `""` |
+| `mesh-bus-port` | mesh 总线端口（0 = 按 peers 取） | `0` |
+| `mesh-service-port` | mesh service 端口（0 = 用全局 port；单机多实例必配） | `0` |
+| `mesh-election-timeout-min-ms` | 选举超时下限（随机化区间） | `150` |
+| `mesh-election-timeout-max-ms` | 选举超时上限 | `300` |
+| `mesh-heartbeat-interval-ms` | Leader 心跳周期 | `100` |
+| `mesh-lease-duration-ms` | 读租约时长（≈ 2 × electionTimeout） | `600` |
+| `mesh-read-consistency` | 读模式（`LEASE` / `READ_INDEX`） | `LEASE` |
+| `mesh-read-lease-wait-ms` | 租约失效时等待续租的上限 | `1000` |
+| `mesh-snapshot-log-threshold` | 每 N 条日志触发周期快照 | `100000` |
+
+CLI 等价：`--mesh-enabled`、`--mesh-peers`、`--mesh-self-node-id`、`--mesh-bus-port` 等（`java -jar luban-rds-bin.jar --help` 查看全集）。
 
 ### 复制配置
 
@@ -631,7 +684,7 @@ docker-compose down
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.4 .
+docker build -t luban-rds:1.0.15 .
 
 # 基础运行
 docker run -d \
@@ -641,7 +694,7 @@ docker run -d \
   -e LUBAN_RDS_PORT=9736 \
   -e LUBAN_RDS_PERSIST_MODE=rdb \
   -e JAVA_OPTS="-Xms256m -Xmx512m" \
-  luban-rds:1.0.4
+  luban-rds:1.0.15
 
 # 带密码运行
 docker run -d \
@@ -649,7 +702,7 @@ docker run -d \
   -p 9736:9736 \
   -v luban-rds-data:/data \
   -e LUBAN_RDS_REQUIREPASS=your-secure-password \
-  luban-rds:1.0.4
+  luban-rds:1.0.15
 ```
 
 #### Docker 环境变量
@@ -848,15 +901,42 @@ luban.rds.server.data-dir=./data
 | **主动建连** | 启动时主动 `MEET` 已知节点，避免全集群重启后节点成孤岛无法恢复 |
 | **版本兼容** | 解析 `nodes.conf` 时忽略 `fail` 标志，v1.0.0 ~ v1.0.3 已生成的配置文件可平滑升级 |
 
-### v1.0.5（开发中）
+### v1.0.11（已发布 · 2026-08-03）
 
 | 模块 | 详细说明 |
 |---------|---------|
-| **luban-rds-mesh** | 3 节点 Raft 强一致集群模块：3 台机器替代 Redis Cluster 的 6 节点，强一致（多数派 ACK + 落盘）、已确认写入不丢；`CLUSTER SLOTS/NODES/INFO` + `MOVED` 兼容 JedisCluster/lettuce 零侵入；Leader Lease 线性一致读；chunked snapshot 防日志无界增长。详见 [luban-rds-mesh/README.md](luban-rds-mesh/README.md) |
+| **集群 FAIL 保护期** | `e0289ce`：failover 期间维护 `FAIL` 状态保护窗口，避免 PFAIL 抢先清除；归档为 `fix-fail-state-cleared-prematurely` |
+
+### v1.0.12（已发布 · 2026-08-03）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **集群审计修复批 1-6（P0×4 + P1×24）** | `46fdb7d`：`MYSELF replOffset` 恒 0 致自动 failover 失效、手动 failover 写冻结、`MIGRATE` 复制分叉等 3 个 P0 修复；附 N-24/N-1/P1-4/N-25/N-7 等 P1 闭环 |
+| **双 master 根因收敛** | `0a1a23a` + `777f0c8`：failover 后 `winner slots` 双写路径消除，角色切换时 `processGossipNodes` 立即对齐 slot 所有权；`8fde4f8` 补相等 epoch 行为回归 |
+
+### v1.0.13（已发布 · 2026-08-03）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **集群 R2 审计修复批 1-6（N-1 ~ N-40）** | `7f57568`：连续 6 批覆盖 MYSELF 守卫 / XREAD 键提取 / 事务路由 / destDb 透传 / zset+stream 序列化 / 位图上限 / CLUSTER 8 子命令 / 错误串英文 / vars 段+真实时间戳+迁移方括号 / 消息码 0x40+ / failover 深化（N-11 重试冷却 / N-12 votesCast 清理 / N-9 伪造防护 / N-13 降级收窄 / N-14 投票者持槽+voted_time / N-15 候选纪元裁决）/ 状态单公式 / save 竞态+fsync / 总线端口 / 帧上限 / 连接治理 / INFO·NODES 补全；cluster 全套件 536 测试全绿 |
+
+### v1.0.14（已发布 · 2026-08-03）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **Lua 脚本只读性分析器** | `a602f1f`：新增 `LuaScriptAnalyzer` 脚本级只读判定；从节点 EVAL 不再误拒纯读脚本（Redisson 等客户端消除 `READONLY` 报错）；只改 slave 路径零回归 |
+
+### v1.0.15（已发布 · 2026-08-05）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **luban-rds-mesh（3 节点 Raft 强一致集群）** | `e44e2a2` ~ `643316e`：13 阶段全闭环实现（MeshBus 传输层 → 状态机/RPC → 选举+PreVote+Lease → 日志复制 → MeshWriteGate → MOVED/MESHDOWN → Leader 读路径 Lease+read-index → CLUSTER SLOTS/NODES/INFO → MULTI 单条目+BLOCK 禁用 → chunked snapshot → 持久化/启动加载 → MeshBootstrap 装配 → 3 节点集成测试）；291 测试全过。详见 [luban-rds-mesh/README.md](luban-rds-mesh/README.md) 与 [docs/mesh/](docs/mesh/index.md) |
+| **mesh 13 项 hotfix（v1.0.15 内）** | `6e7f60d` nodeId 编码补齐 40B / `99da18b` 注册总线消息消费者 / `193e153` runPreVote electionTimer.reset() / `9b4ff4a` MOVED 地址带端口 / `286abf8` + `170d35d` MOVED 自重定向死循环 / `d4dc1ad` 选举退避+MOVED 兜底 / `0dc88ef` CLUSTER SLOTS replicas 空数组 / `84eb0aa` 非 Leader MOVED 携带真实 key / `ee29460` 非 Leader propose 异常带真实 key / `2808410` + `bba857c` + `a557616` CLUSTER NODES 死节点 disconnected 标记 / `182ae27` myself 行 linkState 恒 connected / `6d2a9c8` 日志降频 |
+| **luban-rds-benchmark mesh 全栈套件** | `2554202` + `59c452b`：`MeshBenchmarkSuite` + `MeshScaleBenchmark` + `MeshFailoverBenchmark` + `RedisVsMeshBenchmark`（与 Redis 7.0.12 对比基线），HTML/Markdown 报告输出。详见 [docs/guide/benchmarking.md](docs/guide/benchmarking.md) |
 
 ### 开发中
 
-- [ ] 访问控制列表（ACL）
+- [ ] 访问控制列表（ACL — 部分完成：`ACL WHOAMI/LIST/CAT/GETUSER/SETUSER`、命令级+Key 模式级权限校验；待补 `ACL LOAD/SAVE/LOG`）
 - [ ] 传输加密（TLS/SSL）
 
 ### 计划中
@@ -873,6 +953,10 @@ luban.rds.server.data-dir=./data
 - **快速开始**：[docs/guide/quickstart.md](docs/guide/quickstart.md)
 - **命令列表**：[docs/api/commands.md](docs/api/commands.md)
 - **部署指南**：[docs/deployment/installation.md](docs/deployment/installation.md)
+- **集群部署（Redis Cluster）**：[docs/deployment/cluster-setup.md](docs/deployment/cluster-setup.md)
+- **Mesh 集群（3 节点 Raft 强一致）**：[docs/mesh/index.md](docs/mesh/index.md)
+- **性能基准测试**：[docs/guide/benchmarking.md](docs/guide/benchmarking.md)
+- **Mesh 模块子文档**：[luban-rds-mesh/README.md](luban-rds-mesh/README.md) / [DESIGN.md](luban-rds-mesh/docs/DESIGN.md) / [IMPLEMENTATION_PLAN.md](luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md)
 
 ## 📄 许可证
 

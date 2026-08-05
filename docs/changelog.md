@@ -1,11 +1,181 @@
 ---
 title: 更新日志
-last_updated: 2026-07-30
-version: 1.0.10
+last_updated: 2026-08-05
+version: 1.0.15
 ---
 # 更新日志
 
 Luban-RDS 是一款轻量级、高性能、完全兼容 RESP 协议的 Java 内存数据库，易于嵌入和扩展。
+
+## [1.0.15] - 2026-08-05
+
+### 🛰️ 3 节点 Raft 强一致集群（luban-rds-mesh）— 13 阶段全闭环
+
+- **阶段 1 项目骨架（`e44e2a2` / `c6f53bf`）**：建立 mesh 模块 pom + MeshBus 传输层（Codec / Client / Server / Frame）
+- **阶段 2 状态机与 RPC（`6f6d713`）**：LogEntry / RaftStateMachine / 5 类 RPC（AppendEntries / RequestVote / InstallSnapshot / 投票响应 / 复制响应）
+- **阶段 3 选举与 Lease（`4af73b5`）**：ElectionTimer + PreVote 防 term 膨胀 + LeaseManager 心跳租约
+- **阶段 4 日志复制（`665fbf9`）**：LogApplier + LogReplicator 多数派 ACK
+- **阶段 5 MeshWriteGate（`471afb9`）**：handler 级读写分流门面
+- **阶段 6 MOVED / MESHDOWN（`5be6172`）**：MeshClientRedirector + 与 server 集成
+- **阶段 7 读路径（`f0638a8`）**：Leader Lease 线性一致读 + read-index 退化路径
+- **阶段 8 CLUSTER 命令（`abf550f`）**：`CLUSTER SLOTS/NODES/INFO` 单主视图
+- **阶段 9 事务 + BLOCK（`aae4b6a`）**：MULTI 单条目 + `BLPOP/BRPOP/BLMOVE/WAIT` 禁用
+- **阶段 10 chunked snapshot（`38a95be` / `e55c93c`）**：RDB 拆分块传输 + dump.rdb 归属 SnapshotManager；RdbDataLoader keysLoaded 计数修复
+- **阶段 11 持久化与启动加载（`ecb291f`）**：dump.rdb 启动加载 + Raft log replay
+- **阶段 12 装配（`2ef38ab`）**：MeshBootstrap + 与 `NettyRedisServer` 集成
+- **阶段 13 文档与集成测试（`643316e` / `078f5ea`）**：3 节点真实选举 + 多数派写 + 一致性集成测试
+
+测试统计：**291 测试全过**（含 3 节点集成测试）。
+
+### 🔧 mesh 模块 13 项 hotfix（v1.0.15 内）
+
+| commit | 修复 |
+|--------|------|
+| `6e7f60d` | **nodeId 编码补齐 40B**：集群瘫痪根因（Encoder 严格校验 `nodeId==40` 字符，配置接受任意字符串致所有帧丢弃） |
+| `99da18b` | **注册总线消息消费者**：MeshBootstrap 未调 `setMessageConsumer`，所有 Raft RPC 到站即丢 |
+| `193e153` | **PreVote electionTimer.reset()**：漏调致一次性 timer future 消费后永久静默，选举死锁 |
+| `9b4ff4a` | **MOVED 地址带端口**：非 Leader MOVED 错传 nodeId 无端口致 Redisson 崩溃 |
+| `286abf8` | **MOVED 自重定向死循环**：`parsePeers` 地址塌缩校验 + 自重定向守卫改发 MESHDOWN |
+| `170d35d` | **resolveMeshPeerEndpoints 三段格式解析**：补 mesh-peers `nodeId@host:servicePort:busPort` 三段解析 |
+| `d4dc1ad` | **选举退避 + MOVED 兜底**：kill follower 后选举风暴 `term` 飙升至 20+ leaderId 混乱→MOVED 循环→集群不可用 |
+| `0dc88ef` | **`CLUSTER SLOTS` 补齐 replicas**：`*4` 头缺 `replicas` 元素挂死严格客户端 |
+| `84eb0aa` | **非 Leader MOVED 携带真实 key**：修复 `slot` 恒为 0，部分客户端依赖 slot 更新本地路由缓存 |
+| `ee29460` | **非 Leader propose 异常带真实 key + 畸形帧回退 null** |
+| `2808410` / `bba857c` / `a557616` | **`CLUSTER NODES` 死节点 disconnected 标记**：重载构造器 + MeshBootstrap 装配 `busClient::isConnected` + 测试 |
+| `182ae27` | **myself 行 linkState 恒 connected**：spec 增量（self 正在响应请求） |
+| `6d2a9c8` | **日志降级**：调整高频日志级别减少 I/O |
+
+### ⚡ Mesh 全栈基准测试套件（luban-rds-benchmark）
+
+- **`MeshBenchmarkSuite`**（`2554202`）：mesh 模式基准聚合入口
+- **`MeshScaleBenchmark`**：节点规模扩展性
+- **`MeshFailoverBenchmark`**：failover 收敛时间与可用性影响
+- **`MeshVsSingleGetBenchmark`** / **`MeshVsSingleSetBenchmark`**：mesh vs 单节点读写基线
+- **`RedisVsMeshBenchmark`**（`59c452b`）：与 Redis 7.0.12 同机对比基线
+- **报告输出**：`ReportGenerator` + `HtmlReportBuilder` + `MarkdownReportBuilder` 自动产出可分享报告
+
+### 🛰️ Mesh 部署与运维能力
+
+- **`mesh-*` 配置项**（中划线风格）：`mesh-enabled` / `mesh-peers` / `mesh-self-node-id` / `mesh-bus-port` / `mesh-service-port` / 选举超时 / 心跳 / Lease / 读一致性模式 / snapshot 阈值
+- **CLI 参数**：`--mesh-enabled` / `--mesh-peers` / `--mesh-self-node-id` / `--mesh-bus-port`（`java -jar luban-rds-bin.jar --help` 查看全集）
+- **运维命令**：`CLUSTER INFO/NODES/SLOTS` + `-MOVED <slot> <leaderAddr>` + `-MESHDOWN The mesh cluster has no leader`
+- **关键约束**：`mesh-enabled` 与 `cluster-enabled` 互斥；BLOCK 命令 v1 禁用；Lua/EVAL 当写；mesh 模式不写 AOF；dump.rdb 唯一写者 = SnapshotManager
+
+### 兼容性
+
+- 与 v1.0.10 ~ v1.0.14 完全兼容，cluster / mesh 互斥启动校验
+- mesh 模式客户端零侵入（JedisCluster / lettuce / Redisson 经 `CLUSTER SLOTS` + `MOVED` 自动跟随）
+- 与 `luban-rds-mesh/README.md` 协同（291 测试用例详见 mesh 模块）
+
+### 文档
+
+- **[luban-rds-mesh/README.md](../luban-rds-mesh/README.md)**：模块快速上手
+- **[luban-rds-mesh/docs/DESIGN.md](../luban-rds-mesh/docs/DESIGN.md)**：完整协议设计 v1.2
+- **[luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md](../luban-rds-mesh/docs/IMPLEMENTATION_PLAN.md)**：13 阶段实施计划 v1.2
+
+---
+
+## [1.0.14] - 2026-08-03
+
+### 🛡️ Lua 脚本只读性分析器（解决 Redisson 从节点 `READONLY` 报错）
+
+- **`LuaScriptAnalyzer`**（`a602f1f`）：脚本级只读判定，扫描 `redis.call` / `redis.pcall` 调用识别写命令
+- **从节点行为修正**：`EVAL` / `EVALSHA` 仅当脚本判定为只读时按读命令处理（可路由从节点）；否则按写命令走 Raft 复制
+- **零回归**：仅修改 slave 路径，master / 集群感知客户端零变化
+
+### 兼容性
+
+- 与 v1.0.10 ~ v1.0.13 完全兼容
+- Redisson 等集群感知客户端在 slave 节点上不再误抛 `READONLY`
+
+---
+
+## [1.0.13] - 2026-08-03
+
+### 🛡️ 集群 R2 审计修复批 1-6（N-1 ~ N-40，`7f57568`）
+
+#### 协议面修复
+
+- **MYSELF 守卫**：节点自身处理写命令不再被 slot 校验拦截
+- **XREAD 键提取**：streams 键正确解析，不依赖 raw key
+- **事务路由**：`MULTI/EXEC` 跨节点时按首键槽位稳定路由
+- **destDb 透传**：跨库迁移保留目标 db
+- **zset+stream 序列化**：RDB 二进制安全
+- **位图上限**：`SETBIT/GETBIT/BITCOUNT` 上限校验
+
+#### 协议码与子命令
+
+- **消息码 0x40+**：避免与 Redis 现有消息码冲突
+- **vars 段 + 真实时间戳**：携带真实 `currentEpoch` / `currentMyEpoch`
+- **迁移方括号**：`MIGRATING` / `IMPORTING` 标记正确输出
+- **CLUSTER 8 子命令补齐**：`CLUSTER SET-CONFIG-EPOCH` / `CLUSTER LINKS` / `CLUSTER MYSHARDID` 等
+- **错误串英文化**：对齐 Redis 错误信息（兼容严格客户端解析）
+
+#### failover 深化
+
+- **N-11 重试冷却**：选举发起后设置最小冷却窗口
+- **N-12 votesCast 清理**：选举结束立即清空已投记录
+- **N-9 伪造防护**：投票校验 term + 候选 ID + 候选 log up-to-date
+- **N-13 降级收窄**：仅在 `cluster-require-full-coverage=no` 时降级读
+- **N-14 投票者持槽 + voted_time**：投票者必须拥有当前 epoch 槽位
+- **N-15 候选纪元裁决**：冲突 epoch 时取 lastVoteEpoch 大者
+
+#### 运维可观测
+
+- **N-26 状态单公式**：cluster_state 一处计算
+- **N-27/28 save 竞态 + fsync**：双写加锁 + `fsync` 兜底
+- **N-37 总线端口**：端口分配审计
+- **N-38 帧上限**：Gossip 帧大小限制
+- **N-39/40 连接治理**：总连接数 / 阻塞客户端限制
+- **INFO·NODES 补全**：含 `cluster_enabled` / `cluster_state` / 节点数 / 槽位状态等
+
+### 兼容性
+
+- 与 v1.0.10 ~ v1.0.12 完全兼容
+- cluster 全套件 536 测试全绿
+
+---
+
+## [1.0.12] - 2026-08-03
+
+### 🛡️ 集群审计修复批 1-6（P0×4 + P1×24，`46fdb7d`）
+
+#### P0 数据安全修复
+
+- **MYSELF replOffset 恒 0 致自动 failover 失效**：修复自身节点 `replOffset` 回填，自动 failover 可正确比较候选
+- **手动 failover 写冻结自动恢复**：`CLUSTER FAILOVER` 后旧 master 写冻结超过 grace 期自动恢复
+- **MIGRATE 复制分叉**：跨节点 `MIGRATE` 后从节点 replication offset 同步
+
+#### 双 master 根因收敛（`fix-slot-epoch-convergence` 分支）
+
+- **onFailoverResult 消除 winner slots 双写路径**（`0a1a23a`）：提权后置于 slot 写入后，避免重复更新
+- **processGossipNodes 角色切换时立即对齐 slot 所有权**（`777f0c8`）：Gossip 接收后立即同步本地 slot 表
+- **syncSlotsFromNode 相等 epoch 行为回归保护**（`8fde4f8`）：相等 epoch 不重置本地状态
+
+#### P1 闭环
+
+- **N-24 / N-1 / P1-4 / N-25 / N-7** 等 P1 项修复
+
+### 兼容性
+
+- 与 v1.0.10 ~ v1.0.11 完全兼容
+- `nodes.conf` 文件结构不变（保持 v1.0.4 起的格式）
+
+---
+
+## [1.0.11] - 2026-08-03
+
+### 🛡️ 集群 FAIL 保护期修复（`e0289ce`，归档 `fix-fail-state-cleared-prematurely`）
+
+- **FAIL 状态保护期**：failover 期间维护 `FAIL` 状态保护窗口，避免 PFAIL 抢先清除导致选举被取消
+- **行为变化**：failover 发起后，`FAIL` 标志保留至 `gracePeriod` 结束，期间拒绝新选举
+
+### 兼容性
+
+- 与 v1.0.4 ~ v1.0.10 完全兼容
+- `nodes.conf` 文件结构不变
+
+---
 
 ## [1.0.10] - 2026-07-30
 
