@@ -142,8 +142,27 @@ public class OffHeapStringEngine implements StoreEngine {
 
     @Override
     public java.util.List<EvictionCandidate> sampleForEviction(int database, String policy, int n) {
-        // T2.2 实现
-        return java.util.Collections.emptyList();
+        if (n <= 0) return java.util.Collections.emptyList();
+        ConcurrentMap<String, OffHeapEntry> map = db(database);
+        if (map.isEmpty()) return java.util.Collections.emptyList();
+
+        boolean volatileOnly = DefaultMemoryStore.POLICY_VOLATILE_LRU.equals(policy)
+                || DefaultMemoryStore.POLICY_VOLATILE_RANDOM.equals(policy)
+                || DefaultMemoryStore.POLICY_VOLATILE_TTL.equals(policy);
+
+        java.util.List<String> keys = new java.util.ArrayList<>(map.keySet());
+        java.util.Collections.shuffle(keys);
+        java.util.List<EvictionCandidate> result = new java.util.ArrayList<>();
+        int picked = 0;
+        for (String k : keys) {
+            if (picked >= n) break;
+            OffHeapEntry e = map.get(k);
+            if (e == null || e.isExpired()) continue;
+            if (volatileOnly && !e.hasExpireTime()) continue;
+            result.add(new EvictionCandidate(ENGINE_ID, database, k, e.getLastAccessTime(), e.getExpireTime()));
+            picked++;
+        }
+        return result;
     }
 
     @Override

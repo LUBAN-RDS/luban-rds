@@ -56,4 +56,24 @@ class OffHeapStringEngineTest {
         assertFalse(engine.exists(0, "nope"));
         assertEquals("string", engine.type(0, "k1"));
     }
+
+    @Test
+    void sampleForEvictionReturnsCandidatesForLru() {
+        engine.set(0, "k1", "a".repeat(300));
+        engine.set(0, "k2", "b".repeat(300));
+        var cands = engine.sampleForEviction(0, "allkeys-lru", 5);
+        assertEquals(2, cands.size());
+        assertTrue(cands.stream().allMatch(c -> "offheap".equals(c.engineId)));
+    }
+
+    @Test
+    void sampleForEvictionVolatileOnlyFiltersNoTtl() {
+        engine.set(0, "k1", "a".repeat(300));              // 无 TTL
+        engine.setWithExpire(0, "k2", "b".repeat(300), System.currentTimeMillis() + 100000);
+        var all = engine.sampleForEviction(0, "allkeys-lru", 5);
+        var vol = engine.sampleForEviction(0, "volatile-lru", 5);
+        assertTrue(all.size() >= 2);
+        assertEquals(1, vol.size()); // 只有 k2
+        assertEquals("k2", vol.get(0).key);
+    }
 }
