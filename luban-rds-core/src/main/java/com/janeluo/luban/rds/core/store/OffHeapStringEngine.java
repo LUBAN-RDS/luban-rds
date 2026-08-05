@@ -197,6 +197,53 @@ public class OffHeapStringEngine implements StoreEngine {
 
     public long estimateUsedMemory() { return offheapUsed.get(); }
 
+    // ========== scan / 碎片整理（供 HybridMemoryStore 聚合）==========
+
+    /**
+     * 按模式扫描 db 中的堆外 string key（返回 key 列表，不含 value）。
+     * pattern 支持 glob 的 * 和 ?。null / "*" 表示全部。
+     */
+    public java.util.List<String> scanKeys(int database, String pattern) {
+        ConcurrentMap<String, OffHeapEntry> map = dbs.get(database);
+        if (map == null) {
+            return java.util.Collections.emptyList();
+        }
+        java.util.List<String> r = new java.util.ArrayList<>();
+        for (String k : map.keySet()) {
+            if (pattern == null || "*".equals(pattern) || matchGlob(k, pattern)) {
+                r.add(k);
+            }
+        }
+        return r;
+    }
+
+    /** 极简 glob：* → .*，? → .。其余字符按字面（regex 转义）。 */
+    private boolean matchGlob(String key, String pattern) {
+        StringBuilder regex = new StringBuilder();
+        for (int i = 0; i < pattern.length(); i++) {
+            char c = pattern.charAt(i);
+            switch (c) {
+                case '*': regex.append(".*"); break;
+                case '?': regex.append('.'); break;
+                case '.', '(', ')', '[', ']', '{', '}', '+', '^', '$', '|', '\\':
+                    regex.append('\\').append(c); break;
+                default: regex.append(c);
+            }
+        }
+        return key.matches(regex.toString());
+    }
+
+    /**
+     * 堆外无碎片概念（pool 管理对齐）；本方法只清理过期 entry。
+     * 返回 0（释放的内存已计入 estimateUsedMemory 的衰减，不再额外统计）。
+     */
+    public long defragment() {
+        for (Integer db : dbs.keySet()) {
+            expireBatch(db, Integer.MAX_VALUE);
+        }
+        return 0L;
+    }
+
     // ========== flush / close ==========
 
     public void flushdb(int database) {
