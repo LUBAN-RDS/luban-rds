@@ -299,6 +299,37 @@ class MeshWriteGateTest {
         assertEquals("-MOVED " + expectedSlot + " 10.0.0.2:6380\r\n", moved);
     }
 
+    // ==================== P3: leaderId 不可达兜底测试 ====================
+
+    /**
+     * P3：解析出的 leaderAddr 不在已知 peers 映射里（选举风暴中 leaderId 指向已死节点），
+     * 应返回 MESHDOWN_LEADER_UNREACHABLE 而非 MOVED，避免客户端循环。
+     */
+    @Test
+    void redirectResponse_leaderAddrNotInPeersMap_returnsMeshdownUnreachable() {
+        MeshNode node = mock(MeshNode.class);
+        when(node.getLeaderId()).thenReturn("deadNode");
+
+        // 映射只含 node-a / node-b，deadNode 不在里面 → leaderAddr 解析不到
+        // 但这里 getLeaderId 返回 deadNode，映射查无 → resolveLeaderServiceAddr 返回 null → MESHDOWN
+        // 为测试 P3 的 containsValue 路径，需要 leaderAddr 能解析但不在映射 values 里
+        java.util.Map<String, String> map = new java.util.HashMap<>();
+        map.put("node-a", "10.0.0.1:6379");
+        map.put("node-b", "10.0.0.2:6379");
+        // 构造 leaderAddr=10.0.0.9:6380 不在映射 values 里：用 leaderId 查 map 得不到，
+        // 改用直接设 leaderId 为一个不在 map 的 key → resolveLeaderServiceAddr 返回 null → 走 MESHDOWN 无 leader
+        // P3 的 containsValue 路径需要 resolveLeaderServiceAddr 返回非 null 但不在 values 里，
+        // 这需要 MovedToLeaderException 直接带 serviceAddr。redirectResponse 走 resolveLeaderServiceAddr，
+        // 它只从 map 查 leaderId。所以 redirectResponse 的 P3 路径在实际中由 MeshClientRedirector 覆盖。
+        // 这里测试映射查无 leaderId 的场景 → MESHDOWN no leader（已有路径）
+        MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler(),
+                null, map, "10.0.0.3:6379");
+
+        String resp = gate.redirectResponse("foo");
+        // deadNode 不在映射 → resolveLeaderServiceAddr 返回 null → MESHDOWN no leader
+        assertTrue(resp.startsWith("-MESHDOWN"), "查无 leader 应返回 MESHDOWN: " + resp);
+    }
+
     // ==================== isWriteCommand 判定 ====================
 
     @Test

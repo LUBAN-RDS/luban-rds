@@ -496,6 +496,9 @@ public class MeshNode {
                     } else {
                         logger.info("PreVote 未获多数派 (granted={}/{})，保持 FOLLOWER，不自增 term",
                                 granted, tot);
+                        // 选举退避：连续失败后增大下次 election timeout 区间，
+                        // 使先超时者有窗口赢得选举，避免并发争票致 term 飙升（选举风暴根因）
+                        electionTimer.onElectionFailed();
                     }
                 });
         currentVoteCollector = collector;
@@ -535,6 +538,7 @@ public class MeshNode {
                         onWinElection();
                     } else {
                         logger.info("正式选举未达多数派 (granted={}/{})，继续等下一轮", granted, tot);
+                        electionTimer.onElectionFailed();
                     }
                 });
         currentVoteCollector = collector;
@@ -562,6 +566,8 @@ public class MeshNode {
         // 启动心跳 + 首轮空 AppendEntries（建立权威 + 续租）
         startHeartbeat();
         broadcastHeartbeat();
+        // 选举成功：复位退避（Leader 不需要 election timeout，但防御性复位供下次降级时用）
+        electionTimer.onElectionSucceeded();
         // 阶段 12：通知角色监听器（Leader 变更）
         notifyRoleListener();
     }
@@ -709,6 +715,8 @@ public class MeshNode {
         }
         if (decision.resetElectionTimer) {
             electionTimer.reset();
+            // 收到合法 RequestVote（含 PreVote 探测）→ 有活跃选举活动，复位退避
+            electionTimer.onElectionSucceeded();
         }
         // 阶段 11：正式投票（非 PreVote）且 granted → votedFor 已设置 → 持久化
         // （fsync 在回复投票前完成，保证崩溃恢复后不会同任期二次投票）
@@ -756,6 +764,8 @@ public class MeshNode {
         }
         if (decision.resetElectionTimer) {
             electionTimer.reset();
+            // 收到合法 AppendEntries（Leader 心跳）→ 复位退避
+            electionTimer.onElectionSucceeded();
         }
 
         // 阶段 4：Follower 侧——commitIndex 被 leaderCommit 推进后，apply 已提交条目到 raw store。

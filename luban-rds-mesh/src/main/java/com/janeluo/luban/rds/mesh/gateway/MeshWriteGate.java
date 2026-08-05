@@ -500,6 +500,12 @@ public class MeshWriteGate {
         if (selfServiceAddr != null && selfServiceAddr.equals(leaderAddr)) {
             return MeshClientRedirector.MESHDOWN_SELF_REDIRECT_RESPONSE;
         }
+        // P3: leaderId 不可达兜底——选举风暴中 leaderId 可能短暂指向已死节点或无效地址，
+        // 解析出的 leaderAddr 不在已知 peers 映射里时，MOVED 过去客户端也连不上，
+        // 还可能在多节点间形成 A→B→C→A 循环。改发 MESHDOWN 让客户端感知集群不可用并重试。
+        if (!nodeIdToServiceAddr.containsValue(leaderAddr)) {
+            return MeshClientRedirector.MESHDOWN_LEADER_UNREACHABLE_RESPONSE;
+        }
         int slot = SlotUtils.getSlot(key);
         return "-MOVED " + slot + " " + leaderAddr + "\r\n";
     }

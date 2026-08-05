@@ -117,4 +117,74 @@ class ElectionTimerTest {
         assertEquals(150, t.getMinMs());
         assertEquals(300, t.getMaxMs());
     }
+
+    // ==================== 选举退避测试（P1）====================
+
+    @Test
+    void onElectionFailed_increasesConsecutiveFailures() {
+        ElectionTimer t = new ElectionTimer(150, 300, () -> {},
+                Executors.newSingleThreadScheduledExecutor());
+        assertEquals(0, t.getConsecutiveFailures());
+        t.onElectionFailed();
+        assertEquals(1, t.getConsecutiveFailures());
+        t.onElectionFailed();
+        assertEquals(2, t.getConsecutiveFailures());
+    }
+
+    @Test
+    void onElectionFailed_capsAtMaxBackoffShift() {
+        ElectionTimer t = new ElectionTimer(150, 300, () -> {},
+                Executors.newSingleThreadScheduledExecutor());
+        // 连续失败超过 MAX_BACKOFF_SHIFT(2) 后应封顶
+        for (int i = 0; i < 10; i++) {
+            t.onElectionFailed();
+        }
+        assertEquals(2, t.getConsecutiveFailures(), "consecutiveFailures 应封顶在 MAX_BACKOFF_SHIFT=2");
+    }
+
+    @Test
+    void nextTimeoutMs_doublesRangeAfterFailure() {
+        ElectionTimer t = new ElectionTimer(150, 300, () -> {},
+                Executors.newSingleThreadScheduledExecutor());
+        // 正常区间 [150, 300]
+        for (int i = 0; i < 500; i++) {
+            long v = t.nextTimeoutMs();
+            assertTrue(v >= 150 && v <= 300, "正常区间应 [150,300]，实际: " + v);
+        }
+        t.onElectionFailed(); // shift=1 → [300, 600]
+        for (int i = 0; i < 500; i++) {
+            long v = t.nextTimeoutMs();
+            assertTrue(v >= 300 && v <= 600, "1 次失败后区间应 [300,600]，实际: " + v);
+        }
+        t.onElectionFailed(); // shift=2 → [600, 1200]
+        for (int i = 0; i < 500; i++) {
+            long v = t.nextTimeoutMs();
+            assertTrue(v >= 600 && v <= 1200, "2 次失败后区间应 [600,1200]，实际: " + v);
+        }
+    }
+
+    @Test
+    void onElectionSucceeded_resetsBackoff() {
+        ElectionTimer t = new ElectionTimer(150, 300, () -> {},
+                Executors.newSingleThreadScheduledExecutor());
+        t.onElectionFailed();
+        t.onElectionFailed();
+        assertEquals(2, t.getConsecutiveFailures());
+        t.onElectionSucceeded();
+        assertEquals(0, t.getConsecutiveFailures());
+        // 区间恢复正常
+        for (int i = 0; i < 500; i++) {
+            long v = t.nextTimeoutMs();
+            assertTrue(v >= 150 && v <= 300, "复位后区间应 [150,300]，实际: " + v);
+        }
+    }
+
+    @Test
+    void onElectionSucceeded_noopWhenAlreadyZero() {
+        ElectionTimer t = new ElectionTimer(150, 300, () -> {},
+                Executors.newSingleThreadScheduledExecutor());
+        // 未失败过时调 onElectionSucceeded 不应有副作用
+        t.onElectionSucceeded();
+        assertEquals(0, t.getConsecutiveFailures());
+    }
 }

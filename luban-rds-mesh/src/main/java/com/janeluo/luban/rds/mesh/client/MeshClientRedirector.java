@@ -56,6 +56,14 @@ public class MeshClientRedirector {
     public static final String MESHDOWN_SELF_REDIRECT_RESPONSE =
             "-MESHDOWN redirect target is self; cluster topology unstable\r\n";
 
+    /**
+     * Leader 不可达兜底响应：解析出的 Leader 地址不在已知 peers 映射里时返回（P3 守卫）。
+     * <p>选举风暴中 leaderId 可能短暂指向已死节点或无效地址，MOVED 过去客户端连不上，
+     * 还可能在多节点间形成循环。改发 MESHDOWN 让客户端感知集群不可用并重试。</p>
+     */
+    public static final String MESHDOWN_LEADER_UNREACHABLE_RESPONSE =
+            "-MESHDOWN redirect target unreachable; cluster topology unstable\r\n";
+
     /** nodeId → service 地址（{@code "ip:port"}，service 端口）映射；只读。 */
     private final Map<String, String> nodeIdToServiceAddr;
 
@@ -111,7 +119,9 @@ public class MeshClientRedirector {
      */
     public String formatResponse(MovedToLeaderException e) {
         String leaderAddr = e.getLeaderServiceAddr();
-        if (leaderAddr == null || leaderAddr.isEmpty()) {
+        // 记录地址来源：异常直接携带（可信）vs 从 map 解析（可能过时）
+        boolean addrFromException = leaderAddr != null && !leaderAddr.isEmpty();
+        if (!addrFromException) {
             // 尝试用 leaderNodeId 补全 serviceAddr
             String leaderNodeId = e.getLeaderNodeId();
             if (leaderNodeId != null) {
@@ -127,6 +137,14 @@ public class MeshClientRedirector {
         // 改发 MESHDOWN 让客户端退避重试，等 Leader 稳定 / 拓扑刷新后再 MOVED 到正确地址。
         if (selfServiceAddr != null && selfServiceAddr.equals(leaderAddr)) {
             return MESHDOWN_SELF_REDIRECT_RESPONSE;
+        }
+        // P3: leaderId 不可达兜底——仅对从 map 解析（非异常直接携带）的地址校验。
+        // 选举风暴中 follower 从过时 AppendEntries 记住的 leaderId 可能指向已死节点，
+        // map 查到的地址不在当前 peers 映射里 → 改发 MESHDOWN 避免循环和无效重定向。
+        // 异常直接携带的 serviceAddr 是 Leader 节点自己填的，信任之，不校验。
+        if (!addrFromException && !nodeIdToServiceAddr.isEmpty()
+                && !nodeIdToServiceAddr.containsValue(leaderAddr)) {
+            return MESHDOWN_LEADER_UNREACHABLE_RESPONSE;
         }
         // 有 Leader：slot 用 key 的真实 CRC16（0-16383）
         int slot = SlotUtils.getSlot(e.getKey());

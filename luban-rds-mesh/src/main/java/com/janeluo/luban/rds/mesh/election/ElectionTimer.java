@@ -49,6 +49,9 @@ public class ElectionTimer {
     /** 默认选举超时上限（ms），DESIGN §5.2。 */
     public static final long DEFAULT_MAX_MS = 300;
 
+    /** 退避最大位移量（2^shift 倍）：封顶区间 = [minMs × 4, maxMs × 4]。 */
+    private static final int MAX_BACKOFF_SHIFT = 2;
+
     private final long minMs;
     private final long maxMs;
     private final Runnable onElectionTimeout;
@@ -60,6 +63,13 @@ public class ElectionTimer {
 
     private volatile boolean started;
     private volatile boolean stopped;
+
+    /**
+     * 连续选举失败次数（PreVote 未达多数派 / 正式选举未达多数派）。
+     * 用于计算退避区间：shift = min(consecutiveFailures, MAX_BACKOFF_SHIFT)。
+     * 选举成功或收到合法 AppendEntries/RequestVote 后复位为 0。
+     */
+    private int consecutiveFailures = 0;
 
     /**
      * @param minMs            选举超时下限（ms，>0）
@@ -125,8 +135,12 @@ public class ElectionTimer {
 
     /** 随机化下一次超时时长（ms）。可见用于测试与 LeaseManager 推算 leaseDuration。 */
     public long nextTimeoutMs() {
-        // ThreadLocalRandom：[minMs, maxMs] 闭区间
-        return ThreadLocalRandom.current().nextLong(minMs, maxMs + 1);
+        // 退避区间：正常 [minMs, maxMs]，失败后翻倍至 [minMs×2^shift, maxMs×2^shift]
+        int shift = Math.min(consecutiveFailures, MAX_BACKOFF_SHIFT);
+        long effectiveMin = minMs << shift;
+        long effectiveMax = maxMs << shift;
+        // ThreadLocalRandom：[effectiveMin, effectiveMax] 闭区间
+        return ThreadLocalRandom.current().nextLong(effectiveMin, effectiveMax + 1);
     }
 
     public long getMinMs() {
@@ -135,6 +149,34 @@ public class ElectionTimer {
 
     public long getMaxMs() {
         return maxMs;
+    }
+
+    /**
+     * 选举失败回调（PreVote 未达多数派 / 正式选举未达多数派）。
+     * 增加连续失败计数，下次 nextTimeoutMs 使用更大的退避区间。
+     */
+    public synchronized void onElectionFailed() {
+        if (consecutiveFailures < MAX_BACKOFF_SHIFT) {
+            consecutiveFailures++;
+            logger.info("选举退避: consecutiveFailures={}, 下次区间=[{},{}]ms",
+                    consecutiveFailures, minMs << consecutiveFailures, maxMs << consecutiveFailures);
+        }
+    }
+
+    /**
+     * 选举成功 / 收到合法 AppendEntries/RequestVote 回调。
+     * 复位连续失败计数，恢复正常选举超时区间。
+     */
+    public synchronized void onElectionSucceeded() {
+        if (consecutiveFailures > 0) {
+            logger.debug("选举退避复位: consecutiveFailures 0（收到合法 Leader 信号）");
+            consecutiveFailures = 0;
+        }
+    }
+
+    /** 当前连续失败次数（测试用）。 */
+    public synchronized int getConsecutiveFailures() {
+        return consecutiveFailures;
     }
 
     // ==================== internal ====================

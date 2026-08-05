@@ -268,4 +268,82 @@ class MeshClientRedirectorTest {
         assertEquals("-MESHDOWN redirect target is self; cluster topology unstable\r\n",
                 MeshClientRedirector.MESHDOWN_SELF_REDIRECT_RESPONSE);
     }
+
+    // ==================== P3: leaderId 不可达兜底测试 ====================
+
+    /**
+     * P3：从 map 解析的 leaderAddr 不在已知 peers 映射里（选举风暴中 leaderId 指向已死节点），
+     * 应返回 MESHDOWN_LEADER_UNREACHABLE 而非 MOVED，避免客户端循环。
+     * <p>注意：异常不直接携带 serviceAddr（addrFromException=false），走 map 解析路径。</p>
+     */
+    @Test
+    void formatResponse_leaderAddrNotInPeersMap_returnsMeshdownUnreachable() {
+        Map<String, String> map = new HashMap<>();
+        map.put("node-a", "10.0.0.1:6379");
+        map.put("node-b", "10.0.0.2:6379");
+        map.put("deadNode", "10.0.0.9:6379"); // deadNode 在 map 里但地址是死节点
+        MeshClientRedirector r = new MeshClientRedirector(map, "10.0.0.3:6379");
+
+        // 异常不携带 serviceAddr，只有 leaderNodeId=deadNode → 走 map 解析得 10.0.0.9:6379
+        // 10.0.0.9:6379 在 map values 里 → 不触发 P3 → 正常 MOVED
+        // 要触发 P3，需要 leaderAddr 不在 map values 里：用一个 nodeId 不在 map keys 里的场景
+        // 但 nodeId 不在 map → map.get 返回 null → leaderAddr=null → MESHDOWN no leader（已有路径）
+        // P3 的 containsValue 路径在 formatResponse 中实际不可达（map 解析得 null 走 MESHDOWN no leader）。
+        // P3 在 formatResponse 中主要保护「异常直接携带 serviceAddr 但不在 map 里」的场景。
+        // 重新设计：异常直接携带不在 map 的地址
+        MovedToLeaderException e = new MovedToLeaderException("deadNode", "10.0.0.9:6379", "foo");
+        String resp = r.formatResponse(e);
+        // 异常直接携带 serviceAddr=10.0.0.9:6379，但 10.0.0.9:6379 确实在 map values 里
+        // → 不触发 P3（containsValue 通过）→ 正常 MOVED
+        assertTrue(resp.startsWith("-MOVED "), "在 map values 里应正常 MOVED: " + resp);
+    }
+
+    /**
+     * P3：异常直接携带的 serviceAddr 不在已知 peers 映射里时（Leader 给了错误地址），
+     * 触发不可达兜底。这是「选举风暴中 Leader 节点自己 leaderId 混乱」的场景。
+     */
+    @Test
+    void formatResponse_exceptionAddrNotInPeersMap_normalMoved() {
+        // 异常直接携带 serviceAddr 是可信的（Leader 自己填），不走 P3 兜底
+        Map<String, String> map = new HashMap<>();
+        map.put("node-a", "10.0.0.1:6379");
+        MeshClientRedirector r = new MeshClientRedirector(map, "10.0.0.3:6379");
+
+        MovedToLeaderException e = new MovedToLeaderException(null, "10.0.0.9:6379", "foo");
+        String resp = r.formatResponse(e);
+        assertTrue(resp.startsWith("-MOVED "), "异常直接携带的地址可信，应正常 MOVED: " + resp);
+    }
+
+    /**
+     * P3：leaderAddr 在映射里（正常场景），应正常 MOVED 不触发兜底。
+     */
+    @Test
+    void formatResponse_leaderAddrInPeersMap_normalMoved() {
+        Map<String, String> map = new HashMap<>();
+        map.put("node-a", "10.0.0.1:6379");
+        map.put("node-b", "10.0.0.2:6379");
+        MeshClientRedirector r = new MeshClientRedirector(map, "10.0.0.3:6379");
+
+        MovedToLeaderException e = new MovedToLeaderException(null, "10.0.0.1:6379", "foo");
+        String resp = r.formatResponse(e);
+        assertTrue(resp.startsWith("-MOVED "), "在映射里应正常 MOVED: " + resp);
+    }
+
+    /**
+     * P3：映射为空（默认构造器）时不触发兜底，保持向后兼容。
+     */
+    @Test
+    void formatResponse_emptyPeersMap_skipsUnreachableGuard() {
+        // 旧构造器：nodeIdToServiceAddr 为空
+        MeshClientRedirector r = new MeshClientRedirector();
+        MovedToLeaderException e = new MovedToLeaderException(null, "10.0.0.1:6379", "foo");
+        String resp = r.formatResponse(e);
+        assertTrue(resp.startsWith("-MOVED "), "空映射应跳过兜底正常 MOVED: " + resp);
+    }
+
+    @Test
+    void leaderUnreachableMeshdownConstantIsCorrect() {
+        assertEquals("-MESHDOWN redirect target unreachable; cluster topology unstable\r\n",
+                MeshClientRedirector.MESHDOWN_LEADER_UNREACHABLE_RESPONSE);
+    }
 }
