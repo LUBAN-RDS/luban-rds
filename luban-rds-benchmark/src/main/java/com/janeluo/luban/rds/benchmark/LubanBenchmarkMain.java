@@ -23,7 +23,7 @@ public class LubanBenchmarkMain {
         options.addOption("n", "requests", true, "Total requests (default: 100000)");
         options.addOption("d", "duration", true, "Duration in seconds (default: 0, use total requests)");
         options.addOption("s", "size", true, "Value size in bytes (default: 100)");
-        options.addOption("c", "cases", true, "Benchmark cases: all,set,get,incr,lpush,lrange,hset,hget,sadd (default: all)");
+        options.addOption("c", "cases", true, "Benchmark cases: all,set,get,incr,lpush,lrange,hset,hget,sadd,large-set,large-get (default: all)");
         options.addOption("m", "memory", false, "Monitor memory usage");
         options.addOption("pipeline", true, "Pipeline batch size (default: 1, no pipeline)");
         options.addOption("pool", true, "Connection pool size (default: 0, one connection per thread)");
@@ -61,6 +61,8 @@ public class LubanBenchmarkMain {
             if (all || selectedCases.contains("hset")) runner.addBenchmark(new HashSetBenchmark());
             if (all || selectedCases.contains("hget")) runner.addBenchmark(new HashGetBenchmark());
             if (all || selectedCases.contains("sadd")) runner.addBenchmark(new SetAddBenchmark());
+            if (all || selectedCases.contains("large-set")) runner.addBenchmark(new LargeValueSetBenchmark());
+            if (all || selectedCases.contains("large-get")) runner.addBenchmark(new LargeValueGetBenchmark());
 
             // Print configuration info
             System.out.println("Starting Benchmark Suite...");
