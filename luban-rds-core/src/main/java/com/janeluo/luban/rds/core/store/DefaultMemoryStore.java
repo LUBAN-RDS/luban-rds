@@ -52,7 +52,19 @@ public class DefaultMemoryStore implements MemoryStore {
     private static final int ARRAYLIST_OVERHEAD = 24; // ArrayList object overhead
     private static final int HASHSET_OVERHEAD = 48; // HashSet object overhead
     private static final int CONCURRENTHASHMAP_OVERHEAD = 64; // ConcurrentHashMap overhead
-    
+
+    /**
+     * String payload 按 UTF-8 编码后的字节长度估算（替代旧的 length()*2 UTF-16 计量）。
+     * JDK9+ String 内部为 byte[]：Latin-1 时 1 byte/char，UTF-8 编码对 ASCII 同样 1 byte/char，
+     * 避免把纯 ASCII/拉丁字符的内存估算翻倍。各结构的增量内存计量统一调用此方法以保持口径一致。
+     */
+    private static long utf8Len(String str) {
+        if (str == null || str.isEmpty()) {
+            return 0L;
+        }
+        return str.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+    }
+
     /**
      * Optimized StoreValue with reduced memory footprint.
      * Uses primitive types and byte index instead of String for type.
@@ -202,9 +214,10 @@ public class DefaultMemoryStore implements MemoryStore {
             
             if (value instanceof String) {
                 String str = (String) value;
-                // String object: header (12) + hash (4) + coder (1) + value reference (4) + padding
-                // char array: header (16) + length * 2
-                size += STRING_OVERHEAD + (long) str.length() * 2L;
+                // JDK9+ String 内部为 byte[]：Latin-1 时 1 byte/char，UTF-16 时 2 byte/char。
+                // 按 UTF-8 编码后的字节长度估算 payload（ASCII 与 Latin-1 一致，多字节字符更准）。
+                // STRING_OVERHEAD 已含 String 对象头 + 内部 byte[] 数组头。
+                size += STRING_OVERHEAD + utf8ByteLength(str);
             } else if (value instanceof Map) {
                 Map<?, ?> map = (Map<?, ?>) value;
                 // Map overhead + entries
@@ -218,7 +231,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 size += ARRAYLIST_OVERHEAD + (long) list.size() * REFERENCE_SIZE;
                 for (Object item : list) {
                     if (item instanceof String) {
-                        size += STRING_OVERHEAD + ((String) item).length() * 2L;
+                        size += STRING_OVERHEAD + utf8ByteLength((String) item);
                     }
                 }
             } else if (value instanceof java.util.Set) {
@@ -227,7 +240,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 size += HASHSET_OVERHEAD + (long) set.size() * HASHMAP_ENTRY_OVERHEAD;
                 for (Object item : set) {
                     if (item instanceof String) {
-                        size += STRING_OVERHEAD + ((String) item).length() * 2L;
+                        size += STRING_OVERHEAD + utf8ByteLength((String) item);
                     }
                 }
             } else if (value instanceof ZSetStore) {
@@ -240,7 +253,7 @@ public class DefaultMemoryStore implements MemoryStore {
                 // 跳表节点比 CHM 桶节点重，单成员估算 72L
                 size += 96 + (long) zset.size() * 72L;
                 for (String member : zset.memberScores.keySet()) {
-                    size += STRING_OVERHEAD + member.length() * 2L;
+                    size += STRING_OVERHEAD + utf8ByteLength(member);
                 }
             } else if (value instanceof Stream) {
                 Stream stream = (Stream) value;
@@ -263,12 +276,20 @@ public class DefaultMemoryStore implements MemoryStore {
         private static long estimateEntrySize(Object key, Object value) {
             long size = HASHMAP_ENTRY_OVERHEAD;
             if (key instanceof String) {
-                size += STRING_OVERHEAD + ((String) key).length() * 2L;
+                size += STRING_OVERHEAD + utf8ByteLength((String) key);
             }
             if (value instanceof String) {
-                size += STRING_OVERHEAD + ((String) value).length() * 2L;
+                size += STRING_OVERHEAD + utf8ByteLength((String) value);
             }
             return size;
+        }
+
+        /** String payload 按 UTF-8 字节长度估算（替代旧的 length()*2 UTF-16 计量）。 */
+        private static long utf8ByteLength(String str) {
+            if (str == null || str.isEmpty()) {
+                return 0L;
+            }
+            return str.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         }
     }
     
@@ -1477,9 +1498,9 @@ public class DefaultMemoryStore implements MemoryStore {
         } else {
             long delta = 0;
             if (!existed) {
-                delta = 64 + field.length() * 2L + value.length() * 2L;
+                delta = 64 + utf8Len(field) + utf8Len(value);
             } else {
-                delta = (value.length() - oldValue.length()) * 2L;
+                delta = utf8Len(value) - utf8Len(oldValue);
             }
             storeValue.updateEstimatedSize(delta);
             updateMemory(delta);
@@ -1518,7 +1539,7 @@ public class DefaultMemoryStore implements MemoryStore {
             if (isNew) {
                 set(database, key, hash);
             } else {
-                long delta = 64 + field.length() * 2L + value.length() * 2L;
+                long delta = 64 + utf8Len(field) + utf8Len(value);
                 storeValue.updateEstimatedSize(delta);
                 updateMemory(delta);
                 bumpKeyVersion(database, key);
@@ -1568,9 +1589,9 @@ public class DefaultMemoryStore implements MemoryStore {
             String oldValue = hash.put(field, value);
             if (oldValue == null) {
                 addedCount++;
-                delta += (64 + field.length() * 2L + value.length() * 2L);
+                delta += (64 + utf8Len(field) + utf8Len(value));
             } else {
-                delta += (value.length() - oldValue.length()) * 2L;
+                delta += utf8Len(value) - utf8Len(oldValue);
             }
         }
         
@@ -1649,7 +1670,7 @@ public class DefaultMemoryStore implements MemoryStore {
             String removedVal = hash.remove(field);
             if (removedVal != null) {
                 deleted++;
-                delta -= (64 + field.length() * 2L + removedVal.length() * 2L);
+                delta -= (64 + utf8Len(field) + utf8Len(removedVal));
             }
         }
         
@@ -1730,9 +1751,9 @@ public class DefaultMemoryStore implements MemoryStore {
         } else {
             long delta = 0;
             if (oldValueStr == null) {
-                delta = 64 + field.length() * 2L + newValueStr.length() * 2L;
+                delta = 64 + utf8Len(field) + utf8Len(newValueStr);
             } else {
-                delta = (newValueStr.length() - oldValueStr.length()) * 2L;
+                delta = utf8Len(newValueStr) - utf8Len(oldValueStr);
             }
             storeValue.updateEstimatedSize(delta);
             updateMemory(delta);
@@ -1865,7 +1886,7 @@ public class DefaultMemoryStore implements MemoryStore {
         long delta = 0;
         for (int i = values.length - 1; i >= 0; i--) {
             list.add(0, values[i]);
-            delta += (32 + values[i].length() * 2L);
+            delta += (32 + utf8Len(values[i]));
         }
         
         if (isNew) {
@@ -1907,7 +1928,7 @@ public class DefaultMemoryStore implements MemoryStore {
         long delta = 0;
         for (String value : values) {
             list.add(value);
-            delta += (32 + value.length() * 2L);
+            delta += (32 + utf8Len(value));
         }
         
         if (isNew) {
@@ -1944,7 +1965,7 @@ public class DefaultMemoryStore implements MemoryStore {
         
         RuntimeConfig.incKeyspaceHits();
         String v = list.remove(0);
-        long delta = -(32 + v.length() * 2L);
+        long delta = -(32 + utf8Len(v));
         storeValue.updateEstimatedSize(delta);
         updateMemory(delta);
         bumpKeyVersion(database, key);
@@ -1974,7 +1995,7 @@ public class DefaultMemoryStore implements MemoryStore {
         
         RuntimeConfig.incKeyspaceHits();
         String v = list.remove(list.size() - 1);
-        long delta = -(32 + v.length() * 2L);
+        long delta = -(32 + utf8Len(v));
         storeValue.updateEstimatedSize(delta);
         updateMemory(delta);
         bumpKeyVersion(database, key);
@@ -2221,7 +2242,7 @@ public class DefaultMemoryStore implements MemoryStore {
             // 重新计算大小（简化处理）
             long newSize = 64;
             for (String s : list) {
-                newSize += 32 + s.length() * 2L;
+                newSize += 32 + utf8Len(s);
             }
             long oldSize = storeValue.getEstimatedSize();
             storeValue.updateEstimatedSize(newSize - oldSize);
@@ -2296,7 +2317,7 @@ public class DefaultMemoryStore implements MemoryStore {
         for (String member : members) {
             if (set.add(member)) {
                 added++;
-                delta += (32 + member.length() * 2L);
+                delta += (32 + utf8Len(member));
             }
         }
         
@@ -2333,7 +2354,7 @@ public class DefaultMemoryStore implements MemoryStore {
         for (String member : members) {
             if (set.remove(member)) {
                 removed++;
-                delta -= (32 + member.length() * 2L);
+                delta -= (32 + utf8Len(member));
             }
         }
         
@@ -2572,7 +2593,7 @@ public class DefaultMemoryStore implements MemoryStore {
                         }
                     }
                     removedCount++;
-                    removedBytes += (128 + member.length() * 2L);
+                    removedBytes += (128 + utf8Len(member));
                 }
             }
             return new long[]{removedCount, removedBytes};
@@ -2666,7 +2687,7 @@ public class DefaultMemoryStore implements MemoryStore {
             set(database, key, zset);
         } else {
             if (result == 1) {
-                long delta = 128 + member.length() * 2L;
+                long delta = 128 + utf8Len(member);
                 storeValue.updateEstimatedSize(delta);
                 updateMemory(delta);
             }
@@ -3070,7 +3091,7 @@ public class DefaultMemoryStore implements MemoryStore {
             set(database, key, zset);
         } else {
             if (oldScore == null) {
-                long delta = 128 + member.length() * 2L;
+                long delta = 128 + utf8Len(member);
                 storeValue.updateEstimatedSize(delta);
                 updateMemory(delta);
             }
