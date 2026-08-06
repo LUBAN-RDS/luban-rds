@@ -7,132 +7,140 @@ package com.janeluo.luban.rds.common.config;
 public class RdsConfig {
 
     // ==================== 网络配置 ====================
-    
+
     /**
      * 绑定地址
      */
     private String bind = "0.0.0.0";
-    
+
     /**
      * 监听端口
      */
     private int port = 9736;
-    
+
     /**
      * TCP 连接队列长度
      */
     private int tcpBacklog = 511;
-    
+
     /**
      * 客户端空闲超时时间（秒），0 表示禁用
      */
     private int timeout = 0;
-    
+
     /**
      * TCP keepalive 时间（秒）
      */
     private int tcpKeepalive = 300;
 
     // ==================== 通用配置 ====================
-    
+
     /**
      * 是否以守护进程方式运行
      */
     private boolean daemonize = false;
-    
+
     /**
      * 日志级别：debug, verbose, notice, warning
      */
     private String loglevel = "notice";
-    
+
     /**
      * 日志文件路径
      */
     private String logfile = "";
-    
+
     /**
      * 数据库数量
      */
     private int databases = 16;
 
     // ==================== 持久化配置 ====================
-    
+
     /**
      * 持久化模式：rdb, aof, mixed, none
      */
     private String persistMode = "rdb";
-    
+
     /**
      * 数据目录
      */
     private String dir = "./data";
-    
+
     /**
      * RDB 文件名
      */
     private String dbfilename = "dump.rdb";
-    
+
     /**
      * RDB 自动保存间隔（秒）
      */
     private int rdbSaveInterval = 60;
-    
+
     /**
      * AOF 文件名
      */
     private String appendfilename = "appendonly.aof";
-    
+
     /**
      * AOF 同步策略：always, everysec, no
      */
     private String appendfsync = "everysec";
-    
+
     /**
      * AOF 同步间隔（秒）
      */
     private int aofFsyncInterval = 1;
 
     // ==================== 内存管理 ====================
-    
+
     /**
      * 最大内存限制（字节），0 表示不限制
      */
     private long maxmemory = 0;
-    
+
     /**
      * 内存淘汰策略
      */
     private String maxmemoryPolicy = "noeviction";
 
     // ===== Memory Store 配置（hybrid 堆外存储）=====
-    /** 存储引擎类型：default | hybrid */
+    /**
+     * 存储引擎类型：default | hybrid
+     */
     private String memoryStoreKind = "default";
-    /** 是否启用堆外内存（仅 hybrid 模式生效） */
+    /**
+     * 是否启用堆外内存（仅 hybrid 模式生效）
+     */
     private boolean offheapEnabled = true;
-    /** 堆外阈值（字节），string value >= 此值进堆外，默认 256 */
+    /**
+     * 堆外阈值（字节），string value >= 此值进堆外，默认 256
+     */
     private int offheapThreshold = 256;
-    /** 堆外内存上限（字节），0 = 仅受全局 maxmemory 约束 */
+    /**
+     * 堆外内存上限（字节），0 = 仅受全局 maxmemory 约束
+     */
     private long offheapMaxMemory = 0;
 
     // ==================== 安全配置 ====================
-    
+
     /**
      * 访问密码
      */
     private String requirepass = "";
-    
+
     // ==================== SlowLog 配置 ====================
-    
+
     /**
      * 慢查询阈值（微秒），默认 10000
      */
     private long slowlogLogSlowerThan = 10000;
-    
+
     /**
      * 慢查询日志最大长度，默认 128
      */
     private long slowlogMaxLen = 128;
-    
+
     // ==================== Monitor 配置 ====================
 
     /**
@@ -291,7 +299,9 @@ public class RdsConfig {
     // DESIGN §6 配置入口走 luban-rds.conf（mesh-enabled yes、mesh-peers 等）。
     // 与 cluster 互斥：同一进程只能启用 cluster 或 mesh 其一（启动时校验）。
 
-    /** 是否启用 mesh 模式（Raft 强一致）。与 clusterEnabled 互斥。 */
+    /**
+     * 是否启用 mesh 模式（Raft 强一致）。与 clusterEnabled 互斥。
+     */
     private boolean meshEnabled = false;
 
     /**
@@ -304,34 +314,54 @@ public class RdsConfig {
      */
     private String meshPeers = "";
 
-    /** 本节点 nodeId（40 字符十六进制）；未指定时由 MeshBootstrap 按 peers 顺序推断。 */
+    /**
+     * 本节点 nodeId（40 字符十六进制）；未指定时由 MeshBootstrap 按 peers 顺序推断。
+     */
     private String meshSelfNodeId = "";
 
-    /** 本节点 service 端口（对外服务；默认 = port，可不显式配置）。 */
+    /**
+     * 本节点 service 端口（对外服务；默认 = port，可不显式配置）。
+     */
     private int meshServicePort = 0;
 
-    /** mesh 总线端口（节点间 Raft RPC）；未配置时按 peers 列表中本节点条目取。 */
+    /**
+     * mesh 总线端口（节点间 Raft RPC）；未配置时按 peers 列表中本节点条目取。
+     */
     private int meshBusPort = 0;
 
-    /** 选举超时区间下限（毫秒），默认 150。 */
+    /**
+     * 选举超时区间下限（毫秒），默认 150。
+     */
     private long meshElectionTimeoutMinMs = 150;
 
-    /** 选举超时区间上限（毫秒），默认 300。 */
+    /**
+     * 选举超时区间上限（毫秒），默认 300。
+     */
     private long meshElectionTimeoutMaxMs = 300;
 
-    /** Leader 心跳间隔（毫秒），默认 100。 */
+    /**
+     * Leader 心跳间隔（毫秒），默认 100。
+     */
     private long meshHeartbeatIntervalMs = 100;
 
-    /** 租约时长（毫秒），默认 600。 */
+    /**
+     * 租约时长（毫秒），默认 600。
+     */
     private long meshLeaseDurationMs = 600;
 
-    /** lease 模式租约失效等待上限（毫秒），默认 1000。 */
+    /**
+     * lease 模式租约失效等待上限（毫秒），默认 1000。
+     */
     private long meshReadLeaseWaitMs = 1000;
 
-    /** 读一致性模式：LEASE（默认）或 READ_INDEX。 */
+    /**
+     * 读一致性模式：LEASE（默认）或 READ_INDEX。
+     */
     private String meshReadConsistency = "LEASE";
 
-    /** 周期快照阈值（log 条目数），默认 100000。 */
+    /**
+     * 周期快照阈值（log 条目数），默认 100000。
+     */
     private long meshSnapshotLogThreshold = 100000;
 
     /**
@@ -592,14 +622,37 @@ public class RdsConfig {
         this.maxmemoryPolicy = maxmemoryPolicy;
     }
 
-    public String getMemoryStoreKind() { return memoryStoreKind; }
-    public void setMemoryStoreKind(String memoryStoreKind) { this.memoryStoreKind = memoryStoreKind; }
-    public boolean isOffheapEnabled() { return offheapEnabled; }
-    public void setOffheapEnabled(boolean offheapEnabled) { this.offheapEnabled = offheapEnabled; }
-    public int getOffheapThreshold() { return offheapThreshold; }
-    public void setOffheapThreshold(int offheapThreshold) { this.offheapThreshold = offheapThreshold; }
-    public long getOffheapMaxMemory() { return offheapMaxMemory; }
-    public void setOffheapMaxMemory(long offheapMaxMemory) { this.offheapMaxMemory = offheapMaxMemory; }
+    public String getMemoryStoreKind() {
+        return memoryStoreKind;
+    }
+
+    public void setMemoryStoreKind(String memoryStoreKind) {
+        this.memoryStoreKind = memoryStoreKind;
+    }
+
+    public boolean isOffheapEnabled() {
+        return offheapEnabled;
+    }
+
+    public void setOffheapEnabled(boolean offheapEnabled) {
+        this.offheapEnabled = offheapEnabled;
+    }
+
+    public int getOffheapThreshold() {
+        return offheapThreshold;
+    }
+
+    public void setOffheapThreshold(int offheapThreshold) {
+        this.offheapThreshold = offheapThreshold;
+    }
+
+    public long getOffheapMaxMemory() {
+        return offheapMaxMemory;
+    }
+
+    public void setOffheapMaxMemory(long offheapMaxMemory) {
+        this.offheapMaxMemory = offheapMaxMemory;
+    }
 
     public String getRequirepass() {
         return requirepass;

@@ -198,6 +198,20 @@ public class ConfigLoader {
                         config.setMaxmemoryPolicy(value);
                         break;
 
+                    // 内存存储引擎（hybrid 堆外 / default 堆上）
+                    case "memory-store-kind":
+                        config.setMemoryStoreKind(value);
+                        break;
+                    case "offheap-enabled":
+                        config.setOffheapEnabled("yes".equalsIgnoreCase(value));
+                        break;
+                    case "offheap-threshold":
+                        config.setOffheapThreshold(Integer.parseInt(value));
+                        break;
+                    case "offheap-max-memory":
+                        config.setOffheapMaxMemory(parseMemorySize(value));
+                        break;
+
                     // 安全配置
                     case "requirepass":
                         config.setRequirepass(value);
