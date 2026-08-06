@@ -1,7 +1,7 @@
 ---
 title: Luban-RDS 文档
-last_updated: 2026-08-05
-version: 1.0.15
+last_updated: 2026-08-06
+version: 1.0.17
 ---
 
 <div align="center">
@@ -82,6 +82,35 @@ version: 1.0.15
 ---
 
 ## ✨ 版本特性
+
+### v1.0.17 (已发布 · 2026-08-06)
+
+#### 🚀 堆外/混合内存存储引擎
+- ✅ **配置驱动切换**：`memory-store-kind=default|hybrid`，hybrid 模式为新增可用形态
+- ✅ **`HybridMemoryStore` 路由**：按数据类型自动选择 `OffHeapStringEngine` / `OnHeapStructEngine`
+- ✅ **`OffHeapStringEngine`**：String 走堆外 ByteBuffer，大幅降低 GC 压力
+- ✅ **`OnHeapStructEngine`**：Hash/List/ZSet/Stream 二期仍堆上（Caffeine 缓存序列化结构体）
+- ✅ **接口解耦**：`MemoryStore` 接口新增 `LruSampleSize` / `SoftLimitPercent` 等方法，去除实现类向下转型
+- ✅ **`CONFIG SET` 实时生效**：hybrid 模式下 `CONFIG SET` 命令实时生效
+- ✅ **依赖瘦身**：Caffeine 缓存依赖已移除
+- 🧪 26 测试全绿；Redisson 集群感知客户端冒烟 12/12 全绿闭环无泄漏
+
+#### 🔬 hybrid mesh Redisson 真实负载冒烟测试
+- ✅ **`RedissonHybridMeshIntegrationTest`**：mesh 模式 + hybrid 引擎下 Redisson 集群客户端 12 场景冒烟全绿
+- ✅ **堆外增减对称**：堆外容量扩缩容无泄漏、无残留
+- ✅ **Rebalance 闭环**：堆外内存重平衡（Rebalance）正确完成
+- ✅ **读写路由一致性**：客户端路由表与 Leader/MOVED 一致
+
+### v1.0.16 (已发布 · 2026-08-06)
+
+#### ⚡ mesh WAL 增量落盘
+- ✅ **写路径优化**：mesh 写路径由 `O(log N)` 简化为 `O(1)`（WAL 增量落盘替代全量 sweep）
+- ✅ **新基线**：140 ops/s（disk）vs 2083 ops/s（无 fsync），典型混合负载落差收窄
+- ✅ **瓶颈识别**：`raftExecutor` 单线程序列化为写吞吐上限；`raft-nodes.conf` 每写全量 fsync 当前是主导瓶颈（243ms@6400 条）
+
+#### 🔧 CommonCommandHandler 去强转
+- ✅ **接口齐备**：`LruSampleSize` / `SoftLimitPercent` 等下推至 `MemoryStore` 接口
+- ✅ **CONFIG SET 实时生效**：hybrid 模式下 `CONFIG SET` 命令实时生效
 
 ### v1.0.15 (已发布 · 2026-08-05)
 

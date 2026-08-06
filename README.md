@@ -44,9 +44,10 @@ Luban-RDS 是一款完全兼容 Redis 协议的轻量级高性能内存数据库
 - **集群配置持久化与节点恢复（v1.0.4+）**：`nodes.conf` 自动持久化、节点 ID 复用、槽位表重建、启动主动建连，避免全集群重启后节点成孤岛
 - **集群审计加固（v1.0.11 ~ v1.0.13）**：连续 6 批 P0/P1 修复覆盖 failover FAIL 保护期、replOffset 回填、写冻结自动恢复、MIGRATE 复制传播、CLUSTER 子命令/协议面/错误串英文/消息码 0x40+ 等
 - **主从复制**：完整支持主从复制功能，包括全量同步和增量同步
-- **3 节点 Raft 强一致集群（mesh 模块，v1.0.15）**：用 3 台机器替代 Redis Cluster 的 6 节点实现强一致高可用（多数派 ACK + 落盘），已确认写入不丢；`CLUSTER SLOTS` + `MOVED` 兼容 JedisCluster / lettuce / Redisson 集群感知客户端，13 阶段全闭环 + 291 测试全过（详见 [luban-rds-mesh/README.md](luban-rds-mesh/README.md) 与 [docs/mesh/](docs/mesh/index.md)）
+- **3 节点 Raft 强一致集群（mesh 模块，v1.0.15+）**：用 3 台机器替代 Redis Cluster 的 6 节点实现强一致高可用（多数派 ACK + 落盘），已确认写入不丢；`CLUSTER SLOTS` + `MOVED` 兼容 JedisCluster / lettuce / Redisson 集群感知客户端，13 阶段全闭环 + 291 测试全过（详见 [luban-rds-mesh/README.md](luban-rds-mesh/README.md) 与 [docs/mesh/](docs/mesh/index.md)）。v1.0.16+ 增加 WAL 增量落盘（写路径 O(log)→O(1)）
 - **健壮的网络层**：NETTY 客户端与服务端协议解析器均修复了 TCP 半包/粘包问题，能够正确处理跨段 RESP 响应与多响应合包
-- **内置性能基准测试（v1.0.15）**：`luban-rds-benchmark` 提供单节点、Cluster、Mesh 三类基准套件（`LubanBenchmarkMain` / `ClusterBenchmarkSuite` / `MeshBenchmarkSuite`），支持与 Redis 7.x 对比，并输出 HTML/Markdown 报告（详见 [docs/guide/benchmarking.md](docs/guide/benchmarking.md)）
+- **内置性能基准测试（v1.0.15+）**：`luban-rds-benchmark` 提供单节点、Cluster、Mesh 三类基准套件（`LubanBenchmarkMain` / `ClusterBenchmarkSuite` / `MeshBenchmarkSuite`），支持与 Redis 7.x 对比，并输出 HTML/Markdown 报告（详见 [docs/guide/benchmarking.md](docs/guide/benchmarking.md)）
+- **堆外/混合内存存储引擎（v1.0.17）**：`memory-store-kind=default|hybrid` 配置切换；hybrid 模式 = `OffHeapStringEngine`（堆外 ByteBuffer）`+ OnHeapStructEngine`（堆上去 Caffeine），按 key 类型自动路由；String 走堆外大幅降低 GC 压力，Hash/List/ZSet/Stream 仍走堆上（Caffeine 缓存序列化结构体）；新增 `memory-store-kind` 配置项 + `luban.rds.server.*` Spring Boot 配置前缀，hybrid 模式 `CONFIG SET` 实时生效已验证
 
 ## 🚀 快速开始
 
@@ -116,7 +117,7 @@ OK
 <dependency>
     <groupId>com.janeluo.luban</groupId>
     <artifactId>luban-rds-spring-boot-starter</artifactId>
-    <version>1.0.15</version>
+    <version>1.0.17</version>
 </dependency>
 ```
 
@@ -684,7 +685,7 @@ docker-compose down
 
 ```bash
 # 构建镜像
-docker build -t luban-rds:1.0.15 .
+docker build -t luban-rds:1.0.17 .
 
 # 基础运行
 docker run -d \
@@ -694,7 +695,7 @@ docker run -d \
   -e LUBAN_RDS_PORT=9736 \
   -e LUBAN_RDS_PERSIST_MODE=rdb \
   -e JAVA_OPTS="-Xms256m -Xmx512m" \
-  luban-rds:1.0.15
+  luban-rds:1.0.17
 
 # 带密码运行
 docker run -d \
@@ -702,7 +703,7 @@ docker run -d \
   -p 9736:9736 \
   -v luban-rds-data:/data \
   -e LUBAN_RDS_REQUIREPASS=your-secure-password \
-  luban-rds:1.0.15
+  luban-rds:1.0.17
 ```
 
 #### Docker 环境变量
@@ -925,6 +926,20 @@ luban.rds.server.data-dir=./data
 | 模块 | 详细说明 |
 |---------|---------|
 | **Lua 脚本只读性分析器** | `a602f1f`：新增 `LuaScriptAnalyzer` 脚本级只读判定；从节点 EVAL 不再误拒纯读脚本（Redisson 等客户端消除 `READONLY` 报错）；只改 slave 路径零回归 |
+
+### v1.0.17（已发布 · 2026-08-06）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **堆外/混合内存存储引擎（v1.0.17）** | `5c513e0` `feat(config): 添加堆外内存存储引擎配置支持`。`memory-store-kind=default\|hybrid` 二选一；hybrid 模式新增 `HybridMemoryStore` 路由 + `OffHeapStringEngine`（堆外 ByteBuffer 存 String）+ `OnHeapStructEngine`（堆上去 Caffeine 缓存序列化结构体）；S1 阶段扩展接口解耦全部强转；String 走堆外大幅降 GC，Hash/List/ZSet/Stream 二期仍堆上；26 测试全绿；hybrid 模式 `CONFIG SET` 实时生效 + Redisson 集群模式冒烟 12/12 全绿闭环无泄漏；`mesh-persist` 配置项开关化；Caffeine 缓存依赖已移除；详见 [docs/architecture/features.md](./docs/architecture/features.md) 与 `hybrid-memory-store-offheap` 归档 |
+| **mesh Redisson 真实负载冒烟测试（v1.0.17）** | `e814f37` `test(cluster): 添加 hybrid 模式 Redisson 真实负载冒烟测试`：hybird mesh 模式下 Redisson 集群感知客户端 12 场景冒烟全绿；堆外增减对称、Rebalance 闭环、读写路由一致性验证；为 hybrid 模式生产可用性提供端到端验证 |
+
+### v1.0.16（已发布 · 2026-08-06）
+
+| 模块 | 详细说明 |
+|---------|---------|
+| **mesh WAL 增量落盘（v1.0.16）** | 写路径由 O(log N) 简化为 O(1)：新 A/B 基线 140 vs 2083 ops/s（disk 路径）；每写全量序列化 Raft log + fsync 为写路径主导瓶颈（243ms@6400 条，raft-nodes.conf）；快照触发前的写吞吐上限由 raftExecutor 单线程决定；详见 `mesh-wal-incremental-persist` 归档与 [docs/mesh/setup.md](./docs/mesh/setup.md) |
+| **CommonCommandHandler 去强转（v1.0.16）** | `922dd4b` `refactor: CommonCommandHandler 去强转`：将 `LruSampleSize` / `SoftLimitPercent` 等方法补到 `MemoryStore` 接口，消除实现类向下转型；hybrid 模式下 `CONFIG SET` 命令实时生效 |
 
 ### v1.0.15（已发布 · 2026-08-05）
 

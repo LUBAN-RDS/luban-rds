@@ -8,18 +8,32 @@
 
 ## 2. 项目状态
 
-### 2.0 P0 数据安全修复（已归档 2026-07-27）
+### 2.0a v1.0.17 已发布功能（当前最新 · 2026-08-06）
 
-v1.0.7 → v1.0.8 期间集中修复了一批会影响生产数据正确性的 P0 问题，涵盖集群事务原子性、故障转移可靠性、持久化与数据正确性等关键路径：
+#### 🚀 内存引擎 - 堆外/混合内存存储引擎
+- [x] **配置驱动引擎 (v1.0.17)**: `memory-store-kind=default|hybrid`，hybrid 模式为新增可用形态
+- [x] **`HybridMemoryStore` 路由 (v1.0.17)**: 按数据类型路由 String → 堆外，结构体 → 堆上
+- [x] **`OffHeapStringEngine` (v1.0.17)**: String 进堆外 ByteBuffer 池化，新增/扩缩容/释放路径闭环对称
+- [x] **`OnHeapStructEngine` (v1.0.17)**: Hash/List/ZSet/Stream 二期仍堆上，Caffeine 缓存序列化结构体
+- [x] **接口解耦 (v1.0.17)**: `MemoryStore` 接口新增 `LruSampleSize` / `SoftLimitPercent`，去除 `CommonCommandHandler` 向下转型
+- [x] **依赖瘦身 (v1.0.17)**: 移除 Caffeine 缓存依赖
+- [x] **CONFIG SET 实时生效 (v1.0.17)**: hybrid 模式下 `CONFIG SET memory-store-kind` 实时切换
+- [x] **Redisson 冒烟 (v1.0.17)**: Redisson 集群感知客户端 12/12 全绿，堆外增减闭环、Rebalance 闭环
+- 🧪 26 测试全绿
 
-- [x] **C1 CROSSSLOT 键校验（集群事务原子性）**: `MULTI/EXEC` 阶段补齐与单命令一致的 CROSSSLOT 校验，避免混合槽位的多键命令先入队再被批量拒绝时留下脏事务。
-- [x] **C7 MIGRATE 原子性（事务支持）**: 修复 `MIGRATE` 在事务内可能被部分执行的窗口，保证事务整体原子回滚或提交。
-- [x] **C8 Sentinel failover 选举安全性**: 完善 `leader-elect` 选举流程，避免在 Sentinel 集群网络分区场景下出现脑裂/双主。
-- [x] **C9 FailoverResult 可靠广播**: 修正 `FailoverResult` 在网络瞬时断开时丢失通知的问题，新增失败重试与状态回查。
-- [x] **C11 AOF rewrite 期间数据一致性**: 修复 AOF rewrite 与主写入并发时的子进程快照可能丢失最新写入的问题，引入追加双写与重写完成校验。
-- [x] **C12 ZSet 字典序比较修复**: 修正 `ZRANGEBYLEX` / `ZRANGEBYSCORE` 中对同分数成员的字典序比较逻辑，使其与 Redis 7.x 行为一致。
+### 2.0b v1.0.16 已发布功能（2026-08-06）
 
-### 2.1 v1.0.15 已发布功能（当前最新 · 2026-08-05）
+#### ⚡ Mesh WAL 增量落盘
+- [x] **写路径 O(1) (v1.0.16)**: mesh 写路径由 `O(log N)` sweep 改为追加式 WAL，写吞吐稳定
+- [x] **新 A/B 基线 (v1.0.16)**: 140 ops/s（disk fsync）vs 旧 2083 ops/s（sweep + 全量写）
+- [x] **瓶颈识别 (v1.0.16)**: `raftExecutor` 单线程串行 + `raft-nodes.conf` 每写全量 fsync（243ms @ 6400 条）
+
+#### 🔧 CommonCommandHandler 去强转
+- [x] **接口齐备 (v1.0.16)**: `LruSampleSize` / `SoftLimitPercent` 等下推至 `MemoryStore` 接口
+- [x] **CONFIG SET 生效 (v1.0.16)**: hybrid 模式下 `CONFIG SET` 命令实时生效
+- [x] **零回归 (v1.0.16)**: default 模式零变化
+
+### 2.0c v1.0.15 已发布功能（2026-08-05）
 
 #### 🛰️ 分布式特性 - 3 节点 Raft 强一致集群（luban-rds-mesh）
 - [x] **luban-rds-mesh 模块（v1.0.15）**: 13 阶段全闭环实现（项目骨架 → MeshBus 传输层 → 状态机/RPC → 选举+PreVote+Lease → 日志复制 → MeshWriteGate → MOVED/MESHDOWN → Leader 读路径 Lease+read-index → CLUSTER SLOTS/NODES/INFO → MULTI 单条目+BLOCK 禁用 → chunked snapshot → 持久化/启动加载 → MeshBootstrap 装配 → 3 节点集成测试）；291 测试全过

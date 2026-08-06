@@ -1,5 +1,7 @@
 ---
 title: 功能架构
+last_updated: 2026-08-06
+version: 1.0.17
 ---
 
 # 功能架构
@@ -12,8 +14,12 @@ title: 功能架构
 
 **核心功能**：定义了所有数据类型的操作方法
 
-**新增方法**：
+**新增方法（v1.0.16 起逐步下推）**：
 - `zgetAllWithScores(int database, String key)` - 获取 ZSet 所有成员及其分数，用于持久化
+- `int getLruSampleSize()` / `void setLruSampleSize(int)` - LRU 采样窗口大小（v1.0.16 起，补到接口消除 `CommonCommandHandler` 向下转型）
+- `int getSoftLimitPercent()` / `void setSoftLimitPercent(int)` - 软上限百分比（v1.0.16 起，同样下推至接口）
+
+> **v1.0.17 设计要点**：所有需要运行时切换/动态调整的字段必须出现在 `MemoryStore` 接口中，禁止在 `CommonCommandHandler` / `CONFIG SET` 路径中再次强转实现类。
 
 ### 1.2 DefaultMemoryStore 实现
 
@@ -31,6 +37,67 @@ title: 功能架构
 
 **资源管理**：
 - `close()` 方法：关闭内存存储，释放后台线程资源
+
+### 1.3 HybridMemoryStore（v1.0.17 新增，混合内存引擎）
+
+**核心功能**：在同一实例中按数据类型**自动路由**到最合适的存储引擎——String 进堆外、Hash/List/ZSet/Stream 进堆上；可显著降低 GC 压力而不破坏结构体的零拷贝访问语义。
+
+**适用场景**：
+- String 数据占比高（典型缓存场景），希望降低 GC 频率
+- 不想放弃结构体类型（Caffeine 已移除后改用 hash 缓存）的内存局部性
+- 希望运行时通过 `CONFIG SET memory-store-kind` 切换引擎
+
+**引擎组成**：
+
+| 子引擎 | 负责类型 | 存储介质 | 适用原因 |
+|--------|----------|----------|----------|
+| `OffHeapStringEngine` | String | 堆外 `ByteBuffer`（池化） | String 体积小、序列化后无引用，高频 GC 痛点 |
+| `OnHeapStructEngine` | Hash / List / ZSet / Stream | 堆上（Caffeine 缓存序列化结构体） | 结构体访问零拷贝，二期保留 |
+
+**路由策略**：
+- `SET` / `GET` / `APPEND` / `INCR` / `STRLEN` / `GETRANGE` / `SETRANGE` → `OffHeapStringEngine`
+- `HSET` / `HGET` / `LPUSH` / `RPUSH` / `SADD` / `ZADD` / `XADD` → `OnHeapStructEngine`
+
+**关键约束**：
+- String 走堆外后，客户端需按 RESP 严格按字节读取（RDB 加载时按 `0xFD/0xFC` 长度前缀解析）
+- hybrid 模式**不破坏** Redis 协议语义：所有响应经 `Encoder` 统一序列化后再返回
+- mesh 模式可叠加 hybrid 模式（leader 写仍走 Raft log，落盘语义不变）
+
+### 1.4 引擎选择（v1.0.17 起可通过配置切换）
+
+```ini
+# 默认模式（保持历史行为，所有数据走堆上）
+memory-store-kind=default
+
+# 混合模式（String 走堆外，结构体仍堆上）
+memory-store-kind=hybrid
+```
+
+CLI 等价：`--memory-store-kind default|hybrid`。
+
+**Spring Boot 配置前缀**：`luban.rds.server.memory-store-kind`。
+
+**CONFIG SET 实时切换**：
+
+```bash
+# 运行时从 default 切到 hybrid（无需重启）
+CONFIG SET memory-store-kind hybrid
+# 立即生效：后续 SET 走堆外
+```
+
+### 1.5 HybridMemoryStore 实现要点
+
+**接口解耦（S1 阶段已完成）**：
+- `MemoryStore` 接口补齐 `LruSampleSize` / `SoftLimitPercent` 等方法
+- `CommonCommandHandler` 不再对实现类做 `(DefaultMemoryStore) store` 等向下转型
+- 新增 `HybridMemoryStore implements MemoryStore`，与 `DefaultMemoryStore` 互换零回归
+
+**测试与冒烟覆盖**：
+- 单元测试 26 项全绿
+- Redisson 集群感知客户端 12 场景冒烟全绿（`e814f37` `test(cluster): 添加 hybrid 模式 Redisson 真实负载冒烟测试`）
+- 堆外增减对称：扩/缩容/释放路径闭环无泄漏
+- Rebalance 闭环：堆外内存重平衡正确完成
+- 读写路由一致性：客户端路由表与 Leader/MOVED 一致
 
 ## 2. 命令处理
 

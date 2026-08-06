@@ -1,11 +1,67 @@
 ---
 title: 更新日志
-last_updated: 2026-08-05
-version: 1.0.15
+last_updated: 2026-08-06
+version: 1.0.17
 ---
 # 更新日志
 
 Luban-RDS 是一款轻量级、高性能、完全兼容 RESP 协议的 Java 内存数据库，易于嵌入和扩展。
+
+## [1.0.17] - 2026-08-06
+
+### 🚀 堆外/混合内存存储引擎（`5c513e0` `feat(config): 添加堆外内存存储引擎配置支持`）
+
+- **配置驱动引擎切换**：新增 `memory-store-kind=default|hybrid` 配置项，二选一开启堆外/混合引擎
+- **`HybridMemoryStore` 路由**：按数据类型自动选择 `OffHeapStringEngine`（String 走堆外 ByteBuffer）/ `OnHeapStructEngine`（Hash/List/ZSet/Stream 二期仍堆上）
+- **`OffHeapStringEngine`**：String 数据进入堆外 `ByteBuffer` 池化；新增/扩容/缩容/释放路径闭环对称
+- **`OnHeapStructEngine`**：堆上去 Caffeine 缓存序列化结构体（Hash/List/ZSet/Stream）
+- **接口解耦**：S1 阶段扩展 `MemoryStore` 接口（`LruSampleSize` / `SoftLimitPercent` 等），消除 `CommonCommandHandler` 的实现类向下转型
+- **依赖瘦身**：Caffeine 缓存依赖已移除
+- **CONFIG SET 实时生效**：`hybrid` 模式下 `CONFIG SET` 实时切换生效（已冒烟验证）
+- **`mesh-persist` 开关**：mesh 持久化开关化配置，便于回归 / 调试
+- **测试覆盖**：26 测试全绿；Redisson 集群感知客户端冒烟 12/12 全绿（`e814f37` `test(cluster): 添加 hybrid 模式 Redisson 真实负载冒烟测试`）
+
+### 兼容性
+
+- 与 v1.0.16 完全兼容；`default` 模式与历史行为完全一致
+- hybrid 模式开启后，String 写路径立即落堆外，存量运行节点可通过 `CONFIG SET memory-store-kind default` 回退
+- mesh 模式与 hybrid 模式可叠加启用（mesh leader 写仍走 Raft log，落盘语义不变）
+
+### 文档
+
+- **架构说明**：[docs/architecture/features.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/docs/architecture/features.md)（新增 §22 混合内存存储引擎）
+- **归档**：`hybrid-memory-store-offheap` 完整设计 / 落地归档
+
+---
+
+## [1.0.16] - 2026-08-06
+
+### ⚡ Mesh WAL 增量落盘（写路径 O(log) → O(1)）
+
+- **路径简化**：mesh 写路径由遍历式 `O(log N)` 落盘改为**追加式 `O(1)` 增量 WAL**，避免每次提交扫描整个索引段
+- **新基线（A/B）**：
+  - 纯写吞吐（disk 路径）：140 ops/s（每写 fsync）+ 全量序列化耗时 vs 旧 2083 ops/s（旧 sweep 后全量写）
+  - 实际生产负载：写入尾尖峰 ≈ Windows 15.6ms 定时器工件（非 GC / 非选举 / 非传输），属于硬件/内核上限
+- **瓶颈识别**：
+  - `raftExecutor` 单线程串行 = mesh 当前写吞吐上限
+  - `raft-nodes.conf` 每写全量序列化 + fsync（243ms @ 6400 条）= 写路径主导瓶颈
+- **快照触发缺口**：日志条目超过 `mesh-snapshot-log-threshold` 后 SnapshotManager 尚未触发（规划在 v1.0.18 闭环）
+- **stop() 5 秒停顿**：连续高负载运行后停机 5 秒停顿未根治（解释为 fsync 排队累积）
+
+### 🔧 CommonCommandHandler 去强转（`922dd4b` `refactor: CommonCommandHandler 去强转 (补 LruSampleSize/SoftLimitPercent 到接口，hybrid 模式 CONFIG 命令生效)`）
+
+- **接口齐备**：将 `LruSampleSize` / `SoftLimitPercent` 等方法补到 `MemoryStore` 接口
+- **零转型**：消除 `CommonCommandHandler` 内的 `(DefaultMemoryStore) store` 强转
+- **CONFIG 命令生效**：hybrid 模式下 `CONFIG SET` 命令实时切换生效
+- **零回归**：现有 default 模式集群感知客户端零变化
+
+### 兼容性
+
+- 与 v1.0.15 完全兼容
+- mesh WAL 协议格式不变，dump.rdb 兼容旧版本加载
+- hybrid 模式开关不影响 Raft 协议层
+
+---
 
 ## [1.0.15] - 2026-08-05
 

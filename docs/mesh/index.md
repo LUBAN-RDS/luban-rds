@@ -1,12 +1,16 @@
 ---
 title: Mesh 集群
-last_updated: 2026-08-05
-version: 1.0.15
+last_updated: 2026-08-06
+version: 1.0.17
 ---
 
 # Mesh 集群（3 节点 Raft 强一致）
 
 > **v1.0.15 新增** —— `luban-rds-mesh` 模块：用 3 台机器替代 Redis Cluster 的 6 节点，实现强一致高可用，**已确认的写入永不丢失**。
+>
+> **v1.0.16 增强** —— WAL 增量落盘：写路径由 `O(log N)` 简化为 `O(1)`，详见 `mesh-wal-incremental-persist` 归档与 [docs/guide/benchmarking.md](../guide/benchmarking.md)。
+>
+> **v1.0.17 增强** —— hybrid 模式可叠加启用（mesh leader 写仍走 Raft log，落盘语义不变）；`memory-store-kind=hybrid` 下 String 走堆外 ByteBuffer；Redisson 集群模式冒烟 12/12 全绿。
 
 [![Status](https://img.shields.io/badge/status-implemented-green.svg)]()
 [![Nodes](https://img.shields.io/badge/nodes-3-blue.svg)]()

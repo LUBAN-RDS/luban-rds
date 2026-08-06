@@ -1,7 +1,7 @@
 ---
 title: Mesh 快速上手
-last_updated: 2026-08-05
-version: 1.0.15
+last_updated: 2026-08-06
+version: 1.0.17
 ---
 
 # Mesh 集群快速上手
