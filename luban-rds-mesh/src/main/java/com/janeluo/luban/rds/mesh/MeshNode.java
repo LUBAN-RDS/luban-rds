@@ -79,6 +79,10 @@ public class MeshNode {
     private final ScheduledExecutorService raftExecutor;
     /** ElectionTimer 与心跳定时器复用的调度器（可与 raftExecutor 同一个）。 */
     private final ScheduledExecutorService scheduler;
+    /** 落盘专用单线程调度器（与 raftExecutor 解耦：fsync 不得阻塞心跳/RPC 处理）。 */
+    private final ScheduledExecutorService persistExecutor;
+    /** 本节点已落盘的最大日志 index（仅 raftExecutor 线程写；volatile 供读路径兜底）。 */
+    private volatile long durableIndex;
 
     private final ElectionTimer electionTimer;
     private final LeaseManager lease;
@@ -117,12 +121,23 @@ public class MeshNode {
      */
     private volatile SnapshotManager snapshotManager;
 
+    /** 一条在途 propose：完成句柄 + 请求 key（领导丢失时生成 MOVED 用）。 */
+    private static final class PendingProposal {
+        final CompletableFuture<byte[]> future;
+        final String key;
+
+        PendingProposal(CompletableFuture<byte[]> future, String key) {
+            this.future = future;
+            this.key = key;
+        }
+    }
+
     /**
-     * Leader 侧待响应的 propose：index → CompletableFuture。
+     * Leader 侧待响应的 propose：index → {@link PendingProposal}（完成句柄 + 请求 key）。
      * apply 完成后由 LogReplicator.appliedNotifier 回调，complete 对应 future。
      * 仅 raftExecutor 线程读写（apply 串行保证），用 ConcurrentHashMap 仅作线程安全兜底。
      */
-    private final Map<Long, CompletableFuture<byte[]>> pendingProposals = new ConcurrentHashMap<>();
+    private final Map<Long, PendingProposal> pendingProposals = new ConcurrentHashMap<>();
 
     private volatile boolean started;
     private volatile boolean stopped;
@@ -166,6 +181,14 @@ public class MeshNode {
             return t;
         });
         this.scheduler = this.raftExecutor;
+        // 落盘线程独立于 raft 线程：写高峰 fsync 不再停摆心跳（选举风暴根因修复）
+        this.persistExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mesh-persist-" + abbrev(nodeId));
+            t.setDaemon(true);
+            return t;
+        });
+        // 启动时状态已从 WAL 恢复 → 全部已持久化
+        this.durableIndex = state.getLastLogIndex();
         this.lease = new LeaseManager(config.getLeaseDurationMs());
         this.electionTimer = new ElectionTimer(
                 config.getElectionTimeoutMinMs(),
@@ -176,6 +199,8 @@ public class MeshNode {
         this.applier = applier;
         if (applier != null) {
             this.replicator = new LogReplicator(nodeId, config, state, busClient, applier);
+            // 自身 match 以已落盘 index 为上限（未落盘不 commit，持久性语义）
+            this.replicator.setDurableIndexSupplier(() -> durableIndex);
             // apply 完成回调：complete 对应 pendingProposals future（携带 apply 响应对象；序列化为字节）
             this.replicator.setAppliedNotifier(this::onEntryApplied);
             // 多数派 ACK 续租回调（Leader Lease，DESIGN §5.7）
@@ -215,6 +240,7 @@ public class MeshNode {
         stopHeartbeat();
         lease.invalidate();
         raftExecutor.shutdownNow();
+        persistExecutor.shutdownNow();
         logger.info("MeshNode 已停止: nodeId={}", abbrev(nodeId));
     }
 
@@ -342,16 +368,19 @@ public class MeshNode {
      *   <li>校验 {@code role==LEADER}，否则抛 {@link MovedToLeaderException}（阶段 4 占位：leader 地址未知）。</li>
      *   <li>{@code index = lastIncludedIndex + log.size() + 1}（含快照偏移）。</li>
      *   <li>构造 {@link LogEntry}(currentTerm, index, respPayload, dbIndex, extra)，state.appendEntry。</li>
-     *   <li><b>持久化</b>（自身日志落盘）：调 persistHook（阶段 11 实现真实 fsync，阶段 4 no-op）。
-     *       落盘在 raftExecutor 线程同步等待（future 在落盘后注册）。</li>
-     *   <li>创建 {@link CompletableFuture}，注册到 pendingProposals。</li>
+     *   <li>注册 pending（{@link PendingProposal}：future + 请求 key）。</li>
+     *   <li><b>异步持久化</b>（自身日志落盘）：调 persistHook（阶段 11 实现真实 fsync，阶段 4 no-op），
+     *       在独立 persistExecutor 线程执行——fsync 不阻塞 raft 线程（心跳/RPC 照常）；
+     *       落盘成功后经 {@link #onPersistSucceeded} 回 raft 线程推进 durableIndex 并重触发 commit，
+     *       失败经 {@link #onPersistFailed} 回滚日志并 fail 在途 future。</li>
      *   <li>触发 {@link LogReplicator#replicate}（异步给 Follower 发 AppendEntries）。</li>
-     *   <li>返回 future（调用方阻塞等待）。</li>
+     *   <li>返回 future（调用方阻塞等待；落盘 + commit + apply 完成后被 complete）。</li>
      * </ol>
      * </p>
-     * <p><b>线程模型</b>：propose 的状态访问（校验 role / appendEntry / persistHook / 注册 future）
-     * 必须在 raftExecutor 单线程上执行，避免与 AppendEntries 响应处理并发改 state。
-     * 本方法把核心逻辑提交到 raftExecutor，返回的 future 在 apply 完成后被 complete。</p>
+     * <p><b>线程模型</b>：propose 的状态访问（校验 role / appendEntry / 注册 future）在 raftExecutor
+     * 单线程上执行，避免与 AppendEntries 响应处理并发改 state；落盘在 persistExecutor 独立线程
+     * （fsync 不阻塞 raft 线程），完成/失败回调提交回 raftExecutor 串行处理。
+     * 返回的 future 在 apply 完成后被 complete。</p>
      *
      * @param respPayload 完整 RESP 命令帧（事务时为 MULTI 帧）
      * @param dbIndex     apply 时传给 handler 的 database 参数
@@ -407,25 +436,29 @@ public class MeshNode {
         state.appendEntry(entry);
         logger.trace("propose: append entry index={}, term={}, dbIndex={}", index, term, dbIndex);
 
-        // 4. 持久化（自身日志落盘，fsync 完成后才继续；阶段 4 为 persistHook no-op）
-        //    DESIGN §5.1：Leader 必须在自身日志落盘后才 complete future 回客户端。
-        try {
-            persistHook.run();
-        } catch (Exception e) {
-            logger.error("propose: 自身日志落盘失败, index={}", index, e);
-            future.completeExceptionally(new IllegalStateException("leader persist failed", e));
-            // 回滚刚追加的 entry（避免未落盘日志被 commit）
-            state.truncateAfter(index - 1);
-            return;
-        }
+        // 4. 注册 pending（含请求 key，供领导丢失时生成 MOVED）并异步落盘。
+        //    落盘在独立持久化线程执行（fsync 不阻塞 raft 线程/心跳）；future 在
+        //    落盘成功 + commit + apply 后由 onEntryApplied complete。
+        pendingProposals.put(index, new PendingProposal(future, extractFirstKey(respPayload)));
+        final long persistIndex = index;
+        persistExecutor.execute(() -> {
+            try {
+                persistHook.run();
+                if (!stopped && !raftExecutor.isShutdown()) {
+                    raftExecutor.execute(() -> onPersistSucceeded(persistIndex));
+                }
+            } catch (Exception e) {
+                logger.error("propose: 自身日志落盘失败, index={}", index, e);
+                if (!stopped && !raftExecutor.isShutdown()) {
+                    raftExecutor.execute(() -> onPersistFailed(persistIndex, e));
+                }
+            }
+        });
 
-        // 5. 注册 pending future（apply 完成后由 onEntryApplied complete）
-        pendingProposals.put(index, future);
-
-        // 6. 触发复制（异步给 Follower 发 AppendEntries）
+        // 5. 触发复制（异步给 Follower 发 AppendEntries）
         replicator.replicate(entry, false);
 
-        // 7. 单节点集群：无 peer，propose 后立即自检 commit + apply（future 由 onEntryApplied complete）
+        // 6. 单节点集群：无 peer，propose 后立即自检 commit + apply（future 由 onEntryApplied complete）
         //    （replicate 内部已处理单节点 case，这里无需重复）
     }
 
@@ -539,16 +572,54 @@ public class MeshNode {
      * @param responseObject apply 返回的响应对象（handle 的返回值；Follower 侧无 future 时丢弃）
      */
     private void onEntryApplied(long index, Object responseObject) {
-        CompletableFuture<byte[]> future = pendingProposals.remove(index);
-        if (future == null || future.isDone()) {
+        PendingProposal pp = pendingProposals.remove(index);
+        if (pp == null || pp.future.isDone()) {
             // 非 Leader 或该 index 无 pending propose（如 Follower 侧 apply），忽略
             return;
         }
         try {
             byte[] respBytes = applier.serializeResponse(responseObject);
-            future.complete(respBytes);
+            pp.future.complete(respBytes);
         } catch (Throwable t) {
-            future.completeExceptionally(t);
+            pp.future.completeExceptionally(t);
+        }
+    }
+
+    /**
+     * 落盘成功回调（raft 线程执行）：推进 durableIndex 并重触发 commit/apply。
+     * <p>必须重触发：自身 match 以 durableIndex 为上限，落盘完成后才可能推进 commitIndex；
+     * 不重触发则 commit 永久停摆（死锁）。</p>
+     */
+    private void onPersistSucceeded(long persistIndex) {
+        if (persistIndex > durableIndex) {
+            durableIndex = persistIndex;
+        }
+        if (replicator != null && state.role == MeshRole.LEADER) {
+            boolean advanced = replicator.maybeAdvanceCommitIndex();
+            if (advanced) {
+                replicator.applyCommittedEntries();
+            }
+        }
+    }
+
+    /**
+     * 落盘失败回调（raft 线程执行）：回滚该条目并 fail 所有受影响的在途 propose。
+     * <p>约束：truncateAfter 必须先于 complete（同任务内原子完成），否则排队中的后续
+     * propose 条目被连带截断后其 future 会悬挂（MeshNodePersistAsyncTest.persistFailure 断言依赖此顺序）。</p>
+     */
+    private void onPersistFailed(long persistIndex, Exception cause) {
+        state.truncateAfter(persistIndex - 1);
+        java.util.Iterator<Map.Entry<Long, PendingProposal>> it = pendingProposals.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<Long, PendingProposal> e = it.next();
+            if (e.getKey() >= persistIndex) {
+                e.getValue().future.completeExceptionally(
+                        new IllegalStateException("leader persist failed", cause));
+                it.remove();
+            }
+        }
+        if (replicator != null && state.role == MeshRole.LEADER) {
+            replicator.maybeAdvanceCommitIndex();
         }
     }
 
@@ -978,8 +1049,8 @@ public class MeshNode {
             return;
         }
         IllegalStateException cause = new IllegalStateException("leadership lost; propose aborted");
-        for (Map.Entry<Long, CompletableFuture<byte[]>> e : pendingProposals.entrySet()) {
-            e.getValue().completeExceptionally(cause);
+        for (Map.Entry<Long, PendingProposal> e : pendingProposals.entrySet()) {
+            e.getValue().future.completeExceptionally(cause);
         }
         pendingProposals.clear();
     }

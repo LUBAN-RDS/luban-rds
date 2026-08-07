@@ -76,6 +76,18 @@ public class LogReplicator {
     private final LogApplier applier;
 
     /**
+     * 本节点（Leader 自身）已落盘日志 index 提供者；commit 门控用。
+     * 默认 = state.getLastLogIndex()（不 gate，向后兼容）；MeshNode 装配为 durableIndex。
+     * 默认值在构造器内赋值（字段初始化器中的 lambda 无法引用尚未赋值的 final state 字段）。
+     */
+    private volatile java.util.function.LongSupplier durableIndexSupplier;
+
+    /** 注入自身落盘进度提供者（null 恢复默认不 gate）。 */
+    public void setDurableIndexSupplier(java.util.function.LongSupplier supplier) {
+        this.durableIndexSupplier = supplier == null ? () -> state.getLastLogIndex() : supplier;
+    }
+
+    /**
      * apply 完成一条后的回调：参数1 = 该条目的 index，参数2 = apply 返回的响应对象（Object）。
      * MeshNode 注册此回调，用于 complete 对应 pendingProposals future（Leader 序列化响应对象为字节）。
      * Follower 侧 future 不存在，回调内 no-op。
@@ -98,6 +110,8 @@ public class LogReplicator {
         this.state = state;
         this.busClient = busClient;
         this.applier = applier;
+        // 默认不 gate（向后兼容）；MeshNode 会注入 durableIndex 提供者
+        this.durableIndexSupplier = () -> state.getLastLogIndex();
     }
 
     /** 注入 apply 完成回调（参数1=已 apply 的 index，参数2=apply 返回的响应对象）。 */
@@ -322,6 +336,12 @@ public class LogReplicator {
         // 第 majority-1 个（0-based）即「多数派都 >= 该值」的最大值
         long candidate = indexes.get(majority - 1);
         if (candidate <= state.commitIndex) {
+            return false;
+        }
+        // 未落盘不计入多数派（选举风暴修复的持久性门控）：Leader 自身条目必须先落盘
+        // 才能 commit——即使 2 个 Follower 都已 ACK，自身 fsync 未完成时不得 commit/回客户端。
+        long durable = durableIndexSupplier.getAsLong();
+        if (candidate > durable) {
             return false;
         }
         // Raft §5.4.2：只能提交 currentTerm 的日志（防 Fig 8）
