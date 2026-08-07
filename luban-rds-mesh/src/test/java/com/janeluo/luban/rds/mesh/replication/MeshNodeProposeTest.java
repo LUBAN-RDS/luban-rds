@@ -355,6 +355,7 @@ class MeshNodeProposeTest {
                     "新 Leader 已知时 cause 应为 MovedToLeaderException");
             MovedToLeaderException moved = (MovedToLeaderException) ee.getCause();
             assertEquals("b", moved.getLeaderNodeId());
+            assertEquals("k", moved.getKey(), "MOVED 应携带请求 key");
         } finally {
             node.stop();
         }

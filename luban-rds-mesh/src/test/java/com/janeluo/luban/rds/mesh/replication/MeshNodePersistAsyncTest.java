@@ -8,7 +8,6 @@ import com.janeluo.luban.rds.mesh.bus.MeshBusClient;
 import com.janeluo.luban.rds.mesh.bus.MeshBusHandler;
 import com.janeluo.luban.rds.mesh.bus.MeshFrame;
 import com.janeluo.luban.rds.mesh.bus.MessageType;
-import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
 import com.janeluo.luban.rds.mesh.core.MeshState;
 import com.janeluo.luban.rds.mesh.core.RaftStateMachine;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesResponse;
@@ -19,14 +18,13 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * P0 异步落盘回归：慢 fsync 不阻塞 raft 线程、durableIndex 门控 commit、
  * fsync 失败回滚、单节点异步落盘后 future 完成。
- * <p>包私有方法（awaitIdle/pendingProposalsCount/submitSync）经反射访问（与 MeshNodeProposeTest 同模式）。</p>
+ * <p>包私有方法（awaitIdle/pendingProposalsCount）经反射访问（与 MeshNodeProposeTest 同模式）。</p>
  */
 @Timeout(value = 15, unit = TimeUnit.SECONDS)
 class MeshNodePersistAsyncTest {
@@ -121,10 +119,18 @@ class MeshNodePersistAsyncTest {
             assertTrue(persistEntered.await(2, TimeUnit.SECONDS), "落盘任务应已进入持久化线程");
 
             // 落盘仍被阻塞时，raft 线程必须可执行新任务（心跳/RPC 不受影响）
-            // 修复前：raft 线程同步阻塞在 persistHook → 本调用挂起 → @Timeout 15s 失败（红）
+            // 修复前：raft 线程同步阻塞在 persistHook 约 5s（hook 内 latch 自超时）后才恢复，后续 f.get(3s) 超时失败（红）
             awaitIdle(node);
 
             assertFalse(f.isDone(), "落盘未完成时 future 不应完成");
+
+            // 两个 Follower 都 ACK（多数派 2/3），但自身仍阻塞在落盘 → commit 不得推进、future 不得完成
+            AppendEntriesResponse ok = new AppendEntriesResponse(1L, true, 1L);
+            node.onMessage("b", new MeshFrame("b", MessageType.APPEND_ENTRIES_RESP.getCode(), ok.encode()));
+            node.onMessage("c", new MeshFrame("c", MessageType.APPEND_ENTRIES_RESP.getCode(), ok.encode()));
+            awaitIdle(node);
+
+            assertFalse(f.isDone(), "自身未落盘前 future 不得完成");
 
             releasePersist.countDown();
             byte[] resp = f.get(3, TimeUnit.SECONDS);
@@ -181,6 +187,11 @@ class MeshNodePersistAsyncTest {
         }
     }
 
+    /**
+     * 落盘抛异常 → 日志条目回滚 + pending future 以 IllegalStateException 完成。
+     * <p>实现约束：回滚（truncateAfter）与 fail future 须在 raft 线程同一任务内完成
+     * （truncate 先于 complete），本用例断言依赖该顺序。</p>
+     */
     @Test
     void persistFailure_rollsBackAndFailsPending() throws Exception {
         MeshConfig config = threeNodeConfig();
