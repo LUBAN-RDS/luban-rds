@@ -1079,14 +1079,12 @@ public class MeshNode {
 
     /**
      * 失去 Leader 身份时，把所有未完成的 pending propose future 以异常 complete。
-     * <p>
-     * 这些 propose 的 entry 可能尚未 commit，按 Raft 语义新 Leader 不会复制它们（未提交写入被覆盖）。
-     * 调用方（gate）收到异常后向客户端报错，符合「一致性 &gt; 可用性」。</p>
-     * <p>
-     * <b>MOVED 重试（选举风暴修复，DESIGN §5.1）</b>：新 Leader 已知且请求 key 可提取时，
-     * 抛 {@link MovedToLeaderException}——集群感知客户端（Redisson）收到 MOVED 会自动跟随重定向
-     * 重试，避免对通用 ERR（如 "leadership lost"）不重试导致写失败；新 Leader 未知（如任期裁决
-     * 未携带 leaderId）或 key 不可提取时回退普通 ERR。</p>
+     * <p>新 Leader 已知（收到其更高任期 AppendEntries，leaderId 已更新）且请求 key 可提取时抛
+     * {@link MovedToLeaderException}（集群感知客户端自动跟随 MOVED 重试，避免 Redisson 对通用
+     * ERR 不重试导致写失败）；新 Leader 尚未宣布（更高任期 RequestVote/响应路径）时回退 ERR。
+     * 这些 propose 的 entry 可能尚未 commit（未提交写入被新 Leader 覆盖），也可能已获多数派 ACK
+     * 仅未推进 commitIndex（新 Leader 日志已有该条目并会 apply）——MOVED 重试为 at-least-once
+     * 语义，与 Redis Cluster 故障转移一致，客户端重试可能重复执行非幂等命令（一致性 > 可用性的取舍）。</p>
      */
     private void failPendingProposalsOnLeadershipLoss() {
         if (pendingProposals.isEmpty()) {

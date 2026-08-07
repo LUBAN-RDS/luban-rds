@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <h3>随机化超时（防 split vote）</h3>
  * <p>
-     * 每次调度一个超时都重新随机一个值（区间 {@code [minMs, maxMs]}，默认 300-600ms）。随机化是 Raft
+ * 每次调度一个超时都重新随机一个值（区间 {@code [minMs, maxMs]}，默认 300-600ms）。随机化是 Raft
  * 防 split vote 的关键：若多个节点固定相同超时，会同时发起选举互相争票，谁都拿不到多数派。随机化
  * 使超时点错开，先超时的候选者更可能在其他节点超时前拿到多数票。
  * </p>
