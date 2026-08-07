@@ -38,7 +38,7 @@ version: 1.0.17
 | 角色 | 触发条件 | 主要行为 |
 |------|----------|----------|
 | **FOLLOWER** | 启动默认 / Leader 卸任 / Candidate 落选 | 被动接收 AppendEntries；选举超时后转 Candidate |
-| **CANDIDATE** | 选举超时（默认 150~300ms 随机化） | 先 PreVote 探测（**不自增 term**）；多数派预投通过后正式增 term 并发起 RequestVote |
+| **CANDIDATE** | 选举超时（默认 300~600ms 随机化） | 先 PreVote 探测（**不自增 term**）；多数派预投通过后正式增 term 并发起 RequestVote |
 | **LEADER** | 获 2/3 投票 | 处理客户端写入；向 Followers 复制日志；维持心跳与读租约 |
 
 辅助状态枚举（`MeshState`）：
