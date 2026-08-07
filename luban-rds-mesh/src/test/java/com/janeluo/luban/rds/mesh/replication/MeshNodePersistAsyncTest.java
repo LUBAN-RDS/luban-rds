@@ -272,6 +272,7 @@ class MeshNodePersistAsyncTest {
 
         CountDownLatch persistEntered = new CountDownLatch(1);
         CountDownLatch releasePersist = new CountDownLatch(1);
+        CountDownLatch persistExited = new CountDownLatch(1);
         AtomicBoolean firstHookCall = new AtomicBoolean(true);
         node.setPersistHook(() -> {
             if (!firstHookCall.getAndSet(false)) {
@@ -284,6 +285,9 @@ class MeshNodePersistAsyncTest {
                 releasePersist.await(5, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+            } finally {
+                // 钩子退出（含抛 RuntimeException）前发出信号：断言等待此信号后再 settle
+                persistExited.countDown();
             }
             throw new RuntimeException("disk full");
         });
@@ -303,8 +307,12 @@ class MeshNodePersistAsyncTest {
             assertFalse(node.isLeader());
 
             releasePersist.countDown();
-            awaitIdle(node);
-
+            assertTrue(persistExited.await(3, TimeUnit.SECONDS), "落盘回调线程应已退出钩子");
+            // 短暂 settle：等 onPersistFailed 回调经 submitToRaft 在 raft 线程执行完
+            for (int i = 0; i < 20; i++) {
+                Thread.sleep(10);
+                awaitIdle(node);
+            }
             // 非 Leader 的落盘失败回调不得截断日志（日志留给新 Leader 复制修复）
             assertEquals(1L, state.getLastLogIndex(), "非 Leader 不得因落盘失败截断日志");
         } finally {
