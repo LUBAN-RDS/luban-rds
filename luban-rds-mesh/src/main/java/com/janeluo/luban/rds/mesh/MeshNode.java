@@ -919,9 +919,10 @@ public class MeshNode {
             persistStateSafe("decideRequestVote-term-up");
         }
         if (decision.resetElectionTimer) {
-            electionTimer.reset();
+            // 先复位退避、再重排定时器：否则 reset 用过期 consecutiveFailures 多带一轮退避。
             // 收到合法 RequestVote（含 PreVote 探测）→ 有活跃选举活动，复位退避
             electionTimer.onElectionSucceeded();
+            electionTimer.reset();
         }
         // 阶段 11：正式投票（非 PreVote）且 granted → votedFor 已设置 → 持久化
         // （fsync 在回复投票前完成，保证崩溃恢复后不会同任期二次投票）
@@ -968,9 +969,10 @@ public class MeshNode {
             persistStateSafe("handleAppendEntries-term-up");
         }
         if (decision.resetElectionTimer) {
-            electionTimer.reset();
+            // 先复位退避、再重排定时器：否则 reset 用过期 consecutiveFailures 多带一轮退避。
             // 收到合法 AppendEntries（Leader 心跳）→ 复位退避
             electionTimer.onElectionSucceeded();
+            electionTimer.reset();
         }
 
         // 阶段 4：Follower 侧——commitIndex 被 leaderCommit 推进后，apply 已提交条目到 raw store。
@@ -1080,14 +1082,26 @@ public class MeshNode {
      * <p>
      * 这些 propose 的 entry 可能尚未 commit，按 Raft 语义新 Leader 不会复制它们（未提交写入被覆盖）。
      * 调用方（gate）收到异常后向客户端报错，符合「一致性 &gt; 可用性」。</p>
+     * <p>
+     * <b>MOVED 重试（选举风暴修复，DESIGN §5.1）</b>：新 Leader 已知且请求 key 可提取时，
+     * 抛 {@link MovedToLeaderException}——集群感知客户端（Redisson）收到 MOVED 会自动跟随重定向
+     * 重试，避免对通用 ERR（如 "leadership lost"）不重试导致写失败；新 Leader 未知（如任期裁决
+     * 未携带 leaderId）或 key 不可提取时回退普通 ERR。</p>
      */
     private void failPendingProposalsOnLeadershipLoss() {
         if (pendingProposals.isEmpty()) {
             return;
         }
-        IllegalStateException cause = new IllegalStateException("leadership lost; propose aborted");
+        String newLeaderId = state.leaderId;
         for (Map.Entry<Long, PendingProposal> e : pendingProposals.entrySet()) {
-            e.getValue().future.completeExceptionally(cause);
+            PendingProposal pp = e.getValue();
+            if (newLeaderId != null && pp.key != null) {
+                pp.future.completeExceptionally(
+                        new MovedToLeaderException(newLeaderId, null, pp.key));
+            } else {
+                pp.future.completeExceptionally(
+                        new IllegalStateException("leadership lost; propose aborted"));
+            }
         }
         pendingProposals.clear();
     }

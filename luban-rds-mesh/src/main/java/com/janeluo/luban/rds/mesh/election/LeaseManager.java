@@ -16,7 +16,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * <h3>leaseDuration</h3>
  * <p>
- * {@code leaseDuration = 2 × electionTimeout}（默认 electionTimeout 上限 300ms → leaseDuration 600ms，可配置）。
+ * {@code leaseDuration = 2 × electionTimeout}（默认 electionTimeout 上限 600ms → leaseDuration 1200ms，可配置）。
  * 前提：节点间时钟偏差 &lt; leaseDuration/2（部署要求 NTP 对齐）。
  * </p>
  *
@@ -39,8 +39,8 @@ public class LeaseManager {
 
     private static final Logger logger = LoggerFactory.getLogger(LeaseManager.class);
 
-    /** 默认租约时长（ms）= 2 × electionTimeout 上限 300ms。 */
-    public static final long DEFAULT_LEASE_DURATION_MS = 600;
+    /** 默认租约时长（ms）= 2 × electionTimeout 上限 600ms。 */
+    public static final long DEFAULT_LEASE_DURATION_MS = 1200;
 
     private final long leaseDurationMs;
 

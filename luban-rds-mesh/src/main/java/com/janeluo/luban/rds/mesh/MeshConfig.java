@@ -16,9 +16,9 @@ import java.util.Set;
  *
  * <h3>关键参数</h3>
  * <ul>
- *   <li>{@code electionTimeoutMinMs/MaxMs}：选举超时区间（默认 150-300ms，DESIGN §5.2）</li>
+ *   <li>{@code electionTimeoutMinMs/MaxMs}：选举超时区间（默认 300-600ms，DESIGN §5.2）</li>
  *   <li>{@code heartbeatIntervalMs}：Leader 心跳间隔（默认 100ms，DESIGN §5.7）</li>
- *   <li>{@code leaseDurationMs}：租约时长 = 2 × electionTimeout（默认 600ms，DESIGN §5.7）</li>
+ *   <li>{@code leaseDurationMs}：租约时长 = 2 × electionTimeout（默认 1200ms，DESIGN §5.7）</li>
  *   <li>{@code readConsistency}：读一致性模式（{@link ReadConsistency#LEASE} 默认 / READ_INDEX，
  *       DESIGN §5.7），决定读路径用租约本地读还是主动确认后再读</li>
  *   <li>{@code readLeaseWaitMs}：lease 模式下租约失效时的等待上限（默认 1000ms）</li>
@@ -141,10 +141,10 @@ public class MeshConfig {
         private final Map<String, String> peerBusAddrs = new LinkedHashMap<>();
         private int totalNodes = 0;
 
-        private long electionTimeoutMinMs = 150;
-        private long electionTimeoutMaxMs = 300;
+        private long electionTimeoutMinMs = 300;
+        private long electionTimeoutMaxMs = 600;
         private long heartbeatIntervalMs = 100;
-        private long leaseDurationMs = 600;
+        private long leaseDurationMs = 1200;   // 2× 选举超时上限（保持与 DESIGN §5.7 比例）
         /** 读一致性模式（DESIGN §5.7），默认 LEASE。 */
         private ReadConsistency readConsistency = ReadConsistency.LEASE;
         /** lease 模式租约失效时的 awaitValid 等待上限（ms），默认 1000。 */

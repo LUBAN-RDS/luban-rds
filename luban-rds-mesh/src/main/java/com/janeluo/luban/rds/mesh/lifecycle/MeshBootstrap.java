@@ -377,9 +377,9 @@ public class MeshBootstrap {
 
         // 选举/心跳/租约参数（带默认值兜底）
         long minMs = config.getMeshElectionTimeoutMinMs() > 0
-                ? config.getMeshElectionTimeoutMinMs() : 150L;
+                ? config.getMeshElectionTimeoutMinMs() : 300L;
         long maxMs = config.getMeshElectionTimeoutMaxMs() > 0
-                ? config.getMeshElectionTimeoutMaxMs() : 300L;
+                ? config.getMeshElectionTimeoutMaxMs() : 600L;
         b.electionTimeout(minMs, maxMs);
 
         if (config.getMeshHeartbeatIntervalMs() > 0) {

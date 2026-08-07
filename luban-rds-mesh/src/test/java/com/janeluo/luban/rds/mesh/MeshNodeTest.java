@@ -343,8 +343,8 @@ class MeshNodeTest {
     }
 
     @Test
-    void leaseManager_defaultDurationIs600() {
-        assertEquals(600, new LeaseManager().getLeaseDurationMs());
+    void leaseManager_defaultDurationIs1200() {
+        assertEquals(1200, new LeaseManager().getLeaseDurationMs());
     }
 
     @Test
