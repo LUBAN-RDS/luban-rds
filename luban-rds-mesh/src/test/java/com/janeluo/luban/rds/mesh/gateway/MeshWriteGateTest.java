@@ -10,6 +10,7 @@ import com.janeluo.luban.rds.mesh.bus.MeshBusHandler;
 import com.janeluo.luban.rds.mesh.bus.MeshFrame;
 import com.janeluo.luban.rds.mesh.client.LeaseInvalidException;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
+import com.janeluo.luban.rds.mesh.client.RetryableMeshException;
 import com.janeluo.luban.rds.mesh.core.MeshRole;
 import com.janeluo.luban.rds.mesh.core.MeshState;
 import com.janeluo.luban.rds.mesh.election.LeaseManager;
@@ -105,7 +106,7 @@ class MeshWriteGateTest {
     }
 
     @Test
-    void write_proposeTimeoutWrapsAsRuntimeException() {
+    void write_proposeTimeoutThrowsRetryableException() {
         MeshNode node = mock(MeshNode.class);
         CompletableFuture<byte[]> neverComplete = new CompletableFuture<>();
         when(node.propose(any(), anyInt(), any())).thenReturn(neverComplete);
@@ -113,8 +114,10 @@ class MeshWriteGateTest {
         MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(),
                 new DefaultCommandHandler(), new com.janeluo.luban.rds.protocol.RedisProtocolParser(), 50L);
 
-        RuntimeException ex = assertThrows(RuntimeException.class, () -> gate.write(OK, 0, null));
+        RetryableMeshException ex = assertThrows(RetryableMeshException.class,
+                () -> gate.write(OK, 0, null));
         assertTrue(ex.getMessage().contains("timeout"), "msg=" + ex.getMessage());
+        assertTrue(ex.getMessage().contains("retry"), "msg should contain 'retry': " + ex.getMessage());
     }
 
     // ==================== 读分流 ====================

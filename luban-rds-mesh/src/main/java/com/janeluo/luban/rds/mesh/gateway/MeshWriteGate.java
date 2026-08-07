@@ -10,6 +10,7 @@ import com.janeluo.luban.rds.mesh.MeshNode;
 import com.janeluo.luban.rds.mesh.client.LeaseInvalidException;
 import com.janeluo.luban.rds.mesh.client.MeshClientRedirector;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
+import com.janeluo.luban.rds.mesh.client.RetryableMeshException;
 import com.janeluo.luban.rds.protocol.RedisProtocolParser;
 import io.netty.buffer.ByteBuf;
 import org.slf4j.Logger;
@@ -301,8 +302,9 @@ public class MeshWriteGate {
      * @param dbIndex      命令作用的 db
      * @param extra        事务：命令帧序列 + WATCH 版本快照；普通写为 {@code null}
      * @return apply 产生的响应字节（直写客户端 Channel）
-     * @throws MovedToLeaderException 当前不是 Leader（携带 leader service 地址；阶段 5 为 nodeId 占位）
-     * @throws RuntimeException        propose 超时或其它异常
+     * @throws MovedToLeaderException  当前不是 Leader（携带 leader service 地址；阶段 5 为 nodeId 占位）
+     * @throws RetryableMeshException  propose 超时（瞬时拥塞 → TRYAGAIN 让客户端重试）
+     * @throws RuntimeException         其它 propose 异常
      * @apiNote <b>BLOCK 命令禁用</b>（阶段 9 / DESIGN §9）：本方法接收原始 RESP 帧，
      *          BLOCK 命令判定需命令名/参数，由上层（阶段 12 RedisServerHandler 集成时）
      *          在调本方法前用 {@link #isBlockCommand(String, String[])} 预检；
@@ -317,7 +319,9 @@ public class MeshWriteGate {
             return future.get();
         } catch (TimeoutException e) {
             // 超时不再等待 future（不 cancel——Raft entry 仍可能后续 commit；由上层决定如何回复客户端）
-            throw new RuntimeException("mesh write propose timeout after " + writeTimeoutMs + "ms", e);
+            // 瞬时拥塞 → TRYAGAIN 让客户端自动重试
+            throw new RetryableMeshException(
+                    "mesh write propose timeout after " + writeTimeoutMs + "ms, retry", e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("mesh write interrupted", e);
