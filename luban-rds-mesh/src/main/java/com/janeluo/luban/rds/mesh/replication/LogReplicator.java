@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
+import java.util.function.LongSupplier;
 
 /**
  * Leader 侧日志复制器（DESIGN.md §5.1 步骤 3-5 / 阶段 4.2）。
@@ -80,10 +81,10 @@ public class LogReplicator {
      * 默认 = state.getLastLogIndex()（不 gate，向后兼容）；MeshNode 装配为 durableIndex。
      * 默认值在构造器内赋值（字段初始化器中的 lambda 无法引用尚未赋值的 final state 字段）。
      */
-    private volatile java.util.function.LongSupplier durableIndexSupplier;
+    private volatile LongSupplier durableIndexSupplier;
 
     /** 注入自身落盘进度提供者（null 恢复默认不 gate）。 */
-    public void setDurableIndexSupplier(java.util.function.LongSupplier supplier) {
+    public void setDurableIndexSupplier(LongSupplier supplier) {
         this.durableIndexSupplier = supplier == null ? () -> state.getLastLogIndex() : supplier;
     }
 

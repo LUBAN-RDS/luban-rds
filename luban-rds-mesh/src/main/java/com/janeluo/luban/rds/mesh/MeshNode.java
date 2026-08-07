@@ -26,15 +26,18 @@ import com.janeluo.luban.rds.mesh.rpc.RequestVoteResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -81,7 +84,7 @@ public class MeshNode {
     private final ScheduledExecutorService scheduler;
     /** 落盘专用单线程调度器（与 raftExecutor 解耦：fsync 不得阻塞心跳/RPC 处理）。 */
     private final ScheduledExecutorService persistExecutor;
-    /** 本节点已落盘的最大日志 index（仅 raftExecutor 线程写；volatile 供读路径兜底）。 */
+    /** 本节点已落盘的最大日志 index（仅 raft 线程读写；volatile 仅为可见性兜底）。 */
     private volatile long durableIndex;
 
     private final ElectionTimer electionTimer;
@@ -241,6 +244,8 @@ public class MeshNode {
         lease.invalidate();
         raftExecutor.shutdownNow();
         persistExecutor.shutdownNow();
+        // 在途 propose 未完成时 stop：必须以异常 complete，否则 gate 层 get() 永久悬挂
+        failAllPendingOnStop();
         logger.info("MeshNode 已停止: nodeId={}", abbrev(nodeId));
     }
 
@@ -323,7 +328,7 @@ public class MeshNode {
          * @param role     当前角色（FOLLOWER/CANDIDATE/LEADER）
          * @param leaderId 当前已知 Leader nodeId；无 Leader 时为 {@code null}
          */
-        void onRoleChanged(com.janeluo.luban.rds.mesh.core.MeshRole role, String leaderId);
+        void onRoleChanged(MeshRole role, String leaderId);
     }
 
     /**
@@ -444,14 +449,14 @@ public class MeshNode {
         persistExecutor.execute(() -> {
             try {
                 persistHook.run();
-                if (!stopped && !raftExecutor.isShutdown()) {
-                    raftExecutor.execute(() -> onPersistSucceeded(persistIndex));
-                }
+                // 落盘成功：提交回 raft 线程推进 durableIndex 并重触发 commit；
+                // 节点已停止/线程池已关时静默丢弃（不误判为落盘失败）
+                submitToRaft(() -> onPersistSucceeded(persistIndex));
             } catch (Exception e) {
+                // 落盘失败：回 raft 线程截断日志 + fail 在途 pending
+                //（回调提交失败时 submitToRaft 内部已丢弃，不再抛到 persist 线程）
                 logger.error("propose: 自身日志落盘失败, index={}", index, e);
-                if (!stopped && !raftExecutor.isShutdown()) {
-                    raftExecutor.execute(() -> onPersistFailed(persistIndex, e));
-                }
+                submitToRaft(() -> onPersistFailed(persistIndex, e));
             }
         });
 
@@ -460,6 +465,24 @@ public class MeshNode {
 
         // 6. 单节点集群：无 peer，propose 后立即自检 commit + apply（future 由 onEntryApplied complete）
         //    （replicate 内部已处理单节点 case，这里无需重复）
+    }
+
+    /**
+     * 把任务提交回 raft 线程；节点已停止时静默丢弃（记录 debug，不误判为落盘失败）。
+     * <p>stop 竞态：raftExecutor 已 shutdownNow 后 execute 会抛
+     * {@link RejectedExecutionException}——此时回调已无意义（状态机已停），单独捕获并丢弃，
+     * 不把异常抛到 persist 线程（否则会被误当成落盘失败进入 onPersistFailed 截断路径）。</p>
+     */
+    private void submitToRaft(Runnable task) {
+        if (stopped || raftExecutor.isShutdown()) {
+            logger.debug("raftExecutor 已停止，丢弃回调");
+            return;
+        }
+        try {
+            raftExecutor.execute(task);
+        } catch (RejectedExecutionException e) {
+            logger.debug("raftExecutor 拒绝回调（节点停止竞态），丢弃: {}", e.toString());
+        }
     }
 
     /**
@@ -528,7 +551,7 @@ public class MeshNode {
         if (i + len > frame.length) {
             return null;
         }
-        return new String(frame, i, (int) len, java.nio.charset.StandardCharsets.ISO_8859_1);
+        return new String(frame, i, (int) len, StandardCharsets.ISO_8859_1);
     }
 
     /** 返回 pos 处 bulk string 之后的偏移（数据末尾 + CRLF）；非法返回原 pos。 */
@@ -591,8 +614,11 @@ public class MeshNode {
      * 不重触发则 commit 永久停摆（死锁）。</p>
      */
     private void onPersistSucceeded(long persistIndex) {
-        if (persistIndex > durableIndex) {
-            durableIndex = persistIndex;
+        // 落盘成功可能晚于失败截断（FIFO 队列中后续任务成功、前序已截断日志）：
+        // 只推进到「日志中仍存在」的 index，避免 durableIndex 虚高导致 commit 门控失效
+        long capped = Math.min(persistIndex, state.getLastLogIndex());
+        if (capped > durableIndex) {
+            durableIndex = capped;
         }
         if (replicator != null && state.role == MeshRole.LEADER) {
             boolean advanced = replicator.maybeAdvanceCommitIndex();
@@ -608,8 +634,19 @@ public class MeshNode {
      * propose 条目被连带截断后其 future 会悬挂（MeshNodePersistAsyncTest.persistFailure 断言依赖此顺序）。</p>
      */
     private void onPersistFailed(long persistIndex, Exception cause) {
-        state.truncateAfter(persistIndex - 1);
-        java.util.Iterator<Map.Entry<Long, PendingProposal>> it = pendingProposals.entrySet().iterator();
+        // 已非 Leader：pending 已在失去领导时 fail 完，新 Leader 的 AppendEntries 会修复本节点日志，
+        // 这里不得再截断（可能删除新 Leader 已复制/已提交的条目）
+        if (state.role != MeshRole.LEADER) {
+            return;
+        }
+        // 截断后日志缩短，durableIndex 不得高于截断边界（防虚高导致 commit 门控失效）
+        if (durableIndex > persistIndex - 1) {
+            durableIndex = persistIndex - 1;
+        }
+        // 防御：截断不得低于已 commit 边界（已提交已 apply 条目不可删）
+        long truncateTo = Math.max(persistIndex - 1, state.commitIndex);
+        state.truncateAfter(truncateTo);
+        Iterator<Map.Entry<Long, PendingProposal>> it = pendingProposals.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<Long, PendingProposal> e = it.next();
             if (e.getKey() >= persistIndex) {
@@ -1049,6 +1086,22 @@ public class MeshNode {
             return;
         }
         IllegalStateException cause = new IllegalStateException("leadership lost; propose aborted");
+        for (Map.Entry<Long, PendingProposal> e : pendingProposals.entrySet()) {
+            e.getValue().future.completeExceptionally(cause);
+        }
+        pendingProposals.clear();
+    }
+
+    /**
+     * stop 时把未完成的在途 propose 全部以异常 complete（防 gate 层永久悬挂）。
+     * <p>调用方可能在 raft 线程之外（stop 由装配层/测试主线程调用）——pendingProposals
+     * 是 ConcurrentHashMap，迭代安全；complete 后 clear，避免新提交的任务引用已 stop 的节点。</p>
+     */
+    private void failAllPendingOnStop() {
+        if (pendingProposals.isEmpty()) {
+            return;
+        }
+        IllegalStateException cause = new IllegalStateException("node stopped; propose aborted");
         for (Map.Entry<Long, PendingProposal> e : pendingProposals.entrySet()) {
             e.getValue().future.completeExceptionally(cause);
         }

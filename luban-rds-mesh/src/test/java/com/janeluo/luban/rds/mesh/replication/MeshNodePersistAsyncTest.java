@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -255,6 +256,98 @@ class MeshNodePersistAsyncTest {
         } finally {
             releasePersist.countDown();
             node.stop();
+        }
+    }
+
+    @Test
+    void persistFailure_afterLosingLeadership_doesNotTruncateLog() throws Exception {
+        // 落盘失败回调在失去领导后才到达：非 Leader 不得截断（新 Leader 复制会修复日志）
+        MeshConfig config = threeNodeConfig();
+        MeshState state = new MeshState();
+        state.currentTerm = 1;
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        LogApplier applier = new LogApplier(new DefaultCommandHandler(), rawStore);
+        CaptureBus bus = new CaptureBus("a");
+        MeshNode node = new MeshNode(config, state, bus, new RaftStateMachine(), applier, rawStore);
+
+        CountDownLatch persistEntered = new CountDownLatch(1);
+        CountDownLatch releasePersist = new CountDownLatch(1);
+        AtomicBoolean firstHookCall = new AtomicBoolean(true);
+        node.setPersistHook(() -> {
+            if (!firstHookCall.getAndSet(false)) {
+                // 后续调用在 raft 线程（decideAppendEntries 内 fsync）：不得阻塞/抛异常
+                return;
+            }
+            // 首个调用 = persist 线程的落盘任务：阻塞至测试释放，最终落盘失败
+            persistEntered.countDown();
+            try {
+                releasePersist.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            throw new RuntimeException("disk full");
+        });
+        node.start();
+        try {
+            makeLeader(node);
+
+            CompletableFuture<byte[]> f = node.propose(setFrame("k", "v"), 0, null);
+            assertTrue(persistEntered.await(2, TimeUnit.SECONDS));
+
+            // 失去领导（更高任期 AppendEntries，leaderId 已知）
+            com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage higher =
+                    new com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage(
+                            10L, "b", 0L, 0L, java.util.Collections.emptyList(), 0L);
+            node.onMessage("b", new MeshFrame("b", MessageType.APPEND_ENTRIES.getCode(), higher.encode()));
+            awaitIdle(node);
+            assertFalse(node.isLeader());
+
+            releasePersist.countDown();
+            awaitIdle(node);
+
+            // 非 Leader 的落盘失败回调不得截断日志（日志留给新 Leader 复制修复）
+            assertEquals(1L, state.getLastLogIndex(), "非 Leader 不得因落盘失败截断日志");
+        } finally {
+            releasePersist.countDown();
+            node.stop();
+        }
+    }
+
+    @Test
+    void stop_failsPendingProposals() throws Exception {
+        // stop 时必须 fail 在途 propose，否则 gate 层 get() 永久悬挂
+        MeshConfig config = threeNodeConfig();
+        MeshState state = new MeshState();
+        state.currentTerm = 1;
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        LogApplier applier = new LogApplier(new DefaultCommandHandler(), rawStore);
+        CaptureBus bus = new CaptureBus("a");
+        MeshNode node = new MeshNode(config, state, bus, new RaftStateMachine(), applier, rawStore);
+
+        CountDownLatch persistEntered = new CountDownLatch(1);
+        CountDownLatch releasePersist = new CountDownLatch(1);
+        node.setPersistHook(() -> {
+            persistEntered.countDown();
+            try {
+                releasePersist.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        node.start();
+        try {
+            makeLeader(node);
+
+            CompletableFuture<byte[]> f = node.propose(setFrame("k", "v"), 0, null);
+            assertTrue(persistEntered.await(2, TimeUnit.SECONDS));
+
+            node.stop(); // 在途 propose 未完成时 stop
+
+            java.util.concurrent.ExecutionException ee =
+                    assertThrows(java.util.concurrent.ExecutionException.class, () -> f.get(2, TimeUnit.SECONDS));
+            assertTrue(ee.getCause() instanceof IllegalStateException, "stop 后 pending 应以异常完成");
+        } finally {
+            releasePersist.countDown();
         }
     }
 }
