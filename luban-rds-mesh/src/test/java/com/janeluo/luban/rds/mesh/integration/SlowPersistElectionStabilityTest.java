@@ -158,7 +158,8 @@ class SlowPersistElectionStabilityTest {
 
     /**
      * 集群配置：心跳 100ms、选举超时 300-600ms、lease 1200ms——与生产默认一致
-     * （显式写出，风格同 ThreeNodeIntegrationTest；端口段独立 23000+ 避免与其他测试冲突）。
+     * （显式写出，风格同 ThreeNodeIntegrationTest；端口仅占位——RoutingBus 内存路由
+     * 不建连、端口从未绑定，无需隔离）。
      */
     private MeshConfig threeNodeConfig(String selfId) {
         return MeshConfig.builder(selfId)
@@ -222,6 +223,8 @@ class SlowPersistElectionStabilityTest {
             assertNotNull(leaderId, "应能解析 Leader 的 nodeId");
 
             // 4. 写高峰：向 Leader 连续 propose 8 个写（每个落盘 250ms，排队 ≈2s）
+            // 记录写高峰开始前的 term：期间若发生任何 PreVote/新选举，term 必然增长
+            long termBeforeBurst = leader.getCurrentTerm();
             List<CompletableFuture<byte[]>> futures = new ArrayList<>();
             for (int i = 0; i < 8; i++) {
                 futures.add(leader.propose(setFrame("k" + i, "v" + i), 0, null));
@@ -237,6 +240,9 @@ class SlowPersistElectionStabilityTest {
             }
             // 原 Leader 仍是 Leader（未被选举推翻）
             assertTrue(leader.isLeader(), "慢落盘写高峰下原 Leader 不应被选举推翻");
+            // term 未增长：写高峰期间不得发生任何 PreVote/选举活动（term 不变是"无选举"的直接证据）
+            assertEquals(termBeforeBurst, leader.getCurrentTerm(),
+                    "写高峰期间不得发生任何选举（term 不得增长）");
 
             // 7. 断言：8 个写全部完成（慢盘排队 ≈2s，future.get 超时放宽到 10s）
             byte[] ok = "+OK\r\n".getBytes(StandardCharsets.ISO_8859_1);
@@ -244,6 +250,13 @@ class SlowPersistElectionStabilityTest {
                 byte[] resp = futures.get(i).get(10, TimeUnit.SECONDS);
                 assertArrayEquals(ok, resp, "写 #" + i + " 应返回 +OK（慢落盘写高峰下不应失败）");
             }
+
+            // 8. 写完成后复检：Leader 全程保持（回归契约自文档化）
+            for (Map.Entry<String, MeshNode> e : cluster.nodes.entrySet()) {
+                assertEquals(leaderId, e.getValue().getLeaderId(),
+                        "写完成后节点 " + e.getKey() + " 仍应认原 Leader");
+            }
+            assertTrue(leader.isLeader(), "写完成后原 Leader 仍应是 Leader");
         } finally {
             cluster.stopAll();
         }
