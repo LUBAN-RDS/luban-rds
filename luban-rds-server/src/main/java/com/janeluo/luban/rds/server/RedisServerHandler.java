@@ -21,6 +21,7 @@ import com.janeluo.luban.rds.cluster.slot.SlotUtils;
 import com.janeluo.luban.rds.persistence.PersistService;
 import com.janeluo.luban.rds.replication.MasterReplicationManager;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
+import com.janeluo.luban.rds.mesh.client.RetryableMeshException;
 import com.janeluo.luban.rds.mesh.client.MeshClientRedirector;
 import com.janeluo.luban.rds.mesh.client.MeshClusterCommands;
 import com.janeluo.luban.rds.mesh.gateway.MeshWriteGate;
@@ -986,6 +987,17 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             // redirector 未注入：退化为通用错误处理（保留向下兼容）
             logger.error("MovedToLeaderException without meshClientRedirector configured", e);
             Object errorResponse = "MOVED redirector not configured";
+            ByteBuf errorBuffer = protocolParser.serialize(errorResponse);
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
+            }
+        } catch (RetryableMeshException e) {
+            // mesh 瞬时不可用（Leader 刚降级新 Leader 未知 / propose 超时）→ -TRYAGAIN
+            // 集群感知客户端（Redisson/Jedis）自动退避重试
+            logger.warn("mesh write transient failure, client should retry: {}", e.getMessage());
+            Object errorResponse = "TRYAGAIN " + e.getMessage();
             ByteBuf errorBuffer = protocolParser.serialize(errorResponse);
             if (errorBuffer != null && errorBuffer.isReadable()) {
                 ctx.writeAndFlush(errorBuffer);
