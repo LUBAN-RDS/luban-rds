@@ -73,10 +73,10 @@ mesh-peers a1b2...@10.0.0.1:11000,c3d4...@10.0.0.2:11000,e5f6...@10.0.0.3:11000
 mesh-self-node-id a1b2...
 
 # 以下参数均有默认值，可不配：
-# mesh-election-timeout-min-ms 150      # 选举超时下限（随机化 150-300ms）
-# mesh-election-timeout-max-ms 300
+# mesh-election-timeout-min-ms 300      # 选举超时下限（随机化 300-600ms）
+# mesh-election-timeout-max-ms 600
 # mesh-heartbeat-interval-ms 100        # Leader 心跳周期
-# mesh-lease-duration-ms 600            # 读租约时长（= 2 × electionTimeout）
+# mesh-lease-duration-ms 1200           # 读租约时长（= 2 × electionTimeout）
 # mesh-read-consistency LEASE           # 读模式：LEASE（默认）/ READ_INDEX
 # mesh-read-lease-wait-ms 1000          # 租约失效时等待续租的上限
 # mesh-snapshot-log-threshold 100000    # 每 N 条日志触发周期快照

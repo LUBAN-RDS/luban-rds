@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <h3>随机化超时（防 split vote）</h3>
  * <p>
- * 每次调度一个超时都重新随机一个值（区间 {@code [minMs, maxMs]}，默认 150-300ms）。随机化是 Raft
+ * 每次调度一个超时都重新随机一个值（区间 {@code [minMs, maxMs]}，默认 300-600ms）。随机化是 Raft
  * 防 split vote 的关键：若多个节点固定相同超时，会同时发起选举互相争票，谁都拿不到多数派。随机化
  * 使超时点错开，先超时的候选者更可能在其他节点超时前拿到多数票。
  * </p>
@@ -44,10 +44,10 @@ public class ElectionTimer {
 
     private static final Logger logger = LoggerFactory.getLogger(ElectionTimer.class);
 
-    /** 默认选举超时下限（ms），DESIGN §5.2。 */
-    public static final long DEFAULT_MIN_MS = 150;
+    /** 默认选举超时下限（ms），≥3× 心跳 100ms（选举风暴修复，DESIGN §5.2）。 */
+    public static final long DEFAULT_MIN_MS = 300;
     /** 默认选举超时上限（ms），DESIGN §5.2。 */
-    public static final long DEFAULT_MAX_MS = 300;
+    public static final long DEFAULT_MAX_MS = 600;
 
     /** 退避最大位移量（2^shift 倍）：封顶区间 = [minMs × 4, maxMs × 4]。 */
     private static final int MAX_BACKOFF_SHIFT = 2;
@@ -95,7 +95,7 @@ public class ElectionTimer {
     }
 
     /**
-     * 用默认区间（150-300ms）构造。
+     * 用默认区间（300-600ms）构造。
      */
     public ElectionTimer(Runnable onElectionTimeout,
                          java.util.concurrent.ScheduledExecutorService scheduler) {

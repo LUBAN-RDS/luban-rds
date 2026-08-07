@@ -330,14 +330,14 @@ public class RdsConfig {
     private int meshBusPort = 0;
 
     /**
-     * 选举超时区间下限（毫秒），默认 150。
+     * 选举超时区间下限（毫秒），默认 300（≥3× 心跳 100ms，选举风暴修复）。
      */
-    private long meshElectionTimeoutMinMs = 150;
+    private long meshElectionTimeoutMinMs = 300;
 
     /**
-     * 选举超时区间上限（毫秒），默认 300。
+     * 选举超时区间上限（毫秒），默认 600。
      */
-    private long meshElectionTimeoutMaxMs = 300;
+    private long meshElectionTimeoutMaxMs = 600;
 
     /**
      * Leader 心跳间隔（毫秒），默认 100。
@@ -345,9 +345,9 @@ public class RdsConfig {
     private long meshHeartbeatIntervalMs = 100;
 
     /**
-     * 租约时长（毫秒），默认 600。
+     * 租约时长（毫秒），默认 1200（= 2 × 选举超时上限）。
      */
-    private long meshLeaseDurationMs = 600;
+    private long meshLeaseDurationMs = 1200;
 
     /**
      * lease 模式租约失效等待上限（毫秒），默认 1000。

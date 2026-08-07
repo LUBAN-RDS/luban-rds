@@ -777,10 +777,10 @@ mesh 模块的源码位于 `luban-rds-mesh/src/main/java/com/janeluo/luban/rds/m
 
 #### 选举（PreVote + Lease）
 
-- **Follower → Candidate**：选举超时（默认 150~300ms 随机化）后转 Candidate
+- **Follower → Candidate**：选举超时（默认 300~600ms 随机化）后转 Candidate
 - **PreVote 探测**：先发送 `RequestVote` 探测多数派响应，**不增 term**（防 term 膨胀）；预投通过后才正式增 term 并发起 `RequestVote`
 - **多数派 → Leader**：获得 2/3 投票转 Leader，开始接收客户端写入
-- **Leader Lease**：每 100ms 发送心跳续租；默认租约时长 ≈ 2 × electionTimeout（600ms）；租约有效期内本地读，超时退化 read-index
+- **Leader Lease**：每 100ms 发送心跳续租；默认租约时长 ≈ 2 × electionTimeout（1200ms）；租约有效期内本地读，超时退化 read-index
 
 > 详细规则与 RPC 字段见 [luban-rds-mesh/docs/DESIGN.md](https://github.com/LUBAN-RDS/luban-rds/blob/master/luban-rds-mesh/docs/DESIGN.md) §三 §四。
 

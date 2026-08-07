@@ -111,11 +111,11 @@ class ElectionTimerTest {
     }
 
     @Test
-    void defaultRangeIs150to300() {
+    void defaultRangeIs300to600() {
         ElectionTimer t = new ElectionTimer(() -> {},
                 Executors.newSingleThreadScheduledExecutor());
-        assertEquals(150, t.getMinMs());
-        assertEquals(300, t.getMaxMs());
+        assertEquals(300, t.getMinMs(), "默认下限应为 300ms（≥3×心跳100ms）");
+        assertEquals(600, t.getMaxMs(), "默认上限应为 600ms");
     }
 
     // ==================== 选举退避测试（P1）====================

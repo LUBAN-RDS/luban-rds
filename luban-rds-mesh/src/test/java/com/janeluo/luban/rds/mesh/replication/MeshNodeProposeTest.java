@@ -315,6 +315,53 @@ class MeshNodeProposeTest {
     }
 
     @Test
+    void leadershipLoss_returnsMoved_whenNewLeaderKnown() throws Exception {
+        // 新 Leader 已知（收到更高任期 AppendEntries 携 leaderId）→ pending 以 MovedToLeaderException 完成
+        MeshConfig config = MeshConfig.builder("solo")
+                .addPeer("b", "127.0.0.1:11001")
+                .addPeer("c", "127.0.0.1:11002")
+                .electionTimeout(5000, 10000)
+                .heartbeatIntervalMs(5000)
+                .build();
+        MeshState state = new MeshState();
+        state.currentTerm = 1;
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        LogApplier applier = new LogApplier(new DefaultCommandHandler(), rawStore);
+        CaptureBus bus = new CaptureBus("solo");
+        MeshNode node = new MeshNode(config, state, bus, new com.janeluo.luban.rds.mesh.core.RaftStateMachine(),
+                applier, rawStore);
+        node.start();
+        try {
+            makeLeader(node, state);
+
+            CompletableFuture<byte[]> f = node.propose(setFrame("k", "v"), 0, null);
+            awaitIdle(node);
+            assertEquals(1, pendingProposalsCount(node));
+
+            // 更高任期 AppendEntries：leaderId 已知 → 降级 + pending 以 MOVED 完成
+            com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage higher =
+                    new com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage(
+                            10L, "b", 0L, 0L, java.util.Collections.emptyList(), 0L);
+            node.onMessage("b", new com.janeluo.luban.rds.mesh.bus.MeshFrame("b",
+                    com.janeluo.luban.rds.mesh.bus.MessageType.APPEND_ENTRIES.getCode(), higher.encode()));
+            awaitIdle(node);
+
+            assertFalse(node.isLeader());
+            assertEquals(0, pendingProposalsCount(node));
+
+            java.util.concurrent.ExecutionException ee =
+                    assertThrows(java.util.concurrent.ExecutionException.class, () -> f.get(2, TimeUnit.SECONDS));
+            assertTrue(ee.getCause() instanceof MovedToLeaderException,
+                    "新 Leader 已知时 cause 应为 MovedToLeaderException");
+            MovedToLeaderException moved = (MovedToLeaderException) ee.getCause();
+            assertEquals("b", moved.getLeaderNodeId());
+            assertEquals("k", moved.getKey(), "MOVED 应携带请求 key");
+        } finally {
+            node.stop();
+        }
+    }
+
+    @Test
     void propose_noApplier_returnsIllegalStateFuture() {
         MeshConfig config = singleNodeConfig();
         MeshState state = new MeshState();

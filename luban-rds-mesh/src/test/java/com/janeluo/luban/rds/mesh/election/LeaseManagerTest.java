@@ -176,9 +176,9 @@ class LeaseManagerTest {
     }
 
     @Test
-    void defaultLeaseDurationIs600ms() {
+    void defaultLeaseDurationIs1200ms() {
         LeaseManager lm = new LeaseManager();
-        assertEquals(600, lm.getLeaseDurationMs());
-        assertEquals(600, LeaseManager.DEFAULT_LEASE_DURATION_MS);
+        assertEquals(1200, lm.getLeaseDurationMs());
+        assertEquals(1200, LeaseManager.DEFAULT_LEASE_DURATION_MS);
     }
 }

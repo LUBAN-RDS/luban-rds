@@ -498,10 +498,10 @@ ClusterSetupCommand.createCluster(nodes, /*replicas*/ 1, /*verbose*/ false);
 | `mesh-self-node-id` | 本节点 nodeId（未配取 peers 首个） | `""` |
 | `mesh-bus-port` | mesh 总线端口（0 = 按 peers 取） | `0` |
 | `mesh-service-port` | mesh service 端口（0 = 用全局 port；单机多实例必配） | `0` |
-| `mesh-election-timeout-min-ms` | 选举超时下限（随机化区间） | `150` |
-| `mesh-election-timeout-max-ms` | 选举超时上限 | `300` |
+| `mesh-election-timeout-min-ms` | 选举超时下限（随机化区间） | `300` |
+| `mesh-election-timeout-max-ms` | 选举超时上限 | `600` |
 | `mesh-heartbeat-interval-ms` | Leader 心跳周期 | `100` |
-| `mesh-lease-duration-ms` | 读租约时长（≈ 2 × electionTimeout） | `600` |
+| `mesh-lease-duration-ms` | 读租约时长（≈ 2 × electionTimeout） | `1200` |
 | `mesh-read-consistency` | 读模式（`LEASE` / `READ_INDEX`） | `LEASE` |
 | `mesh-read-lease-wait-ms` | 租约失效时等待续租的上限 | `1000` |
 | `mesh-snapshot-log-threshold` | 每 N 条日志触发周期快照 | `100000` |

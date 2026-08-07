@@ -254,7 +254,7 @@ Client → Leader (SET k v)
 
 ```
 初始：3 节点全为 FOLLOWER, term=T, 都投过票给 Leader X
-事件：X 心跳超时（election timeout 150-300ms 随机）
+事件：X 心跳超时（election timeout 300-600ms 随机）
    │
    ├── A: currentTerm++, role=CANDIDATE, votedFor=self
    │     投自己 1 票
@@ -458,7 +458,7 @@ luban-rds-mesh/
     │   └── MeshBusHandler.java                    入站分发（反序列化为 RPC 类 → MeshNode）
     │
     ├── election/
-    │   ├── ElectionTimer.java                     随机超时 150-300ms（避免 split vote）
+    │   ├── ElectionTimer.java                     随机超时 300-600ms（避免 split vote）
     │   ├── VoteCollector.java                     收集投票 + 多数派判定
     │   └── LeaseManager.java                      心跳租约（续租/校验/等待续租，见 §5.7）
     │
