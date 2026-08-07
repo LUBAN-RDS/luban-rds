@@ -968,6 +968,12 @@ public class MeshNode {
             // persistHook 完成；此处覆盖 term 变化场景）
             persistStateSafe("handleAppendEntries-term-up");
         }
+        // 冲突截断会收缩本地日志（WAL 已同步重写）：durableIndex 不得高于收缩后的日志末尾，
+        // 否则 commit 门控（candidate > durableIndex 不 commit）被架空——本节点曾为 Leader 时
+        // durableIndex 可能远高于截断后的 lastLogIndex，重新当选后未落盘条目即可被 commit。
+        if (state.getLastLogIndex() < durableIndex) {
+            durableIndex = state.getLastLogIndex();
+        }
         if (decision.resetElectionTimer) {
             // 先复位退避、再重排定时器：否则 reset 用过期 consecutiveFailures 多带一轮退避。
             // 收到合法 AppendEntries（Leader 心跳）→ 复位退避

@@ -8,13 +8,16 @@ import com.janeluo.luban.rds.mesh.bus.MeshBusClient;
 import com.janeluo.luban.rds.mesh.bus.MeshBusHandler;
 import com.janeluo.luban.rds.mesh.bus.MeshFrame;
 import com.janeluo.luban.rds.mesh.bus.MessageType;
+import com.janeluo.luban.rds.mesh.core.LogEntry;
 import com.janeluo.luban.rds.mesh.core.MeshState;
 import com.janeluo.luban.rds.mesh.core.RaftStateMachine;
+import com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -87,6 +90,17 @@ class MeshNodePersistAsyncTest {
             java.lang.reflect.Method m = MeshNode.class.getDeclaredMethod(methodName);
             m.setAccessible(true);
             m.invoke(node);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** 反射读 durableIndex（私有字段，仅测试用；volatile 保证跨线程可见）。 */
+    private static long readDurableIndex(MeshNode node) {
+        try {
+            java.lang.reflect.Field f = MeshNode.class.getDeclaredField("durableIndex");
+            f.setAccessible(true);
+            return (long) f.get(node);
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -317,6 +331,49 @@ class MeshNodePersistAsyncTest {
             assertEquals(1L, state.getLastLogIndex(), "非 Leader 不得因落盘失败截断日志");
         } finally {
             releasePersist.countDown();
+            node.stop();
+        }
+    }
+
+    @Test
+    void conflictTruncation_clampsDurableIndex() throws Exception {
+        // 曾为 Leader 落盘到 2，Follower 收到更高任期冲突 AppendEntries（term=10 覆盖 index=1）
+        // 日志被截断收缩到 1 → durableIndex 必须钳制到新日志末尾，不得虚高架空 commit 门控
+        // （修复前 durableIndex 仍为 2：重新当选 propose 新条目 2 后，未落盘即可 commit）
+        MeshConfig config = threeNodeConfig();
+        MeshState state = new MeshState();
+        state.currentTerm = 1;
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        LogApplier applier = new LogApplier(new DefaultCommandHandler(), rawStore);
+        CaptureBus bus = new CaptureBus("a");
+        MeshNode node = new MeshNode(config, state, bus, new RaftStateMachine(), applier, rawStore);
+        node.start();
+        try {
+            makeLeader(node);
+
+            // 两条条目 propose 并异步落盘（persistHook 默认 no-op，落盘立即完成）
+            node.propose(setFrame("x", "y"), 0, null);
+            node.propose(setFrame("x2", "y2"), 0, null);
+            // settle：等异步落盘回调把 durableIndex 推到 2
+            for (int i = 0; i < 50 && readDurableIndex(node) < 2L; i++) {
+                Thread.sleep(10);
+                awaitIdle(node);
+            }
+            assertEquals(2L, state.getLastLogIndex(), "propose 两条后日志末尾应为 2");
+            assertEquals(2L, readDurableIndex(node), "两条条目落盘后 durableIndex 应为 2");
+
+            // 模拟 Follower 收到新 Leader 的冲突 AppendEntries：entry(term=10, index=1) 与本地
+            // term=1 冲突 → truncateAfter(0) 删除本地两条 + 追加 term=10 条目 → 日志末尾收缩为 1
+            AppendEntriesMessage conflict = new AppendEntriesMessage(10L, "b", 0L, 0L,
+                    Collections.singletonList(new LogEntry(10L, 1L, setFrame("x", "y"), 0, null)), 0L);
+            node.onMessage("b", new MeshFrame("b", MessageType.APPEND_ENTRIES.getCode(), conflict.encode()));
+            awaitIdle(node);
+
+            assertEquals(1L, state.getLastLogIndex(), "冲突条目应截断本地日志并追加新 Leader 条目");
+            assertEquals(1L, readDurableIndex(node),
+                    "冲突截断后 durableIndex 必须钳制到新日志末尾（修复前仍为 2，架空 commit 门控）");
+            assertTrue(readDurableIndex(node) <= state.getLastLogIndex(), "durableIndex 不得高于日志末尾");
+        } finally {
             node.stop();
         }
     }
