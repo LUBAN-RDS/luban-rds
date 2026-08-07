@@ -819,11 +819,12 @@ if (response instanceof List) {
      * </p>
      */
     private static boolean isErrorResponse(String str) {
-        return str.startsWith("ERR") || str.startsWith("WRONGTYPE") 
-                || str.startsWith("MOVED") || str.startsWith("ASK") 
+        return str.startsWith("ERR") || str.startsWith("WRONGTYPE")
+                || str.startsWith("MOVED") || str.startsWith("ASK")
                 || str.startsWith("CROSSSLOT") || str.startsWith("CLUSTERDOWN")
                 || str.startsWith("BUSY") || str.startsWith("NOSCRIPT")
                 || str.startsWith("LOADING") || str.startsWith("MASTERDOWN")
-                || str.startsWith("READONLY") || str.startsWith("NOAUTH");
+                || str.startsWith("READONLY") || str.startsWith("NOAUTH")
+                || str.startsWith("TRYAGAIN");
     }
 }

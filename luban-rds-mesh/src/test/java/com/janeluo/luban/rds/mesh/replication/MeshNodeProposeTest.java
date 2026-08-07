@@ -305,10 +305,10 @@ class MeshNodeProposeTest {
             assertFalse(node.isLeader(), "应已降级");
             assertEquals(0, pendingProposalsCount(node), "pending 应被清空");
 
-            // future 以异常 complete
+            // future 以异常 complete（AE-Response 降级路径，leaderId=null → RetryableMeshException）
             ExecutionException ee = assertThrows(ExecutionException.class, () -> f.get(2, TimeUnit.SECONDS));
-            assertTrue(ee.getCause() instanceof IllegalStateException,
-                    "cause 应为 IllegalStateException (leadership lost)");
+            assertTrue(ee.getCause() instanceof com.janeluo.luban.rds.mesh.client.RetryableMeshException,
+                    "cause 应为 RetryableMeshException (leadership lost → TRYAGAIN)");
         } finally {
             node.stop();
         }

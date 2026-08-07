@@ -4,6 +4,7 @@ import com.janeluo.luban.rds.mesh.bus.MeshBusClient;
 import com.janeluo.luban.rds.mesh.bus.MeshFrame;
 import com.janeluo.luban.rds.mesh.bus.MessageType;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
+import com.janeluo.luban.rds.mesh.client.RetryableMeshException;
 import com.janeluo.luban.rds.mesh.core.LogEntry;
 import com.janeluo.luban.rds.mesh.core.MeshRole;
 import com.janeluo.luban.rds.mesh.core.MeshState;
@@ -1087,7 +1088,8 @@ public class MeshNode {
      * 失去 Leader 身份时，把所有未完成的 pending propose future 以异常 complete。
      * <p>新 Leader 已知（收到其更高任期 AppendEntries，leaderId 已更新）且请求 key 可提取时抛
      * {@link MovedToLeaderException}（集群感知客户端自动跟随 MOVED 重试，避免 Redisson 对通用
-     * ERR 不重试导致写失败）；新 Leader 尚未宣布（更高任期 RequestVote/响应路径）时回退 ERR。
+     * ERR 不重试导致写失败）；新 Leader 尚未宣布（更高任期 RequestVote/响应路径）时返回
+     * TRYAGAIN（{@link RetryableMeshException}），让集群感知客户端自动退避重试。
      * 这些 propose 的 entry 可能尚未 commit（未提交写入被新 Leader 覆盖），也可能已获多数派 ACK
      * 仅未推进 commitIndex（新 Leader 日志已有该条目并会 apply）——MOVED 重试为 at-least-once
      * 语义，与 Redis Cluster 故障转移一致，客户端重试可能重复执行非幂等命令（一致性 > 可用性的取舍）。</p>
@@ -1104,7 +1106,7 @@ public class MeshNode {
                         new MovedToLeaderException(newLeaderId, null, pp.key));
             } else {
                 pp.future.completeExceptionally(
-                        new IllegalStateException("leadership lost; propose aborted"));
+                        new RetryableMeshException("leadership lost; propose aborted, retry"));
             }
         }
         pendingProposals.clear();
