@@ -873,6 +873,8 @@ public class MeshNode {
             logger.warn("消息反序列化失败，丢弃: from={}, type={}", fromNodeId, type, e);
             return;
         }
+        // peer 在线信号：出站断连时立即重置重连退避（避免节点重启后干等最长 64s 退避窗口）
+        busClient.notifyPeerAlive(fromNodeId);
         raftExecutor.execute(() -> {
             try {
                 dispatch(fromNodeId, type, msg);

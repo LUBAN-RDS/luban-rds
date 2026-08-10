@@ -235,6 +235,34 @@ public class MeshBusClient {
     }
 
     /**
+     * Peer 在线信号：有帧从该节点到达，说明对方已恢复在线。
+     * <p>
+     * 出站连接正常时无副作用直接返回；出站断开/重连退避中时，清零该 peer 的退避
+     * 计数与去重窗口并重新调度重连（退避从 2s 重新起步），避免"对方明明在线却干等
+     * 指数退避窗口（最长 64s）"——节点重启后 leader 出站连接迟迟不恢复的根因。
+     * </p>
+     *
+     * @param nodeId 发送方 nodeId（来自入站帧 senderNodeId）
+     */
+    public void notifyPeerAlive(String nodeId) {
+        if (closed || nodeId == null || !nodeEndpoints.containsKey(nodeId)) {
+            return; // 未知 peer（含已主动 disconnect 的节点）不处理
+        }
+        Channel existing = nodeChannels.get(nodeId);
+        if (existing != null && existing.isActive()) {
+            return; // 出站连接正常，无需干预
+        }
+        // 必须先清去重窗口：scheduleReconnect 的窗口（≈64s）会挡掉新调度，导致退避重置失效
+        reconnectScheduled.remove(nodeId);
+        reconnectAttempts.remove(nodeId);
+        PeerEndpoint ep = nodeEndpoints.get(nodeId);
+        if (ep != null) {
+            logger.info("peer {} 在线但出站连接断开，重置退避并立即重连", nodeId);
+            scheduleReconnect(nodeId, ep);
+        }
+    }
+
+    /**
      * 向目标节点发送消息。
      *
      * @param targetNodeId 目标 nodeId
