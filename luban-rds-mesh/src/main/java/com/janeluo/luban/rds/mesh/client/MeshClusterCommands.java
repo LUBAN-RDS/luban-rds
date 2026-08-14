@@ -28,6 +28,8 @@ import java.util.function.Supplier;
  *       clusterGenNodesDescription，避免 Redisson split("\n") 残留 \r）。
  *       离线节点（bus 未连接，经 {@code onlinePredicate} 判定）linkState 标
  *       {@code disconnected}，避免集群感知客户端向死节点发起连接；
+ *       断开超阈值的节点额外在 flags 列标 {@code fail}（经 {@code failPredicate} 判定），
+ *       使 Redisson 等严格按 Redis 语义踢出死节点的客户端立即从拓扑移除；
  *       本节点（myself）恒标 {@code connected}（正在响应请求）。</li>
  *   <li><b>CLUSTER INFO</b>：多行 {@code key:value}（{@code \r\n} 分隔），
  *       关键字段 {@code cluster_state:ok}、{@code cluster_known_nodes:3}、
@@ -78,6 +80,9 @@ public class MeshClusterCommands {
     /** 节点在线判定（nodeId → 是否在线）；null/恒 true 表示不启用死节点标记。 */
     private final java.util.function.Predicate<String> onlinePredicate;
 
+    /** 节点失败判定（nodeId → 是否已断开超阈值）；null/恒 false 表示不标 fail。 */
+    private final java.util.function.Predicate<String> failPredicate;
+
     /**
      * 构造集群命令响应生成器。
      *
@@ -90,7 +95,7 @@ public class MeshClusterCommands {
                                 Supplier<String> leaderAddrSupplier,
                                 Map<String, NodeInfo> allNodes,
                                 String selfNodeId) {
-        this(leaderNodeIdSupplier, leaderAddrSupplier, allNodes, selfNodeId, null);
+        this(leaderNodeIdSupplier, leaderAddrSupplier, allNodes, selfNodeId, null, null);
     }
 
     /**
@@ -104,6 +109,26 @@ public class MeshClusterCommands {
                                 Map<String, NodeInfo> allNodes,
                                 String selfNodeId,
                                 java.util.function.Predicate<String> onlinePredicate) {
+        this(leaderNodeIdSupplier, leaderAddrSupplier, allNodes, selfNodeId, onlinePredicate, null);
+    }
+
+    /**
+     * 重载构造器：额外接受节点失败判定。
+     * <p>
+     * 当 {@code failPredicate} 对某节点返回 true 时，CLUSTER NODES 的 flags 列追加
+     * {@code fail}（对齐 Redis 7.x Gossip 标记语义），使 Redisson / JedisCluster 等
+     * 集群感知客户端立即从拓扑移除该死节点，停止向死节点发起连接。
+     * </p>
+     *
+     * @param onlinePredicate nodeId → 在线；{@code null} 视为恒 true
+     * @param failPredicate   nodeId → 已失败（断开超阈值）；{@code null} 视为恒 false（不标 fail）
+     */
+    public MeshClusterCommands(Supplier<String> leaderNodeIdSupplier,
+                                Supplier<String> leaderAddrSupplier,
+                                Map<String, NodeInfo> allNodes,
+                                String selfNodeId,
+                                java.util.function.Predicate<String> onlinePredicate,
+                                java.util.function.Predicate<String> failPredicate) {
         this.leaderNodeIdSupplier = leaderNodeIdSupplier != null
                 ? leaderNodeIdSupplier : () -> null;
         this.leaderAddrSupplier = leaderAddrSupplier != null
@@ -113,6 +138,7 @@ public class MeshClusterCommands {
                 : Collections.emptyMap();
         this.selfNodeId = selfNodeId;
         this.onlinePredicate = onlinePredicate != null ? onlinePredicate : n -> true;
+        this.failPredicate = failPredicate != null ? failPredicate : n -> false;
     }
 
     // ==================== CLUSTER SLOTS ====================
@@ -340,7 +366,7 @@ public class MeshClusterCommands {
             }
             sb.append(" ");
 
-            // <flags>：myself?, master/slave
+            // <flags>：myself?, master/slave, [fail]
             StringBuilder flags = new StringBuilder();
             if (isSelf) {
                 flags.append("myself");
@@ -349,6 +375,11 @@ public class MeshClusterCommands {
                 flags.append(",");
             }
             flags.append(showAsMaster ? "master" : "slave");
+            // 死节点（断开超阈值）追加 fail flag，使 Redisson 等客户端立即踢出
+            // myself 恒不标 fail（本节点正在响应请求）
+            if (!isSelf && failPredicate.test(nid)) {
+                flags.append(",fail");
+            }
             sb.append(flags);
             sb.append(" ");
 

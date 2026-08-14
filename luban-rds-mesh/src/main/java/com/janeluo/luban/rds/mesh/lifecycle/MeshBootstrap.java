@@ -68,6 +68,9 @@ public class MeshBootstrap {
 
     private static final Logger logger = LoggerFactory.getLogger(MeshBootstrap.class);
 
+    /** 节点断开超此阈值（ms）后 CLUSTER NODES 标 fail（对齐 Redis cluster-node-timeout 默认 15s）。 */
+    private static final long NODE_FAIL_THRESHOLD_MS = 15_000L;
+
     /**
      * 装配并（部分）启动 mesh 集群，返回装配产物 {@link MeshAssembly}。
      * <p>
@@ -434,7 +437,8 @@ public class MeshBootstrap {
         }
 
         return new MeshClusterCommands(leaderNodeIdSupplier, leaderAddrSupplier, allNodes,
-                topo.selfNodeId, busClient::isConnected);
+                topo.selfNodeId, busClient::isConnected,
+                nodeId -> busClient.isFailed(nodeId, NODE_FAIL_THRESHOLD_MS));
     }
 
     private static String hostOf(String hostPort) {

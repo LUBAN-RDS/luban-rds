@@ -65,6 +65,9 @@ public class MeshBusClient {
     /** nodeId → 已调度的重连触发时刻（ms），窗口内去重防重连风暴 */
     private final Map<String, Long> reconnectScheduled = new ConcurrentHashMap<>();
 
+    /** nodeId → 连接断开时刻（ms）；连接成功时清除，用于 isFailed() 阈值判定 */
+    private final Map<String, Long> disconnectSince = new ConcurrentHashMap<>();
+
     /** nodeId → 建连互斥锁（常驻，避免集群规模小下的 ABA 竞态） */
     private final Map<String, Object> connectLocks = new ConcurrentHashMap<>();
 
@@ -171,12 +174,14 @@ public class MeshBusClient {
                     Channel ch = f.channel();
                     nodeChannels.put(nodeId, ch);
                     reconnectAttempts.remove(nodeId);
+                    disconnectSince.remove(nodeId);
                     logger.info("成功连接 mesh 节点 {}: {}:{}", nodeId, host, busPort);
 
                     ch.closeFuture().addListener((closeFuture) -> {
                         boolean removed = nodeChannels.remove(nodeId, ch);
                         logger.info("mesh 节点 {} 连接断开", nodeId);
                         if (removed && !closed) {
+                            disconnectSince.put(nodeId, System.currentTimeMillis());
                             PeerEndpoint ep = nodeEndpoints.get(nodeId);
                             if (ep != null) {
                                 scheduleReconnect(nodeId, ep);
@@ -301,6 +306,7 @@ public class MeshBusClient {
         nodeEndpoints.remove(nodeId);
         reconnectScheduled.remove(nodeId);
         reconnectAttempts.remove(nodeId);
+        disconnectSince.remove(nodeId);
         Channel ch = nodeChannels.remove(nodeId);
         if (ch != null && ch.isActive()) {
             ch.close();
@@ -311,6 +317,30 @@ public class MeshBusClient {
     public boolean isConnected(String nodeId) {
         Channel ch = nodeChannels.get(nodeId);
         return ch != null && ch.isActive();
+    }
+
+    /**
+     * 判断节点是否已失败（断开超过阈值）。
+     * <p>
+     * 对齐 Redis {@code cluster-node-timeout} 语义：节点断开超过阈值后，
+     * CLUSTER NODES 的 flags 列应标 {@code fail}，使 Redisson 等集群感知客户端
+     * 立即从拓扑中移除该节点、停止向死节点发起连接——否则客户端持续重连死节点
+     * 导致连接超时堆积、线程池耗尽、请求分钟级卡顿。
+     * </p>
+     *
+     * @param nodeId      目标 nodeId
+     * @param thresholdMs 断开阈值（ms）；断开持续超过此值返回 true
+     * @return 已断开且超过阈值 → true；在线或未超阈值 → false
+     */
+    public boolean isFailed(String nodeId, long thresholdMs) {
+        if (isConnected(nodeId)) {
+            return false;
+        }
+        Long since = disconnectSince.get(nodeId);
+        if (since == null) {
+            return false;
+        }
+        return (System.currentTimeMillis() - since) >= thresholdMs;
     }
 
     public int getConnectedCount() {

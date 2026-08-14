@@ -10,6 +10,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -395,6 +396,59 @@ class MeshClusterCommandsTest {
         assertTrue(s.contains(NODE_A + " 192.168.1.1:6379@16379 myself,master - 0 0 1 connected"),
                 "myself 行应恒 connected: " + s);
         assertTrue(s.contains("disconnected"), "其他节点按谓词标 disconnected");
+    }
+
+    // ==================== CLUSTER NODES fail flag（死节点踢出）====================
+
+    @Test
+    void clusterNodes_failedNodeHasFailFlag() {
+        // node-C 断开超阈值 → flags 列应含 fail，使 Redisson 踢出
+        Map<String, MeshClusterCommands.NodeInfo> nodes = buildThreeNodes();
+        MeshClusterCommands cmd = new MeshClusterCommands(
+                () -> NODE_A, () -> "192.168.1.1:6379", nodes, NODE_A,
+                id -> !NODE_C.equals(id),           // onlinePredicate: C 离线
+                NODE_C::equals);                     // failPredicate: C 已失败
+        String s = new String(cmd.clusterNodes(), StandardCharsets.ISO_8859_1);
+        String lineC = findLineContaining(s, NODE_C);
+        assertTrue(lineC.contains("slave,fail"),
+                "死节点 flags 列应为 slave,fail: " + lineC);
+        assertTrue(lineC.contains("fail"),
+                "死节点 flags 列应含 fail: " + lineC);
+        assertTrue(lineC.contains("disconnected"),
+                "死节点 linkState 应为 disconnected: " + lineC);
+        // 在线节点不含 fail
+        String lineA = findLineContaining(s, NODE_A);
+        assertFalse(lineA.contains("fail"),
+                "myself 不应标 fail: " + lineA);
+        String lineB = findLineContaining(s, NODE_B);
+        assertFalse(lineB.contains("fail"),
+                "在线节点不应标 fail: " + lineB);
+    }
+
+    @Test
+    void clusterNodes_recoveredNodeNoFailFlag() {
+        // failPredicate 恒 false（节点刚恢复或未超阈值）→ 无 fail flag
+        Map<String, MeshClusterCommands.NodeInfo> nodes = buildThreeNodes();
+        MeshClusterCommands cmd = new MeshClusterCommands(
+                () -> NODE_A, () -> "192.168.1.1:6379", nodes, NODE_A,
+                id -> true,                           // 全部在线
+                id -> false);                         // 无节点失败
+        String s = new String(cmd.clusterNodes(), StandardCharsets.ISO_8859_1);
+        assertFalse(s.contains("fail"),
+                "无节点失败时不应出现 fail flag: " + s);
+    }
+
+    @Test
+    void clusterNodes_failPredicateNullDefaultsToNoFail() {
+        // 6 参构造器 failPredicate 传 null → 等价于不标 fail（向后兼容）
+        Map<String, MeshClusterCommands.NodeInfo> nodes = buildThreeNodes();
+        MeshClusterCommands cmd = new MeshClusterCommands(
+                () -> NODE_A, () -> "192.168.1.1:6379", nodes, NODE_A,
+                id -> !NODE_C.equals(id),             // C 离线
+                null);                                // failPredicate = null
+        String s = new String(cmd.clusterNodes(), StandardCharsets.ISO_8859_1);
+        assertFalse(s.contains("fail"),
+                "failPredicate=null 时不应出现 fail: " + s);
     }
 
     // ==================== CLUSTER INFO ====================
