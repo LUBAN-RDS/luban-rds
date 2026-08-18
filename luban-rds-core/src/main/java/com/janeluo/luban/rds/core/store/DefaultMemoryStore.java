@@ -2755,70 +2755,68 @@ public class DefaultMemoryStore implements MemoryStore {
     }
     
     @Override
-    public java.util.List<Object> zscan(int database, String key, long cursor, String pattern, int count) {
+    public List<Object> zscan(int database, String key, String cursor, String pattern, int count) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        java.util.List<Object> result = new java.util.ArrayList<>();
-        
         StoreValue storeValue = store.storage.get(key);
         if (storeValue == null || storeValue.isExpired()) {
-            result.add(0L);
-            return result;
+            return new java.util.ArrayList<>(java.util.List.of(ScanSupport.DONE));
         }
-        
-        Object val = storeValue.value;
-        if (!(val instanceof ZSetStore)) {
-            result.add(0L);
-            return result;
+        if (!(storeValue.value instanceof ZSetStore)) {
+            return new java.util.ArrayList<>(java.util.List.of(ScanSupport.DONE));
         }
-        
-        ZSetStore zset = (ZSetStore) val;
         RuntimeConfig.incKeyspaceHits();
-        
-        // 转换模式为正则表达式
-        String regex = null;
-        if (pattern != null && !pattern.equals("*")) {
-            regex = pattern.replace(".", "\\.")
-                          .replace("*", ".*")
-                          .replace("?", ".");
-        }
-        
-        int processed = 0;
-        int added = 0;
-        long newCursor = 0;
-        
-        for (java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>> entry : zset.scoreMembers.entrySet()) {
-            for (String member : entry.getValue()) {
-                // 如果有游标，跳过之前的元素
-                if (cursor > 0 && processed < cursor) {
-                    processed++;
-                    continue;
-                }
-                
-                // 检查模式匹配
-                if (regex != null && !member.matches(regex)) {
-                    processed++;
-                    continue;
-                }
-                
-                if (added < count) {
-                    result.add(member);
-                    result.add(entry.getKey().toString());
-                    added++;
-                }
-                processed++;
-                
-                if (added >= count) {
-                    newCursor = processed;
+        ZSetStore zset = (ZSetStore) storeValue.value;
+
+        Object[] start = ScanSupport.decodePair(cursor); // [score(Double), member(String)]，null 视为起始
+        boolean fromStart = start == null;
+        double startScore = fromStart ? Double.NEGATIVE_INFINITY : (Double) start[0];
+        String startMember = fromStart ? null : (String) start[1];
+
+        List<Object> result = new java.util.ArrayList<>();
+        int visited = 0;
+        int matched = 0;
+        Object[] lastVisited = null;
+        boolean firstBucket = true;
+
+        java.util.Iterator<java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>>> scoreIter =
+                zset.scoreMembers.tailMap(startScore, true).entrySet().iterator();
+        java.util.Iterator<String> memberIter = java.util.Collections.emptyIterator();
+        double currentScore = 0;
+
+        while (visited < count && matched < count) {
+            while (!memberIter.hasNext()) {
+                if (!scoreIter.hasNext()) {
+                    memberIter = null;
                     break;
                 }
+                java.util.Map.Entry<Double, java.util.concurrent.ConcurrentSkipListSet<String>> e = scoreIter.next();
+                currentScore = e.getKey();
+                memberIter = firstBucket && !fromStart
+                        ? e.getValue().tailSet(startMember, false).iterator()
+                        : e.getValue().iterator();
+                firstBucket = false;
             }
-            if (added >= count) {
+            if (memberIter == null) {
                 break;
             }
+            String member = memberIter.next();
+            visited++;
+            if (GlobMatcher.match(member, pattern)) {
+                matched++;
+                result.add(member);
+                result.add(RedisDoubleFormatter.format(currentScore));
+            }
+            lastVisited = new Object[]{currentScore, member};
         }
-        
-        // 如果已经遍历完所有元素，游标返回0
-        result.add(0, newCursor);
+
+        // 判断是否还有剩余元素（peek 探测，不消耗）
+        boolean hasMore = false;
+        if (memberIter != null && memberIter.hasNext()) {
+            hasMore = true;
+        } else if (scoreIter.hasNext()) {
+            hasMore = true;
+        }
+        result.add(0, hasMore ? ScanSupport.encodePair((Double) lastVisited[0], (String) lastVisited[1]) : ScanSupport.DONE);
         return result;
     }
     
