@@ -256,14 +256,35 @@ public class HybridMemoryStore implements MemoryStore {
     }
 
     @Override
-    public List<Object> scan(int database, long cursor, String pattern, int count) {
-        // 聚合：onheap.scan 已实现 cursor 语义；offheap 一次性按 pattern 返回（堆外数量少）。
-        // 简化：onheap scan 结果 + offheap 匹配 key（offheap 全为 string）。
-        List<Object> r = new ArrayList<>(onheap.scan(database, cursor, pattern, count));
-        for (String k : offheap.scanKeys(database, pattern)) {
-            r.add(k);
+    public List<Object> scan(int database, String cursor, String pattern, int count, String type) {
+        String startKey = ScanSupport.decodeKey(cursor); // null 视为起始
+        java.util.Iterator<String> merged = ScanSupport.merge(
+                onheap.keyTail(database, startKey).iterator(),
+                offheap.keyTail(database, startKey).iterator());
+        java.util.Iterator<Object> keys = new java.util.Iterator<Object>() {
+            @Override public boolean hasNext() { return merged.hasNext(); }
+            @Override public Object next() { return merged.next(); }
+        };
+        return ScanSupport.page(keys, count,
+                key -> acceptMergedKey(database, (String) key, pattern, type),
+                key -> java.util.Collections.singletonList(key));
+    }
+
+    private boolean acceptMergedKey(int database, String key, String pattern, String typeFilter) {
+        if (!GlobMatcher.match(key, pattern)) {
+            return false;
         }
-        return r;
+        if (typeFilter != null) {
+            String actual = type(database, key); // offheap→"string"，onheap→实际类型
+            if (!typeFilter.equals(actual)) {
+                return false;
+            }
+        }
+        // 过期过滤：offheap 键在 offheap 查，其余在 onheap 查（均无统计副作用）
+        if (offheap.isAlive(database, key)) {
+            return true;
+        }
+        return onheap.isAlive(database, key);
     }
 
     @Override
@@ -344,7 +365,7 @@ public class HybridMemoryStore implements MemoryStore {
     }
 
     @Override
-    public List<Object> hscan(int database, String key, long cursor, String pattern, int count) {
+    public List<Object> hscan(int database, String key, String cursor, String pattern, int count) {
         return onheap.hscan(database, key, cursor, pattern, count);
     }
 
@@ -456,7 +477,7 @@ public class HybridMemoryStore implements MemoryStore {
     }
 
     @Override
-    public List<Object> sscan(int database, String key, long cursor, String pattern, int count) {
+    public List<Object> sscan(int database, String key, String cursor, String pattern, int count) {
         return onheap.sscan(database, key, cursor, pattern, count);
     }
 
@@ -494,7 +515,7 @@ public class HybridMemoryStore implements MemoryStore {
     }
 
     @Override
-    public List<Object> zscan(int database, String key, long cursor, String pattern, int count) {
+    public List<Object> zscan(int database, String key, String cursor, String pattern, int count) {
         return onheap.zscan(database, key, cursor, pattern, count);
     }
 

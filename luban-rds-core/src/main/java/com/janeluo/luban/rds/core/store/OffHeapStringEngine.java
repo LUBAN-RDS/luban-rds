@@ -4,12 +4,14 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 
 import java.nio.charset.StandardCharsets;
+import java.util.NavigableSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 
 /**
  * 堆外 string 存储引擎：len >= threshold 的 string 进堆外 ByteBuf。
- * 单引擎实例承载所有 database（通过 ConcurrentHashMap<Integer, ConcurrentMap<String,OffHeapEntry>>）。
+ * 单引擎实例承载所有 database（通过 ConcurrentHashMap<Integer, ConcurrentSkipListMap<String,OffHeapEntry>>）。
  *
  * 所有权（DD-2 R1）：引擎持有所有 ByteBuf 唯一所有权，refCnt 在引擎内恒为 1。
  * 所有 release 必须经 releaseEntry() 私有方法（单点）。
@@ -21,7 +23,7 @@ public class OffHeapStringEngine implements StoreEngine {
 
     private final int threshold;
     private final PooledByteBufAllocator allocator = PooledByteBufAllocator.DEFAULT;
-    private final ConcurrentMap<Integer, ConcurrentMap<String, OffHeapEntry>> dbs = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Integer, ConcurrentSkipListMap<String, OffHeapEntry>> dbs = new ConcurrentHashMap<>();
 
     // 内存计量：堆外实际占用（ByteBuf.capacity 之和，含 allocator 对齐）
     private final java.util.concurrent.atomic.AtomicLong offheapUsed = new java.util.concurrent.atomic.AtomicLong(0);
@@ -32,8 +34,8 @@ public class OffHeapStringEngine implements StoreEngine {
 
     // ========== string 操作（仅处理 >= threshold 的大 value）==========
 
-    private ConcurrentMap<String, OffHeapEntry> db(int database) {
-        return dbs.computeIfAbsent(database, k -> new ConcurrentHashMap<>());
+    private ConcurrentSkipListMap<String, OffHeapEntry> db(int database) {
+        return dbs.computeIfAbsent(database, k -> new ConcurrentSkipListMap<>());
     }
 
     public void set(int database, String key, String value) {
@@ -212,6 +214,21 @@ public class OffHeapStringEngine implements StoreEngine {
             }
         }
         return r;
+    }
+
+    /** 键是否存在且未过期（供 hybrid scan 过滤，无统计副作用）。 */
+    boolean isAlive(int database, String key) {
+        ConcurrentSkipListMap<String, OffHeapEntry> map = dbs.get(database);
+        if (map == null) return false;
+        OffHeapEntry e = map.get(key);
+        return e != null && !e.isExpired();
+    }
+
+    /** 从 exclusiveStart（null 表示从头）开始的键字典序尾集视图。 */
+    NavigableSet<String> keyTail(int database, String exclusiveStart) {
+        ConcurrentSkipListMap<String, OffHeapEntry> map = dbs.get(database);
+        if (map == null) return java.util.Collections.emptyNavigableSet();
+        return exclusiveStart == null ? map.navigableKeySet() : map.tailMap(exclusiveStart, false).navigableKeySet();
     }
 
     /** 极简 glob：* → .*，? → .。其余字符按字面（regex 转义）。 */
