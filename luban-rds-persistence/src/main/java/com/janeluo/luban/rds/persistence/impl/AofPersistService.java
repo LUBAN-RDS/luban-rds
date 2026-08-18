@@ -334,21 +334,21 @@ public class AofPersistService implements PersistService {
                 writeSelectCommand(tempWriter, db);
 
                 // 遍历数据库中的所有键
-                long cursor = 0;
+                String cursor = "0";
                 do {
-                    List<Object> scanResult = memoryStore.scan(db, cursor, "*", 100);
+                    List<Object> scanResult = memoryStore.scan(db, cursor, "*", 100, null);
                     if (scanResult.size() <= 1) { // 只有游标，没有键
                         break;
                     }
 
-                    cursor = (Long) scanResult.get(0);
+                    cursor = (String) scanResult.get(0);
 
                     // 处理每个键：按类型生成重建命令（C11）
                     for (int i = 1; i < scanResult.size(); i++) {
                         String key = (String) scanResult.get(i);
                         writeRebuildCommand(tempWriter, db, key, memoryStore);
                     }
-                } while (cursor != 0);
+                } while (!"0".equals(cursor));
             }
 
             tempWriter.flush();

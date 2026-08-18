@@ -56,7 +56,7 @@ STRLEN message
 | **HLEN** | `HLEN key` | 获取字段数量 |
 | **HINCRBY** | `HINCRBY key field increment` | 对整数字段做自增 |
 | **HINCRBYFLOAT** | `HINCRBYFLOAT key field increment` | 对数字字段按浮点自增 |
-| **HSCAN** | `HSCAN key cursor [MATCH pattern] [COUNT count]` | 迭代遍历字段，返回 `[cursor, [field,value,...]]` |
+| **HSCAN** | `HSCAN key cursor [MATCH pattern] [COUNT count]` | 迭代遍历字段，返回 `[cursor, [field,value,...]]`；游标为不透明字符串，须原样传回，`0` 表示开始/完成 |
 | **HMSET** | `HMSET key field value [field value ...]` | 同时将多个 field-value (域-值)对设置到哈希表 key 中（Redis 4.0 起已弃用，建议使用 HSET） |
 | **HMGET** | `HMGET key field [field ...]` | 获取哈希表中所有给定字段的值 |
 | **HRANDFIELD** | `HRANDFIELD key [count] [WITHVALUES]` | 随机返回字段（可选带值） |
@@ -167,7 +167,7 @@ LPUSH task_queue "task1"
 | **SUNIONSTORE** | `SUNIONSTORE destination key [key ...]` | 并集结果保存到 destination |
 | **SDIFF** | `SDIFF key [key ...]` | 返回集合差集 |
 | **SDIFFSTORE** | `SDIFFSTORE destination key [key ...]` | 差集结果保存到 destination |
-| **SSCAN** | `SSCAN key cursor [MATCH pattern] [COUNT count]` | 迭代遍历集合成员 |
+| **SSCAN** | `SSCAN key cursor [MATCH pattern] [COUNT count]` | 迭代遍历集合成员；游标为不透明字符串，须原样传回，`0` 表示开始/完成 |
 
 **示例**：
 ```bash
@@ -200,7 +200,7 @@ SPOP tags
 | **ZLEXCOUNT** | `ZLEXCOUNT key min max` | 统计字典序区间内成员数 |
 | **ZPOPMAX** | `ZPOPMAX key [count]` | 弹出分数最高的成员 |
 | **ZPOPMIN** | `ZPOPMIN key [count]` | 弹出分数最低的成员 |
-| **ZSCAN** | `ZSCAN key cursor [MATCH pattern] [COUNT count]` | 迭代遍历有序集合成员 |
+| **ZSCAN** | `ZSCAN key cursor [MATCH pattern] [COUNT count]` | 迭代遍历有序集合成员；游标为不透明字符串，须原样传回，`0` 表示开始/完成 |
 
 **示例**：
 ```bash
@@ -324,7 +324,7 @@ Stream 中的每个消息都有一个唯一的 ID，格式为 `<millisecondsTime
 | **HELLO** | `HELLO [protover [AUTH password]]` | 切换协议版本（RESP2/RESP3）并可携带鉴权 |
 | **SELECT** | `SELECT index` | 选择数据库 |
 | **INFO** | `INFO [section]` | 获取服务器信息和统计数据。支持的 section 包括：Server, Clients, Memory, Persistence, Stats, Replication, CPU, Commandstats, Cluster, Keyspace 等。如果不指定 section，默认返回所有信息。 |
-| **SCAN** | `SCAN cursor [MATCH pattern] [COUNT count] [TYPE type]` | 遍历键（Redis 6+ 支持 TYPE） |
+| **SCAN** | `SCAN cursor [MATCH pattern] [COUNT count] [TYPE type]` | 遍历键（Redis 6+ 支持 `TYPE` 选项）；游标为不透明字符串，须原样传回，`0` 表示开始/完成 |
 | **DBSIZE** | `DBSIZE` | 获取数据库键数量 |
 | **TIME** | `TIME` | 获取服务器时间 |
 | **LASTSAVE** | `LASTSAVE` | 获取最后保存时间 |
@@ -352,6 +352,8 @@ TTL session
 FLUSHDB
 INFO memory
 SCAN 0 MATCH user:* COUNT 10
+SCAN 0 MATCH user:* COUNT 10 TYPE string  # TYPE 选项仅遍历指定类型的键（Redis 6+）
+# 游标为不透明字符串，客户端须原样传回；返回 0 表示遍历完成
 ```
 
 ## 8. 认证命令

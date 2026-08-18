@@ -194,14 +194,14 @@ public class RdbPersistService implements PersistService {
                 writeSelectDb(dos, db);
                 
                 // 遍历数据库中的所有键
-                long cursor = 0;
+                String cursor = "0";
                 do {
-                    List<Object> scanResult = memoryStore.scan(db, cursor, "*", 1000); // 增大批量大小
+                    List<Object> scanResult = memoryStore.scan(db, cursor, "*", 1000, null); // 增大批量大小
                     if (scanResult.size() <= 1) {
                         break;
                     }
                     
-                    cursor = (Long) scanResult.get(0);
+                    cursor = (String) scanResult.get(0);
                     
                     // 批量处理键值对
                     for (int i = 1; i < scanResult.size(); i++) {
@@ -212,7 +212,7 @@ public class RdbPersistService implements PersistService {
                             keyCount++;
                         }
                     }
-                } while (cursor != 0);
+                } while (!"0".equals(cursor));
             }
             
             // 写入RDB文件尾

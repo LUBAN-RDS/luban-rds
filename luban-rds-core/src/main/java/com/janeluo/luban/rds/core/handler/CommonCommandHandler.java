@@ -354,48 +354,90 @@ public class CommonCommandHandler implements CommandHandler {
         if (args.length < 2) {
             return "-ERR wrong number of arguments for 'scan' command\r\n";
         }
-        
-        // 解析游标
-        long cursor;
-        try {
-            cursor = Long.parseLong(args[1]);
-        } catch (NumberFormatException e) {
-            return "-ERR value is not an integer or out of range\r\n";
+        String cursor = args[1];
+        if (!isValidCursor(cursor)) {
+            return "-ERR invalid cursor\r\n";
         }
-        
-        // 解析可选参数
         String pattern = "*";
-        int count = 10; // 默认值
-        
+        long count = 10;
+        String type = null;
         for (int i = 2; i < args.length; i++) {
-            if (args[i].equalsIgnoreCase("MATCH") && i + 1 < args.length) {
+            String opt = args[i].toUpperCase(java.util.Locale.ROOT);
+            if (opt.equals("MATCH") && i + 1 < args.length) {
                 pattern = args[i + 1];
                 i++;
-            } else if (args[i].equalsIgnoreCase("COUNT") && i + 1 < args.length) {
-                try {
-                    count = Integer.parseInt(args[i + 1]);
-                } catch (NumberFormatException e) {
+            } else if (opt.equals("COUNT") && i + 1 < args.length) {
+                Long parsed = parseRedisLong(args[i + 1]);
+                if (parsed == null) {
                     return "-ERR value is not an integer or out of range\r\n";
                 }
+                if (parsed < 1) {
+                    return "-ERR syntax error\r\n";
+                }
+                count = parsed;
                 i++;
+            } else if (opt.equals("TYPE") && i + 1 < args.length) {
+                // Redis 不校验类型名：未知类型名仅过滤掉全部元素（实测 SCAN 0 TYPE nosuchtype → 空结果无报错）
+                type = args[i + 1].toLowerCase(java.util.Locale.ROOT);
+                i++;
+            } else {
+                return "-ERR syntax error\r\n";
             }
         }
-        
-        // 调用存储的scan方法
-        java.util.List<Object> scanResult = store.scan(database, cursor, pattern, count);
-        
-        // 构建 RESP 协议响应：两元素数组 [cursor, keys[]]
+        java.util.List<Object> scanResult = store.scan(database, cursor, pattern, (int) Math.min(count, Integer.MAX_VALUE), type);
+        return buildScanResp(scanResult);
+    }
+
+    /**
+     * 游标合法：本实现编码游标（"c:" 前缀）或 strtoul(base 10) 语义接受的串。
+     * 实测 Redis 7.0.12 接受：空串、可选 +/- 前缀 + 纯数字；拒绝 0x 前缀、空白、尾随字符；
+     * 数值须在无符号 64 位范围内（负数按回绕接受，|v| ≤ 2^64）。
+     */
+    static boolean isValidCursor(String cursor) {
+        if (cursor.startsWith("c:")) {
+            return true;
+        }
+        if (cursor.isEmpty()) {
+            return true; // strtoul("") == 0，实测 Redis 接受空游标
+        }
+        if (!cursor.matches("[+-]?[0-9]+")) {
+            return false;
+        }
+        try {
+            java.math.BigInteger v = new java.math.BigInteger(cursor);
+            return v.compareTo(MAX_ULONG) <= 0 && v.compareTo(MIN_I64_RANGE) >= 0;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    private static final java.math.BigInteger MAX_ULONG =
+            java.math.BigInteger.ONE.shiftLeft(64).subtract(java.math.BigInteger.ONE);
+    private static final java.math.BigInteger MIN_I64_RANGE =
+            java.math.BigInteger.valueOf(-1).shiftLeft(64);
+
+    /**
+     * Redis string2ll 语义解析（用于 COUNT 等选项值）：仅可选 '-' 前缀 + 纯数字，
+     * 拒绝 '+'/空白/空串/溢出；解析为 long，失败返回 null。
+     */
+    static Long parseRedisLong(String s) {
+        if (s == null || !s.matches("-?[0-9]+")) {
+            return null;
+        }
+        try {
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    static String buildScanResp(java.util.List<Object> scanResult) {
         StringBuilder response = new StringBuilder();
         response.append("*2\r\n");
-        // 第一个元素：游标为 Bulk String（Redis 规范）
-        String newCursorStr = String.valueOf((Long) scanResult.get(0));
-        response.append(RdsResponseConstant.bulkString(newCursorStr));
-        // 第二个元素：键名数组
-        int keyCount = scanResult.size() - 1;
-        response.append("*").append(keyCount).append("\r\n");
+        response.append(RdsResponseConstant.bulkString(String.valueOf(scanResult.get(0))));
+        response.append("*").append(scanResult.size() - 1).append("\r\n");
         for (int i = 1; i < scanResult.size(); i++) {
-            String key = (String) scanResult.get(i);
-            response.append(RdsResponseConstant.bulkString(key));
+            response.append(RdsResponseConstant.bulkString(String.valueOf(scanResult.get(i))));
         }
         return response.toString();
     }

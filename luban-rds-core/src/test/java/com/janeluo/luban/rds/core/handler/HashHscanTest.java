@@ -39,6 +39,31 @@ public class HashHscanTest {
     }
 
     @Test
+    public void testHscanInvalidCursor() {
+        // 实测 Redis 7.0.12：游标不合法 → "invalid cursor"
+        String[] args = new String[]{RdsCommandConstant.HSCAN, "hk", "abc"};
+        Object resp = handler.handle(db, args, store);
+        assertEquals("-ERR invalid cursor\r\n", String.valueOf(resp));
+    }
+
+    @Test
+    public void testHscanEmptyCursorAccepted() {
+        // 实测 Redis 7.0.12：空游标合法，缺失键时返回空扫描
+        String[] args = new String[]{RdsCommandConstant.HSCAN, "nosuch", ""};
+        Object resp = handler.handle(db, args, store);
+        assertEquals("*2\r\n$1\r\n0\r\n*0\r\n", String.valueOf(resp));
+    }
+
+    @Test
+    public void testHscanTypeOptionNotAllowed() {
+        // 实测 Redis 7.0.12：TYPE 仅 SCAN 支持，HSCAN 带 TYPE → syntax error
+        store.hset(db, "hk", "f", "v");
+        String[] args = new String[]{RdsCommandConstant.HSCAN, "hk", "0", "TYPE", "hash"};
+        Object resp = handler.handle(db, args, store);
+        assertEquals("-ERR syntax error\r\n", String.valueOf(resp));
+    }
+
+    @Test
     public void testHscanWithChineseChars() {
         String json = "{\"name\":\"测试用户\",\"runtime\":\"1 天 0 小时\",\"disk\":\"本地磁盘\"}";
         

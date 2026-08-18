@@ -98,6 +98,16 @@ public class ZSetCommandHandlerTest {
         Object result = handler.handle(DATABASE, args, store);
         assertEquals("$-1\r\n", result);
     }
+
+    @Test
+    public void testZScoreIntegerFormat() {
+        // 整分输出对齐 Redis（1.0 → "1"），而非 Java 默认 "1.0"
+        String[] args = {"ZSCORE", "myzset", "member1"};
+        when(store.zscore(DATABASE, "myzset", "member1")).thenReturn(1.0);
+
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("$1\r\n1\r\n", result);
+    }
     
     // ==================== ZREM 命令测试 ====================
     
@@ -126,23 +136,79 @@ public class ZSetCommandHandlerTest {
     @Test
     public void testZScanNormal() {
         String[] args = {"ZSCAN", "myzset", "0"};
-        List<Object> scanResult = Arrays.asList(0L, "member1", "1.0", "member2", "2.0");
-        when(store.zscan(DATABASE, "myzset", 0L, "*", 10)).thenReturn(scanResult);
-        
+        List<Object> scanResult = Arrays.asList("0", "member1", "1.0", "member2", "2.0");
+        when(store.type(DATABASE, "myzset")).thenReturn("zset");
+        when(store.zscan(DATABASE, "myzset", "0", "*", 10)).thenReturn(scanResult);
+
         Object result = handler.handle(DATABASE, args, store);
         String expected = "*2\r\n$1\r\n0\r\n*4\r\n$7\r\nmember1\r\n$3\r\n1.0\r\n$7\r\nmember2\r\n$3\r\n2.0\r\n";
         assertEquals(expected, result);
     }
-    
+
     @Test
     public void testZScanWithPattern() {
         String[] args = {"ZSCAN", "myzset", "0", "MATCH", "member*", "COUNT", "5"};
-        List<Object> scanResult = Arrays.asList(0L, "member1", "1.0");
-        when(store.zscan(DATABASE, "myzset", 0L, "member*", 5)).thenReturn(scanResult);
-        
+        List<Object> scanResult = Arrays.asList("0", "member1", "1.0");
+        when(store.type(DATABASE, "myzset")).thenReturn("zset");
+        when(store.zscan(DATABASE, "myzset", "0", "member*", 5)).thenReturn(scanResult);
+
         Object result = handler.handle(DATABASE, args, store);
         String expected = "*2\r\n$1\r\n0\r\n*2\r\n$7\r\nmember1\r\n$3\r\n1.0\r\n";
         assertEquals(expected, result);
+    }
+
+    @Test
+    public void testZScanMissingKey() {
+        String[] args = {"ZSCAN", "noexist", "0"};
+        when(store.type(DATABASE, "noexist")).thenReturn("none");
+
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("*2\r\n$1\r\n0\r\n*0\r\n", result);
+        verify(store, never()).zscan(anyInt(), anyString(), anyString(), anyString(), anyInt());
+    }
+
+    @Test
+    public void testZScanWrongType() {
+        String[] args = {"ZSCAN", "mystr", "0"};
+        when(store.type(DATABASE, "mystr")).thenReturn("string");
+
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", result);
+        verify(store, never()).zscan(anyInt(), anyString(), anyString(), anyString(), anyInt());
+    }
+
+    @Test
+    public void testZScanInvalidCursor() {
+        String[] args = {"ZSCAN", "myzset", "abc"};
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR invalid cursor\r\n", result);
+    }
+
+    @Test
+    public void testZScanEmptyCursorAccepted() {
+        // 实测 Redis 7.0.12：空游标合法，继续走类型检查
+        String[] args = {"ZSCAN", "myzset", ""};
+        when(store.type(DATABASE, "myzset")).thenReturn("zset");
+        List<Object> scanResult = Arrays.asList("0");
+        when(store.zscan(DATABASE, "myzset", "", "*", 10)).thenReturn(scanResult);
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("*2\r\n$1\r\n0\r\n*0\r\n", result);
+    }
+
+    @Test
+    public void testZScanCountPlusSignRejected() {
+        String[] args = {"ZSCAN", "myzset", "0", "COUNT", "+5"};
+        when(store.type(DATABASE, "myzset")).thenReturn("zset");
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR value is not an integer or out of range\r\n", result);
+    }
+
+    @Test
+    public void testZScanCountLessThanOne() {
+        String[] args = {"ZSCAN", "myzset", "0", "COUNT", "0"};
+        when(store.type(DATABASE, "myzset")).thenReturn("zset");
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR syntax error\r\n", result);
     }
     
     // ==================== ZREMRANGEBYSCORE 命令测试 ====================
@@ -214,6 +280,16 @@ public class ZSetCommandHandlerTest {
         
         Object result = handler.handle(DATABASE, args, store);
         assertEquals("$3\r\n3.5\r\n", result);
+    }
+
+    @Test
+    public void testZIncrByIntegerResult() {
+        // 整分输出对齐 Redis（5.0 → "5"），而非 Java 默认 "5.0"
+        String[] args = {"ZINCRBY", "myzset", "2.0", "member1"};
+        when(store.zincrby(DATABASE, "myzset", 2.0, "member1")).thenReturn(5.0);
+
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("$1\r\n5\r\n", result);
     }
     
     @Test

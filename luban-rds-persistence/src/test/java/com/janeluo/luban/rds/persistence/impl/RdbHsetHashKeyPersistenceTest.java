@@ -84,7 +84,7 @@ public class RdbHsetHashKeyPersistenceTest {
                 1, memoryStore.dbsize(0));
 
         // scan 应能扫到该 key
-        List<Object> scanResult = memoryStore.scan(0, 0, "*", 1000);
+        List<Object> scanResult = memoryStore.scan(0, "0", "*", 1000, null);
         boolean foundInScan = false;
         for (int i = 1; i < scanResult.size(); i++) {
             if (key.equals(scanResult.get(i))) {
