@@ -92,14 +92,16 @@ public interface MemoryStore {
     String type(int database, String key);
     
     /**
-     * 扫描数据库中的键
-     * @param database 数据库索引
-     * @param cursor 游标
-     * @param pattern 匹配模式
-     * @param count 计数
-     * @return 包含新游标和匹配键的列表，格式为 [newCursor, key1, key2, ...]
+     * 按游标遍历当前数据库的键。
+     *
+     * @param database 数据库编号
+     * @param cursor   游标："0" 起始；续游标为 ScanSupport 编码串（不透明，客户端原样回传）
+     * @param pattern  glob 模式（null 或 "*" 匹配全部）
+     * @param count    每页访问键数上限
+     * @param type     数据类型过滤（null 不过滤；取值见 RdsDataTypeConstant）
+     * @return 包含新游标和匹配键的列表，格式为 [newCursor(String), key1, key2, ...]；newCursor 为 "0" 表示遍历完成
      */
-    List<Object> scan(int database, long cursor, String pattern, int count);
+    List<Object> scan(int database, String cursor, String pattern, int count, String type);
     
     /**
      * 返回当前数据库的键数量
@@ -223,15 +225,16 @@ public interface MemoryStore {
     int hlen(int database, String key);
     
     /**
-     * 扫描 Hash 字段
-     * @param database 数据库索引
-     * @param key Hash 键
-     * @param cursor 游标
-     * @param pattern 字段匹配模式（glob）
-     * @param count 返回的最大字段数
-     * @return [newCursor, field1, value1, field2, value2, ...]
+     * 按游标遍历 hash 键的字段。
+     *
+     * @param database 数据库编号
+     * @param key      hash 键名
+     * @param cursor   游标："0" 起始；续游标为 ScanSupport 编码串（不透明，客户端原样回传）
+     * @param pattern  glob 模式（null 或 "*" 匹配全部）
+     * @param count    每页访问字段数上限
+     * @return [newCursor(String), field1, value1, field2, value2, ...]；newCursor 为 "0" 表示遍历完成
      */
-    java.util.List<Object> hscan(int database, String key, long cursor, String pattern, int count);
+    java.util.List<Object> hscan(int database, String key, String cursor, String pattern, int count);
     
     // ==================== List 操作优化接口 ====================
     
@@ -413,15 +416,16 @@ public interface MemoryStore {
     java.util.Set<String> sdiff(int database, String... keys);
 
     /**
-     * 扫描集合成员
-     * @param database 数据库索引
-     * @param key Set 键
-     * @param cursor 游标
-     * @param pattern 成员匹配模式（glob）
-     * @param count 返回的最大成员数
-     * @return [newCursor, member1, member2, ...]
+     * 按游标遍历 set 键的成员。
+     *
+     * @param database 数据库编号
+     * @param key      set 键名
+     * @param cursor   游标："0" 起始；续游标为 ScanSupport 编码串（不透明，客户端原样回传）
+     * @param pattern  glob 模式（null 或 "*" 匹配全部）
+     * @param count    每页访问成员数上限
+     * @return [newCursor(String), member1, member2, ...]；newCursor 为 "0" 表示遍历完成
      */
-    java.util.List<Object> sscan(int database, String key, long cursor, String pattern, int count);
+    java.util.List<Object> sscan(int database, String key, String cursor, String pattern, int count);
 
     // ==================== ZSet 操作优化接口 ====================
     
@@ -484,15 +488,16 @@ public interface MemoryStore {
     java.util.List<String> zrangeByScore(int database, String key, double min, double max, int offset, int count);
 
     /**
-     * 扫描有序集合成员
-     * @param database 数据库索引
-     * @param key ZSet 键
-     * @param cursor 游标
-     * @param pattern 成员匹配模式（glob）
-     * @param count 返回的最大成员数
-     * @return [newCursor, member1, score1, member2, score2, ...]
+     * 按游标遍历 zset 键的成员。
+     *
+     * @param database 数据库编号
+     * @param key      zset 键名
+     * @param cursor   游标："0" 起始；续游标为 ScanSupport 编码串（不透明，客户端原样回传）
+     * @param pattern  glob 模式（null 或 "*" 匹配全部）
+     * @param count    每页访问成员数上限
+     * @return [newCursor(String), member1, score1, member2, score2, ...]；newCursor 为 "0" 表示遍历完成
      */
-    java.util.List<Object> zscan(int database, String key, long cursor, String pattern, int count);
+    java.util.List<Object> zscan(int database, String key, String cursor, String pattern, int count);
 
     /**
      * 按分数范围删除成员
