@@ -1456,24 +1456,24 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.get(key);
         
-        java.util.concurrent.ConcurrentHashMap<String, String> hash;
+        java.util.concurrent.ConcurrentSkipListMap<String, String> hash;
         boolean isNew = false;
         
         if (storeValue == null || storeValue.isExpired()) {
             // 创建新的 Hash
-            hash = new java.util.concurrent.ConcurrentHashMap<>();
+            hash = new java.util.concurrent.ConcurrentSkipListMap<>();
             isNew = true;
         } else {
             Object val = storeValue.value;
-            if (val instanceof java.util.concurrent.ConcurrentHashMap) {
-                hash = (java.util.concurrent.ConcurrentHashMap<String, String>) val;
+            if (val instanceof java.util.concurrent.ConcurrentSkipListMap) {
+                hash = (java.util.concurrent.ConcurrentSkipListMap<String, String>) val;
             } else if (val instanceof java.util.Map) {
-                // 转换为 ConcurrentHashMap
-                hash = new java.util.concurrent.ConcurrentHashMap<>((java.util.Map<String, String>) val);
+                // 转换为 ConcurrentSkipListMap
+                hash = new java.util.concurrent.ConcurrentSkipListMap<>((java.util.Map<String, String>) val);
                 isNew = true;
             } else {
                 // 类型错误，创建新的
-                hash = new java.util.concurrent.ConcurrentHashMap<>();
+                hash = new java.util.concurrent.ConcurrentSkipListMap<>();
                 isNew = true;
             }
         }
@@ -1505,21 +1505,21 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.get(key);
         
-        java.util.concurrent.ConcurrentHashMap<String, String> hash;
+        java.util.concurrent.ConcurrentSkipListMap<String, String> hash;
         boolean isNew = false;
         
         if (storeValue == null || storeValue.isExpired()) {
-            hash = new java.util.concurrent.ConcurrentHashMap<>();
+            hash = new java.util.concurrent.ConcurrentSkipListMap<>();
             isNew = true;
         } else {
             Object val = storeValue.value;
-            if (val instanceof java.util.concurrent.ConcurrentHashMap) {
-                hash = (java.util.concurrent.ConcurrentHashMap<String, String>) val;
+            if (val instanceof java.util.concurrent.ConcurrentSkipListMap) {
+                hash = (java.util.concurrent.ConcurrentSkipListMap<String, String>) val;
             } else if (val instanceof java.util.Map) {
-                hash = new java.util.concurrent.ConcurrentHashMap<>((java.util.Map<String, String>) val);
+                hash = new java.util.concurrent.ConcurrentSkipListMap<>((java.util.Map<String, String>) val);
                 isNew = true;
             } else {
-                hash = new java.util.concurrent.ConcurrentHashMap<>();
+                hash = new java.util.concurrent.ConcurrentSkipListMap<>();
                 isNew = true;
             }
         }
@@ -1550,21 +1550,21 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.get(key);
         
-        java.util.concurrent.ConcurrentHashMap<String, String> hash;
+        java.util.concurrent.ConcurrentSkipListMap<String, String> hash;
         boolean isNew = false;
         
         if (storeValue == null || storeValue.isExpired()) {
-            hash = new java.util.concurrent.ConcurrentHashMap<>();
+            hash = new java.util.concurrent.ConcurrentSkipListMap<>();
             isNew = true;
         } else {
             Object val = storeValue.value;
-            if (val instanceof java.util.concurrent.ConcurrentHashMap) {
-                hash = (java.util.concurrent.ConcurrentHashMap<String, String>) val;
+            if (val instanceof java.util.concurrent.ConcurrentSkipListMap) {
+                hash = (java.util.concurrent.ConcurrentSkipListMap<String, String>) val;
             } else if (val instanceof java.util.Map) {
-                hash = new java.util.concurrent.ConcurrentHashMap<>((java.util.Map<String, String>) val);
+                hash = new java.util.concurrent.ConcurrentSkipListMap<>((java.util.Map<String, String>) val);
                 isNew = true;
             } else {
-                hash = new java.util.concurrent.ConcurrentHashMap<>();
+                hash = new java.util.concurrent.ConcurrentSkipListMap<>();
                 isNew = true;
             }
         }
@@ -1702,21 +1702,21 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.get(key);
         
-        java.util.concurrent.ConcurrentHashMap<String, String> hash;
+        java.util.concurrent.ConcurrentSkipListMap<String, String> hash;
         boolean isNew = false;
         
         if (storeValue == null || storeValue.isExpired()) {
-            hash = new java.util.concurrent.ConcurrentHashMap<>();
+            hash = new java.util.concurrent.ConcurrentSkipListMap<>();
             isNew = true;
         } else {
             Object val = storeValue.value;
-            if (val instanceof java.util.concurrent.ConcurrentHashMap) {
-                hash = (java.util.concurrent.ConcurrentHashMap<String, String>) val;
+            if (val instanceof java.util.concurrent.ConcurrentSkipListMap) {
+                hash = (java.util.concurrent.ConcurrentSkipListMap<String, String>) val;
             } else if (val instanceof java.util.Map) {
-                hash = new java.util.concurrent.ConcurrentHashMap<>((java.util.Map<String, String>) val);
+                hash = new java.util.concurrent.ConcurrentSkipListMap<>((java.util.Map<String, String>) val);
                 isNew = true;
             } else {
-                hash = new java.util.concurrent.ConcurrentHashMap<>();
+                hash = new java.util.concurrent.ConcurrentSkipListMap<>();
                 isNew = true;
             }
         }
@@ -1793,57 +1793,34 @@ public class DefaultMemoryStore implements MemoryStore {
     }
     
     @Override
-    public java.util.List<Object> hscan(int database, String key, long cursor, String pattern, int count) {
-        java.util.List<Object> result = new java.util.ArrayList<>();
+    public List<Object> hscan(int database, String key, String cursor, String pattern, int count) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.get(key);
-        
-        java.util.Map<String, String> hash = new java.util.HashMap<>();
-        if (storeValue != null && !storeValue.isExpired() && storeValue.value instanceof java.util.Map) {
-            java.util.Map<?, ?> raw = (java.util.Map<?, ?>) storeValue.value;
-            for (java.util.Map.Entry<?, ?> e : raw.entrySet()) {
-                hash.put(e.getKey().toString(), e.getValue() == null ? "" : e.getValue().toString());
-            }
+        if (storeValue == null || storeValue.isExpired()) {
+            return new java.util.ArrayList<>(java.util.List.of(ScanSupport.DONE));
         }
-        
-        // 模式为'*'时匹配全部；简单 glob -> 正则转换
-        String regex = null;
-        if (pattern != null && !"*".equals(pattern)) {
-            regex = pattern.replace("*", ".*").replace("?", ".").replace("{", "{").replace("}", "}");
+        if (!(storeValue.value instanceof java.util.concurrent.ConcurrentSkipListMap)) {
+            return new java.util.ArrayList<>(java.util.List.of(ScanSupport.DONE));
         }
-        
-        int processed = 0;
-        boolean started = cursor == 0;
-        for (java.util.Map.Entry<String, String> entry : hash.entrySet()) {
-            String field = entry.getKey();
-            if (regex != null && !field.matches(regex)) {
-                continue;
-            }
-            if (!started) {
-                // 跳过到游标位置（简化实现）
-                processed++;
-                if (processed > cursor) {
-                    started = true;
-                }
-                continue;
-            }
-            // 收集字段与值
-            result.add(field);
-            result.add(entry.getValue());
-            if (result.size() / 2 >= count) {
-                break;
-            }
-        }
-        
-        long newCursor = 0;
-        if (result.size() / 2 >= count) {
-            // 还有更多，设置新游标（简化为偏移值）
-            newCursor = cursor + (result.size() / 2);
-        }
-        
-        // 将新游标插入到开头
-        result.add(0, newCursor);
-        return result;
+        RuntimeConfig.incKeyspaceHits();
+        @SuppressWarnings("unchecked")
+        java.util.concurrent.ConcurrentSkipListMap<String, String> hash =
+                (java.util.concurrent.ConcurrentSkipListMap<String, String>) storeValue.value;
+        String start = ScanSupport.decodeKey(cursor);
+        final java.util.Iterator<String> it =
+                hash.tailMap(start == null ? "" : start, start == null).keySet().iterator();
+        java.util.Iterator<Object> fields = new java.util.Iterator<Object>() {
+            @Override
+            public boolean hasNext() { return it.hasNext(); }
+            @Override
+            public Object next() { return it.next(); }
+        };
+        return ScanSupport.page(fields, count,
+                f -> GlobMatcher.match((String) f, pattern),
+                f -> {
+                    String v = hash.get(f);
+                    return java.util.List.of(f, v == null ? "" : v);
+                });
     }
     
     // ==================== List 操作优化实现 ====================
@@ -2282,22 +2259,21 @@ public class DefaultMemoryStore implements MemoryStore {
         DatabaseStore store = getOrCreateDatabaseStore(database);
         StoreValue storeValue = store.storage.get(key);
         
-        java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> set;
+        java.util.concurrent.ConcurrentSkipListSet<String> set;
         boolean isNew = false;
         
         if (storeValue == null || storeValue.isExpired()) {
-            set = java.util.concurrent.ConcurrentHashMap.newKeySet();
+            set = new java.util.concurrent.ConcurrentSkipListSet<>();
             isNew = true;
         } else {
             Object val = storeValue.value;
-            if (val instanceof java.util.concurrent.ConcurrentHashMap.KeySetView) {
-                set = (java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>) val;
+            if (val instanceof java.util.concurrent.ConcurrentSkipListSet) {
+                set = (java.util.concurrent.ConcurrentSkipListSet<String>) val;
             } else if (val instanceof java.util.Set) {
-                set = java.util.concurrent.ConcurrentHashMap.newKeySet();
-                set.addAll((java.util.Set<String>) val);
+                set = new java.util.concurrent.ConcurrentSkipListSet<>((java.util.Set<String>) val);
                 isNew = true;
             } else {
-                set = java.util.concurrent.ConcurrentHashMap.newKeySet();
+                set = new java.util.concurrent.ConcurrentSkipListSet<>();
                 isNew = true;
             }
         }
@@ -2467,67 +2443,31 @@ public class DefaultMemoryStore implements MemoryStore {
     }
     
     @Override
-    public java.util.List<Object> sscan(int database, String key, long cursor, String pattern, int count) {
+    public List<Object> sscan(int database, String key, String cursor, String pattern, int count) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        java.util.List<Object> result = new java.util.ArrayList<>();
-        
         StoreValue storeValue = store.storage.get(key);
         if (storeValue == null || storeValue.isExpired()) {
-            result.add(0L);
-            return result;
+            return new java.util.ArrayList<>(java.util.List.of(ScanSupport.DONE));
         }
-        
-        Object val = storeValue.value;
-        if (!(val instanceof java.util.concurrent.ConcurrentHashMap.KeySetView)) {
-            result.add(0L);
-            return result;
+        if (!(storeValue.value instanceof java.util.concurrent.ConcurrentSkipListSet)) {
+            return new java.util.ArrayList<>(java.util.List.of(ScanSupport.DONE));
         }
-        
-        @SuppressWarnings("unchecked")
-        java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean> set = 
-                (java.util.concurrent.ConcurrentHashMap.KeySetView<String, Boolean>) val;
         RuntimeConfig.incKeyspaceHits();
-        
-        // 转换模式为正则表达式
-        String regex = null;
-        if (pattern != null && !pattern.equals("*")) {
-            regex = pattern.replace(".", "\\.")
-                          .replace("*", ".*")
-                          .replace("?", ".");
-        }
-        
-        int processed = 0;
-        int added = 0;
-        long newCursor = 0;
-        
-        for (String member : set) {
-            // 如果有游标，跳过之前的元素
-            if (cursor > 0 && processed < cursor) {
-                processed++;
-                continue;
-            }
-            
-            // 检查模式匹配
-            if (regex != null && !member.matches(regex)) {
-                processed++;
-                continue;
-            }
-            
-            if (added < count) {
-                result.add(member);
-                added++;
-            }
-            processed++;
-            
-            if (added >= count) {
-                newCursor = processed;
-                break;
-            }
-        }
-        
-        // 如果已经遍历完所有元素，游标返回0
-        result.add(0, newCursor);
-        return result;
+        @SuppressWarnings("unchecked")
+        java.util.concurrent.ConcurrentSkipListSet<String> set =
+                (java.util.concurrent.ConcurrentSkipListSet<String>) storeValue.value;
+        String start = ScanSupport.decodeKey(cursor);
+        final java.util.Iterator<String> it =
+                set.tailSet(start == null ? "" : start, start == null).iterator();
+        java.util.Iterator<Object> members = new java.util.Iterator<Object>() {
+            @Override
+            public boolean hasNext() { return it.hasNext(); }
+            @Override
+            public Object next() { return it.next(); }
+        };
+        return ScanSupport.page(members, count,
+                m -> GlobMatcher.match((String) m, pattern),
+                m -> java.util.Collections.singletonList(m));
     }
     
     // ==================== ZSet 操作优化实现 ====================
