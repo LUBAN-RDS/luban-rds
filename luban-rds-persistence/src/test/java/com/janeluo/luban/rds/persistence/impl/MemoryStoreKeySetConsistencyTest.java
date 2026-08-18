@@ -32,7 +32,7 @@ public class MemoryStoreKeySetConsistencyTest {
      * 辅助：判断 scan 结果是否包含指定 key。
      */
     private boolean scanContains(String key) {
-        List<Object> result = memoryStore.scan(0, 0, "*", 1000);
+        List<Object> result = memoryStore.scan(0, "0", "*", 1000, null);
         for (int i = 1; i < result.size(); i++) {
             if (key.equals(result.get(i))) {
                 return true;
