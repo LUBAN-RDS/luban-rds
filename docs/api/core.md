@@ -103,12 +103,13 @@ public interface MemoryStore {
     /**
      * 扫描数据库中的键
      * @param database 数据库索引
-     * @param cursor 游标
+     * @param cursor 游标（"0" 起始；续游标为不透明编码串，客户端原样回传；返回 "0" 表示遍历完成）
      * @param pattern 匹配模式
      * @param count 计数
-     * @return 包含新游标和匹配键的列表，格式为 [newCursor, key1, key2, ...]
+     * @param type 数据类型过滤（null 不过滤；取值 string/list/set/zset/hash/stream）
+     * @return 包含新游标和匹配键的列表，格式为 [newCursor(String), key1, key2, ...]
      */
-    List<Object> scan(int database, long cursor, String pattern, int count);
+    List<Object> scan(int database, String cursor, String pattern, int count, String type);
     
     /**
      * 返回当前数据库的键数量
@@ -215,12 +216,12 @@ int hlen(int database, String key);
  * 扫描 Hash 字段
  * @param database 数据库索引
  * @param key Hash 键
- * @param cursor 游标
+ * @param cursor 游标（"0" 起始；续游标为不透明编码串，客户端原样回传；返回 "0" 表示遍历完成）
  * @param pattern 匹配模式
  * @param count 返回的最大字段数
- * @return [newCursor, field1, value1, field2, value2, ...]
+ * @return [newCursor(String), field1, value1, field2, value2, ...]
  */
-java.util.List<Object> hscan(int database, String key, long cursor, String pattern, int count);
+java.util.List<Object> hscan(int database, String key, String cursor, String pattern, int count);
 ```
 
 ### 1.3 List 操作接口
