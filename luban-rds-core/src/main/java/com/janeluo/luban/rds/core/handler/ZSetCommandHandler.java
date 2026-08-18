@@ -2,8 +2,10 @@ package com.janeluo.luban.rds.core.handler;
 
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.constant.RdsCommandConstant;
+import com.janeluo.luban.rds.common.constant.RdsDataTypeConstant;
 import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
 import com.janeluo.luban.rds.core.store.MemoryStore;
+import com.janeluo.luban.rds.core.store.RedisDoubleFormatter;
 import com.google.common.collect.Sets;
 
 import java.util.List;
@@ -221,7 +223,7 @@ public class ZSetCommandHandler implements CommandHandler {
             return "$-1\r\n";
         }
         
-        String scoreStr = score.toString();
+        String scoreStr = RedisDoubleFormatter.format(score);
         byte[] bytes = scoreStr.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
         return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
     }
@@ -256,44 +258,41 @@ public class ZSetCommandHandler implements CommandHandler {
         if (args.length < 3) {
             return "-ERR wrong number of arguments for 'zscan' command\r\n";
         }
-        
         String key = args[1];
-        long cursor;
-        try {
-            cursor = Long.parseLong(args[2]);
-        } catch (NumberFormatException e) {
+        String cursor = args[2];
+        if (!CommonCommandHandler.isValidCursor(cursor)) {
             return "-ERR value is not an integer or out of range\r\n";
         }
-        
+        String type = store.type(database, key);
+        if (RdsDataTypeConstant.NONE.equals(type)) {
+            return "*2\r\n$1\r\n0\r\n*0\r\n"; // 缺键 → ["0", []]
+        }
+        if (!RdsDataTypeConstant.ZSET.equals(type)) {
+            return "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+        }
         String pattern = "*";
         int count = 10;
         for (int i = 3; i < args.length; i++) {
-            if ("MATCH".equalsIgnoreCase(args[i]) && i + 1 < args.length) {
+            String opt = args[i].toUpperCase(java.util.Locale.ROOT);
+            if (opt.equals("MATCH") && i + 1 < args.length) {
                 pattern = args[i + 1];
                 i++;
-            } else if ("COUNT".equalsIgnoreCase(args[i]) && i + 1 < args.length) {
+            } else if (opt.equals("COUNT") && i + 1 < args.length) {
                 try {
                     count = Integer.parseInt(args[i + 1]);
                 } catch (NumberFormatException ex) {
                     return "-ERR value is not an integer or out of range\r\n";
                 }
+                if (count < 1) {
+                    return "-ERR syntax error\r\n";
+                }
                 i++;
+            } else {
+                return "-ERR syntax error\r\n";
             }
         }
-        
         java.util.List<Object> scan = store.zscan(database, key, cursor, pattern, count);
-        long newCursor = (Long) scan.get(0);
-        
-        StringBuilder resp = new StringBuilder();
-        resp.append("*2\r\n");
-        resp.append(RdsResponseConstant.bulkString(String.valueOf(newCursor)));
-        int pairCount = scan.size() - 1;
-        resp.append("*").append(pairCount).append("\r\n");
-        for (int i = 1; i < scan.size(); i++) {
-            String v = scan.get(i).toString();
-            resp.append(RdsResponseConstant.bulkString(v));
-        }
-        return resp.toString();
+        return CommonCommandHandler.buildScanResp(scan);
     }
     
     private Object handleZRemRangeByScore(int database, String[] args, MemoryStore store) {
@@ -382,7 +381,7 @@ public class ZSetCommandHandler implements CommandHandler {
         
         try {
             double newScore = store.zincrby(database, key, increment, member);
-            String scoreStr = Double.toString(newScore);
+            String scoreStr = RedisDoubleFormatter.format(newScore);
             byte[] bytes = scoreStr.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
             return "$" + bytes.length + "\r\n" + new String(bytes, java.nio.charset.StandardCharsets.ISO_8859_1) + "\r\n";
         } catch (RuntimeException e) {

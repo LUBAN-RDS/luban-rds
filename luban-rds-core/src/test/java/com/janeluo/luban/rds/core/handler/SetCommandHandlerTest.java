@@ -185,32 +185,54 @@ public class SetCommandHandlerTest {
     @Test
     public void testSScanNormal() {
         String[] args = {"SSCAN", "myset", "0"};
-        List<Object> scanResult = Arrays.asList(0L, "member1", "member2");
-        when(store.sscan(DATABASE, "myset", 0L, "*", 10)).thenReturn(scanResult);
-        
+        List<Object> scanResult = Arrays.asList("0", "member1", "member2");
+        when(store.type(DATABASE, "myset")).thenReturn("set");
+        when(store.sscan(DATABASE, "myset", "0", "*", 10)).thenReturn(scanResult);
+
         Object result = handler.handle(DATABASE, args, store);
         String expected = "*2\r\n$1\r\n0\r\n*2\r\n$7\r\nmember1\r\n$7\r\nmember2\r\n";
         assertEquals(expected, result);
     }
-    
+
     @Test
     public void testSScanWithPattern() {
         String[] args = {"SSCAN", "myset", "0", "MATCH", "member*", "COUNT", "5"};
-        List<Object> scanResult = Arrays.asList(0L, "member1");
-        when(store.sscan(DATABASE, "myset", 0L, "member*", 5)).thenReturn(scanResult);
-        
+        List<Object> scanResult = Arrays.asList("0", "member1");
+        when(store.type(DATABASE, "myset")).thenReturn("set");
+        when(store.sscan(DATABASE, "myset", "0", "member*", 5)).thenReturn(scanResult);
+
         Object result = handler.handle(DATABASE, args, store);
         String expected = "*2\r\n$1\r\n0\r\n*1\r\n$7\r\nmember1\r\n";
         assertEquals(expected, result);
     }
-    
+
+    @Test
+    public void testSScanMissingKey() {
+        String[] args = {"SSCAN", "noexist", "0"};
+        when(store.type(DATABASE, "noexist")).thenReturn("none");
+
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("*2\r\n$1\r\n0\r\n*0\r\n", result);
+        verify(store, never()).sscan(anyInt(), anyString(), anyString(), anyString(), anyInt());
+    }
+
+    @Test
+    public void testSScanWrongType() {
+        String[] args = {"SSCAN", "mystr", "0"};
+        when(store.type(DATABASE, "mystr")).thenReturn("string");
+
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n", result);
+        verify(store, never()).sscan(anyInt(), anyString(), anyString(), anyString(), anyInt());
+    }
+
     @Test
     public void testSScanWrongArguments() {
         String[] args = {"SSCAN", "myset"};
         Object result = handler.handle(DATABASE, args, store);
         assertEquals("-ERR wrong number of arguments for 'sscan' command\r\n", result);
     }
-    
+
     @Test
     public void testSScanInvalidCursor() {
         String[] args = {"SSCAN", "myset", "abc"};
@@ -221,8 +243,17 @@ public class SetCommandHandlerTest {
     @Test
     public void testSScanInvalidCount() {
         String[] args = {"SSCAN", "myset", "0", "COUNT", "abc"};
+        when(store.type(DATABASE, "myset")).thenReturn("set");
         Object result = handler.handle(DATABASE, args, store);
         assertEquals("-ERR value is not an integer or out of range\r\n", result);
+    }
+
+    @Test
+    public void testSScanCountLessThanOne() {
+        String[] args = {"SSCAN", "myset", "0", "COUNT", "0"};
+        when(store.type(DATABASE, "myset")).thenReturn("set");
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR syntax error\r\n", result);
     }
     
     // ==================== 支持的命令测试 ====================

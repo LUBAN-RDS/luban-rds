@@ -2,6 +2,7 @@ package com.janeluo.luban.rds.core.handler;
 
 import com.google.common.collect.Sets;
 import com.janeluo.luban.rds.common.constant.RdsCommandConstant;
+import com.janeluo.luban.rds.common.constant.RdsDataTypeConstant;
 import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.context.InfoProvider;
@@ -51,6 +52,11 @@ public class CommonCommandHandler implements CommandHandler {
                 t.setDaemon(true);
                 return t;
             });
+
+    /** SCAN 命令 TYPE 选项支持的 Redis 数据类型。 */
+    private static final java.util.Set<String> SCAN_TYPES =
+            java.util.Set.of(RdsDataTypeConstant.STRING, RdsDataTypeConstant.LIST, RdsDataTypeConstant.HASH,
+                             RdsDataTypeConstant.SET, RdsDataTypeConstant.ZSET, RdsDataTypeConstant.STREAM);
 
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.EXISTS,
@@ -354,48 +360,62 @@ public class CommonCommandHandler implements CommandHandler {
         if (args.length < 2) {
             return "-ERR wrong number of arguments for 'scan' command\r\n";
         }
-        
-        // 解析游标
-        long cursor;
-        try {
-            cursor = Long.parseLong(args[1]);
-        } catch (NumberFormatException e) {
+        String cursor = args[1];
+        if (!isValidCursor(cursor)) {
             return "-ERR value is not an integer or out of range\r\n";
         }
-        
-        // 解析可选参数
         String pattern = "*";
-        int count = 10; // 默认值
-        
+        int count = 10;
+        String type = null;
         for (int i = 2; i < args.length; i++) {
-            if (args[i].equalsIgnoreCase("MATCH") && i + 1 < args.length) {
+            String opt = args[i].toUpperCase(java.util.Locale.ROOT);
+            if (opt.equals("MATCH") && i + 1 < args.length) {
                 pattern = args[i + 1];
                 i++;
-            } else if (args[i].equalsIgnoreCase("COUNT") && i + 1 < args.length) {
+            } else if (opt.equals("COUNT") && i + 1 < args.length) {
                 try {
                     count = Integer.parseInt(args[i + 1]);
-                } catch (NumberFormatException e) {
+                } catch (NumberFormatException ex) {
                     return "-ERR value is not an integer or out of range\r\n";
                 }
+                if (count < 1) {
+                    return "-ERR syntax error\r\n";
+                }
                 i++;
+            } else if (opt.equals("TYPE") && i + 1 < args.length) {
+                type = args[i + 1].toLowerCase(java.util.Locale.ROOT);
+                if (!SCAN_TYPES.contains(type)) {
+                    return "-ERR unknown type name\r\n";
+                }
+                i++;
+            } else {
+                return "-ERR syntax error\r\n";
             }
         }
-        
-        // 调用存储的scan方法
-        java.util.List<Object> scanResult = store.scan(database, cursor, pattern, count);
-        
-        // 构建 RESP 协议响应：两元素数组 [cursor, keys[]]
+        java.util.List<Object> scanResult = store.scan(database, cursor, pattern, count, type);
+        return buildScanResp(scanResult);
+    }
+
+    /** 游标合法：整数（Redis 风格/旧版在途游标）或 "c:" 前缀编码游标。 */
+    static boolean isValidCursor(String cursor) {
+        if (cursor.startsWith("c:")) {
+            return true;
+        }
+        try {
+            Long.parseLong(cursor);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    static String buildScanResp(java.util.List<Object> scanResult) {
         StringBuilder response = new StringBuilder();
         response.append("*2\r\n");
-        // 第一个元素：游标为 Bulk String（Redis 规范）
-        String newCursorStr = String.valueOf((Long) scanResult.get(0));
-        response.append(RdsResponseConstant.bulkString(newCursorStr));
-        // 第二个元素：键名数组
-        int keyCount = scanResult.size() - 1;
-        response.append("*").append(keyCount).append("\r\n");
+        response.append(RdsResponseConstant.bulkString(String.valueOf(scanResult.get(0))));
+        response.append("*").append(scanResult.size() - 1).append("\r\n");
         for (int i = 1; i < scanResult.size(); i++) {
-            String key = (String) scanResult.get(i);
-            response.append(RdsResponseConstant.bulkString(key));
+            response.append(RdsResponseConstant.bulkString(String.valueOf(scanResult.get(i))));
         }
         return response.toString();
     }
