@@ -2,7 +2,6 @@ package com.janeluo.luban.rds.core.handler;
 
 import com.google.common.collect.Sets;
 import com.janeluo.luban.rds.common.constant.RdsCommandConstant;
-import com.janeluo.luban.rds.common.constant.RdsDataTypeConstant;
 import com.janeluo.luban.rds.common.constant.RdsResponseConstant;
 import com.janeluo.luban.rds.common.config.RuntimeConfig;
 import com.janeluo.luban.rds.common.context.InfoProvider;
@@ -52,11 +51,6 @@ public class CommonCommandHandler implements CommandHandler {
                 t.setDaemon(true);
                 return t;
             });
-
-    /** SCAN 命令 TYPE 选项支持的 Redis 数据类型。 */
-    private static final java.util.Set<String> SCAN_TYPES =
-            java.util.Set.of(RdsDataTypeConstant.STRING, RdsDataTypeConstant.LIST, RdsDataTypeConstant.HASH,
-                             RdsDataTypeConstant.SET, RdsDataTypeConstant.ZSET, RdsDataTypeConstant.STREAM);
 
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.EXISTS,
@@ -362,10 +356,10 @@ public class CommonCommandHandler implements CommandHandler {
         }
         String cursor = args[1];
         if (!isValidCursor(cursor)) {
-            return "-ERR value is not an integer or out of range\r\n";
+            return "-ERR invalid cursor\r\n";
         }
         String pattern = "*";
-        int count = 10;
+        long count = 10;
         String type = null;
         for (int i = 2; i < args.length; i++) {
             String opt = args[i].toUpperCase(java.util.Locale.ROOT);
@@ -373,39 +367,67 @@ public class CommonCommandHandler implements CommandHandler {
                 pattern = args[i + 1];
                 i++;
             } else if (opt.equals("COUNT") && i + 1 < args.length) {
-                try {
-                    count = Integer.parseInt(args[i + 1]);
-                } catch (NumberFormatException ex) {
+                Long parsed = parseRedisLong(args[i + 1]);
+                if (parsed == null) {
                     return "-ERR value is not an integer or out of range\r\n";
                 }
-                if (count < 1) {
+                if (parsed < 1) {
                     return "-ERR syntax error\r\n";
                 }
+                count = parsed;
                 i++;
             } else if (opt.equals("TYPE") && i + 1 < args.length) {
+                // Redis 不校验类型名：未知类型名仅过滤掉全部元素（实测 SCAN 0 TYPE nosuchtype → 空结果无报错）
                 type = args[i + 1].toLowerCase(java.util.Locale.ROOT);
-                if (!SCAN_TYPES.contains(type)) {
-                    return "-ERR unknown type name\r\n";
-                }
                 i++;
             } else {
                 return "-ERR syntax error\r\n";
             }
         }
-        java.util.List<Object> scanResult = store.scan(database, cursor, pattern, count, type);
+        java.util.List<Object> scanResult = store.scan(database, cursor, pattern, (int) Math.min(count, Integer.MAX_VALUE), type);
         return buildScanResp(scanResult);
     }
 
-    /** 游标合法：整数（Redis 风格/旧版在途游标）或 "c:" 前缀编码游标。 */
+    /**
+     * 游标合法：本实现编码游标（"c:" 前缀）或 strtoul(base 10) 语义接受的串。
+     * 实测 Redis 7.0.12 接受：空串、可选 +/- 前缀 + 纯数字；拒绝 0x 前缀、空白、尾随字符；
+     * 数值须在无符号 64 位范围内（负数按回绕接受，|v| ≤ 2^64）。
+     */
     static boolean isValidCursor(String cursor) {
         if (cursor.startsWith("c:")) {
             return true;
         }
+        if (cursor.isEmpty()) {
+            return true; // strtoul("") == 0，实测 Redis 接受空游标
+        }
+        if (!cursor.matches("[+-]?[0-9]+")) {
+            return false;
+        }
         try {
-            Long.parseLong(cursor);
-            return true;
+            java.math.BigInteger v = new java.math.BigInteger(cursor);
+            return v.compareTo(MAX_ULONG) <= 0 && v.compareTo(MIN_I64_RANGE) >= 0;
         } catch (NumberFormatException e) {
             return false;
+        }
+    }
+
+    private static final java.math.BigInteger MAX_ULONG =
+            java.math.BigInteger.ONE.shiftLeft(64).subtract(java.math.BigInteger.ONE);
+    private static final java.math.BigInteger MIN_I64_RANGE =
+            java.math.BigInteger.valueOf(-1).shiftLeft(64);
+
+    /**
+     * Redis string2ll 语义解析（用于 COUNT 等选项值）：仅可选 '-' 前缀 + 纯数字，
+     * 拒绝 '+'/空白/空串/溢出；解析为 long，失败返回 null。
+     */
+    static Long parseRedisLong(String s) {
+        if (s == null || !s.matches("-?[0-9]+")) {
+            return null;
+        }
+        try {
+            return Long.parseLong(s);
+        } catch (NumberFormatException e) {
+            return null;
         }
     }
 

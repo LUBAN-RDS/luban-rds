@@ -237,7 +237,47 @@ public class SetCommandHandlerTest {
     public void testSScanInvalidCursor() {
         String[] args = {"SSCAN", "myset", "abc"};
         Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR invalid cursor\r\n", result);
+    }
+
+    @Test
+    public void testSScanEmptyCursorAccepted() {
+        // 实测 Redis 7.0.12：空游标合法（strtoul("") == 0），继续走类型检查
+        String[] args = {"SSCAN", "myset", ""};
+        when(store.type(DATABASE, "myset")).thenReturn("set");
+        List<Object> scanResult = Arrays.asList("0");
+        when(store.sscan(DATABASE, "myset", "", "*", 10)).thenReturn(scanResult);
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("*2\r\n$1\r\n0\r\n*0\r\n", result);
+    }
+
+    @Test
+    public void testSScanCountPlusSignRejected() {
+        // 实测 Redis 7.0.12：COUNT 值拒绝 '+' 前缀（string2ll 语义）
+        String[] args = {"SSCAN", "myset", "0", "COUNT", "+5"};
+        when(store.type(DATABASE, "myset")).thenReturn("set");
+        Object result = handler.handle(DATABASE, args, store);
         assertEquals("-ERR value is not an integer or out of range\r\n", result);
+    }
+
+    @Test
+    public void testSScanCountBeyondIntegerRangeAccepted() {
+        // 实测 Redis 7.0.12：COUNT 为 long 解析，2147483648 合法
+        String[] args = {"SSCAN", "myset", "0", "COUNT", "2147483648"};
+        when(store.type(DATABASE, "myset")).thenReturn("set");
+        List<Object> scanResult = Arrays.asList("0", "member1");
+        when(store.sscan(DATABASE, "myset", "0", "*", Integer.MAX_VALUE)).thenReturn(scanResult);
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("*2\r\n$1\r\n0\r\n*1\r\n$7\r\nmember1\r\n", result);
+    }
+
+    @Test
+    public void testSScanTypeOptionNotAllowed() {
+        // 实测 Redis 7.0.12：TYPE 仅 SCAN 支持，SSCAN 带 TYPE → syntax error
+        String[] args = {"SSCAN", "myset", "0", "TYPE", "set"};
+        when(store.type(DATABASE, "myset")).thenReturn("set");
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR syntax error\r\n", result);
     }
     
     @Test

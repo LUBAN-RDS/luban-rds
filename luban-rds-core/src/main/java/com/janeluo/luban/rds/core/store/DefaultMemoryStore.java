@@ -1377,7 +1377,7 @@ public class DefaultMemoryStore implements MemoryStore {
         if (!GlobMatcher.match(key, pattern)) {
             return false;
         }
-        if (typeFilter != null && !typeFilter.equals(storeValue.getType())) {
+        if (typeFilter != null && !typeFilter.equalsIgnoreCase(storeValue.getType())) {
             return false;
         }
         return true;

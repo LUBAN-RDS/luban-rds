@@ -338,7 +338,7 @@ public class HashCommandHandler implements CommandHandler {
         String key = args[1];
         String cursor = args[2];
         if (!CommonCommandHandler.isValidCursor(cursor)) {
-            return "-ERR value is not an integer or out of range\r\n";
+            return "-ERR invalid cursor\r\n";
         }
         String type = store.type(database, key);
         if (RdsDataTypeConstant.NONE.equals(type)) {
@@ -348,27 +348,27 @@ public class HashCommandHandler implements CommandHandler {
             return "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
         }
         String pattern = "*";
-        int count = 10;
+        long count = 10;
         for (int i = 3; i < args.length; i++) {
             String opt = args[i].toUpperCase(java.util.Locale.ROOT);
             if (opt.equals("MATCH") && i + 1 < args.length) {
                 pattern = args[i + 1];
                 i++;
             } else if (opt.equals("COUNT") && i + 1 < args.length) {
-                try {
-                    count = Integer.parseInt(args[i + 1]);
-                } catch (NumberFormatException ex) {
+                Long parsed = CommonCommandHandler.parseRedisLong(args[i + 1]);
+                if (parsed == null) {
                     return "-ERR value is not an integer or out of range\r\n";
                 }
-                if (count < 1) {
+                if (parsed < 1) {
                     return "-ERR syntax error\r\n";
                 }
+                count = parsed;
                 i++;
             } else {
                 return "-ERR syntax error\r\n";
             }
         }
-        java.util.List<Object> scan = store.hscan(database, key, cursor, pattern, count);
+        java.util.List<Object> scan = store.hscan(database, key, cursor, pattern, (int) Math.min(count, Integer.MAX_VALUE));
         return CommonCommandHandler.buildScanResp(scan);
     }
     

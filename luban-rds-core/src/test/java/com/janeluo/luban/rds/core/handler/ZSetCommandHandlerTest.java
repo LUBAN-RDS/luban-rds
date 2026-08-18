@@ -181,6 +181,25 @@ public class ZSetCommandHandlerTest {
     public void testZScanInvalidCursor() {
         String[] args = {"ZSCAN", "myzset", "abc"};
         Object result = handler.handle(DATABASE, args, store);
+        assertEquals("-ERR invalid cursor\r\n", result);
+    }
+
+    @Test
+    public void testZScanEmptyCursorAccepted() {
+        // 实测 Redis 7.0.12：空游标合法，继续走类型检查
+        String[] args = {"ZSCAN", "myzset", ""};
+        when(store.type(DATABASE, "myzset")).thenReturn("zset");
+        List<Object> scanResult = Arrays.asList("0");
+        when(store.zscan(DATABASE, "myzset", "", "*", 10)).thenReturn(scanResult);
+        Object result = handler.handle(DATABASE, args, store);
+        assertEquals("*2\r\n$1\r\n0\r\n*0\r\n", result);
+    }
+
+    @Test
+    public void testZScanCountPlusSignRejected() {
+        String[] args = {"ZSCAN", "myzset", "0", "COUNT", "+5"};
+        when(store.type(DATABASE, "myzset")).thenReturn("zset");
+        Object result = handler.handle(DATABASE, args, store);
         assertEquals("-ERR value is not an integer or out of range\r\n", result);
     }
 
