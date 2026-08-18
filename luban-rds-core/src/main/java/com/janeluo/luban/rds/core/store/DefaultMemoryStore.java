@@ -20,9 +20,11 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -296,12 +298,12 @@ public class DefaultMemoryStore implements MemoryStore {
     // 每个数据库的存储结构
     private static class DatabaseStore {
         final ConcurrentHashMap<String, StoreValue> storage;
-        final ConcurrentHashMap<String, Boolean> keySet; // 用于跟踪所有键，支持SCAN命令
+        final ConcurrentSkipListMap<String, Boolean> keySet; // 用于跟踪所有键，支持SCAN命令
         final ConcurrentHashMap<String, AtomicLong> keyVersions; // 键版本，用于WATCH
         final ConcurrentHashMap<Integer, Set<String>> slotToKeys; // 槽位到键的映射索引
 
         public DatabaseStore() {
-            this.keySet = new ConcurrentHashMap<>(64); // 初始容量
+            this.keySet = new ConcurrentSkipListMap<>();
             this.keyVersions = new ConcurrentHashMap<>(64);
             this.slotToKeys = new ConcurrentHashMap<>();
             this.storage = new ConcurrentHashMap<>(256); // 初始容量，减少扩容
@@ -1347,75 +1349,53 @@ public class DefaultMemoryStore implements MemoryStore {
     }
     
     @Override
-    public java.util.List<Object> scan(int database, long cursor, String pattern, int count) {
+    public List<Object> scan(int database, String cursor, String pattern, int count, String type) {
         DatabaseStore store = getOrCreateDatabaseStore(database);
-        java.util.List<Object> result = new java.util.ArrayList<>();
-        
-        // 默认为0
-        if (cursor == 0 && store.keySet.isEmpty()) {
-            // 没有键，返回0游标
-            result.add(0L);
-            return result;
+        String startKey = ScanSupport.decodeKey(cursor); // null 视为起始
+        final String typeFilter = type;
+        final java.util.Iterator<String> it =
+                store.keySet.tailMap(startKey == null ? "" : startKey, startKey == null).keySet().iterator();
+        java.util.Iterator<Object> keys = new java.util.Iterator<Object>() {
+            @Override
+            public boolean hasNext() { return it.hasNext(); }
+            @Override
+            public Object next() { return it.next(); }
+        };
+        return ScanSupport.page(keys, count,
+                key -> acceptScanKey(store, (String) key, pattern, typeFilter),
+                key -> java.util.Collections.singletonList(key));
+    }
+
+    /** scan 过滤：过期键顺带清理；MATCH glob；TYPE 过滤。 */
+    private boolean acceptScanKey(DatabaseStore store, String key, String pattern, String typeFilter) {
+        StoreValue storeValue = store.storage.get(key);
+        if (storeValue == null || storeValue.isExpired()) {
+            store.keySet.remove(key);
+            store.removeEntry(key);
+            return false;
         }
-        
-        // 简单实现：遍历所有键，支持模式匹配和计数限制
-        int processed = 0;
-        boolean found = false;
-        
-        for (String key : store.keySet.keySet()) {
-            // 检查键是否过期
-            StoreValue storeValue = store.storage.get(key);
-            if (storeValue == null || storeValue.isExpired()) {
-                // 键不存在或已过期，从keySet中移除
-                store.keySet.remove(key);
-                store.removeEntry(key);
-                continue;
-            }
-            
-            // 检查是否匹配模式
-            if (pattern != null && !pattern.equals("*")) {
-                // 转换为正则表达式
-                String regex = pattern.replace("*", ".*")
-                                     .replace("?", ".")
-                                     .replace("{", "{")
-                                     .replace("}", "}");
-                if (!key.matches(regex)) {
-                    continue;
-                }
-            }
-            
-            // 检查是否需要从游标开始
-            if (cursor > 0 && !found) {
-                // 简单实现：跳过cursor个键
-                if (processed < cursor) {
-                    processed++;
-                    continue;
-                } else {
-                    found = true;
-                }
-            }
-            
-            // 添加到结果中
-            result.add(key);
-            processed++;
-            
-            // 达到计数限制，停止
-            if (processed >= count) {
-                break;
-            }
+        if (!GlobMatcher.match(key, pattern)) {
+            return false;
         }
-        
-        // 计算新游标
-        long newCursor = 0;
-        if (processed >= count) {
-            // 还有更多键，设置新游标
-            newCursor = cursor + processed;
+        if (typeFilter != null && !typeFilter.equals(storeValue.getType())) {
+            return false;
         }
-        
-        // 将新游标添加到结果的开头
-        result.add(0, newCursor);
-        
-        return result;
+        return true;
+    }
+
+    /** 从 exclusiveStart（null 表示从头）开始的键字典序尾集视图。 */
+    NavigableSet<String> keyTail(int database, String exclusiveStart) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        return exclusiveStart == null
+                ? store.keySet.navigableKeySet()
+                : store.keySet.tailMap(exclusiveStart, false).navigableKeySet();
+    }
+
+    /** 键是否存在且未过期（供 hybrid scan 过滤，无统计副作用）。 */
+    boolean isAlive(int database, String key) {
+        DatabaseStore store = getOrCreateDatabaseStore(database);
+        StoreValue v = store.storage.get(key);
+        return v != null && !v.isExpired();
     }
     
     @Override
