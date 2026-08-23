@@ -1,13 +1,13 @@
 package com.janeluo.luban.rds.core.store;
 
-import org.junit.Before;
-import org.junit.Test;
-import static org.junit.Assert.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
 
 public class DefaultMemoryStoreTest {
     private MemoryStore memoryStore;
     
-    @Before
+    @BeforeEach
     public void setUp() {
         memoryStore = new DefaultMemoryStore();
     }
@@ -72,6 +72,20 @@ public class DefaultMemoryStoreTest {
         
         assertFalse(memoryStore.exists(database, key));
         assertNull(memoryStore.get(database, key));
+    }
+    
+    @Test
+    public void testDelExpiredKeyReturnsFalse() throws InterruptedException {
+        String key = "expiredDelKey";
+        int database = 0;
+
+        memoryStore.set(database, key, "value");
+        memoryStore.expire(database, key, 1);
+        Thread.sleep(1500);
+
+        // 对齐 Redis 7：过期键 DEL 返回 false（键本身被惰性删除）
+        assertFalse(memoryStore.del(database, key));
+        assertFalse(memoryStore.exists(database, key));
     }
     
     @Test

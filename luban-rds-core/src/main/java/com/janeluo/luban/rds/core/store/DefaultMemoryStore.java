@@ -1212,7 +1212,8 @@ public class DefaultMemoryStore implements MemoryStore {
             store.removeEntry(key);
             store.keySet.remove(key);
             bumpKeyVersion(database, key);
-            return true;
+            // 对齐 Redis 7：过期键被惰性删除但不计入删除结果（DEL/UNLINK 返回 0）
+            return !storeValue.isExpired();
         }
         return false;
     }

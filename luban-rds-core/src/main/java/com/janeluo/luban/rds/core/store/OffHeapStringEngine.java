@@ -86,7 +86,8 @@ public class OffHeapStringEngine implements StoreEngine {
         OffHeapEntry entry = db(database).remove(key);
         if (entry == null) return false;
         releaseEntry(entry);
-        return true;
+        // 对齐 Redis 7：过期键被惰性删除但不计入删除结果
+        return !entry.isExpired();
     }
 
     public boolean exists(int database, String key) {
