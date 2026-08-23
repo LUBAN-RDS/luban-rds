@@ -96,4 +96,13 @@ class OffHeapStringEngineTest {
         int removed = engine.expireBatch(0, 10);
         assertEquals(10, removed);
     }
+
+    @Test
+    void delExpiredReturnsFalse() throws InterruptedException {
+        engine.set(0, "exp-k", "v".repeat(300)); // >= threshold(256) 才进堆外引擎
+        engine.expire(0, "exp-k", 1000); // expire 参数单位是毫秒
+        Thread.sleep(1500);
+        assertFalse(engine.del(0, "exp-k"), "过期键 del 应返回 false（删除但不计入计数）");
+        assertFalse(engine.exists(0, "exp-k"));
+    }
 }

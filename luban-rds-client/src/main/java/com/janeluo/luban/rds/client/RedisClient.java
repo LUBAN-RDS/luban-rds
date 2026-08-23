@@ -328,6 +328,14 @@ public interface RedisClient {
     Long del(String... keys);
     
     /**
+     * 删除一个或多个键（UNLINK；与 DEL 同语义，键立即可见删除）
+     *
+     * @param keys 键数组
+     * @return 被删除的键数量
+     */
+    Long unlink(String... keys);
+    
+    /**
      * 设置键的过期时间
      *
      * @param key 键

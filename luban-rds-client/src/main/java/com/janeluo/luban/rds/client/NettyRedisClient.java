@@ -321,6 +321,12 @@ public class NettyRedisClient implements RedisClient {
     }
     
     @Override
+    public Long unlink(String... keys) {
+        Object response = sendCommand("UNLINK", keys);
+        return response != null ? Long.parseLong(response.toString()) : null;
+    }
+    
+    @Override
     public Boolean expire(String key, long seconds) {
         Object response = sendCommand("EXPIRE", key, String.valueOf(seconds));
         return response != null ? Long.parseLong(response.toString()) == 1 : false;

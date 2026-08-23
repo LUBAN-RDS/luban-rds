@@ -55,6 +55,7 @@ public class CommonCommandHandler implements CommandHandler {
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.EXISTS,
         RdsCommandConstant.DEL,
+        RdsCommandConstant.UNLINK,
         RdsCommandConstant.EXPIRE,
         RdsCommandConstant.PEXPIRE,
         RdsCommandConstant.TTL,
@@ -95,6 +96,8 @@ public class CommonCommandHandler implements CommandHandler {
                 return handleExists(database, args, store);
             case RdsCommandConstant.DEL:
                 return handleDel(database, args, store);
+            case RdsCommandConstant.UNLINK:
+                return handleUnlink(database, args, store);
             case RdsCommandConstant.EXPIRE:
                 return handleExpire(database, args, store);
             case RdsCommandConstant.PEXPIRE:
@@ -188,6 +191,26 @@ public class CommonCommandHandler implements CommandHandler {
         return ":" + deletedCount + "\r\n";
     }
     
+    /**
+     * UNLINK：与 DEL 同语义（键立即可见移除、返回删除键数）。
+     * Redis 7 实测 AOF 原样记录 unlink，传播层不改写；Java 内存回收由 GC 兜底，
+     * 不引入后台线程。
+     */
+    private Object handleUnlink(int database, String[] args, MemoryStore store) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'unlink' command\r\n";
+        }
+        
+        int deletedCount = 0;
+        for (int i = 1; i < args.length; i++) {
+            if (store.del(database, args[i])) {
+                deletedCount++;
+            }
+        }
+        
+        return ":" + deletedCount + "\r\n";
+    }
+    
     private Object handleExpire(int database, String[] args, MemoryStore store) {
         if (args.length < 3) {
             return "-ERR wrong number of arguments for 'expire' command\r\n";
@@ -245,6 +268,9 @@ public class CommonCommandHandler implements CommandHandler {
     }
     
     private Object handleFlushAll(String[] args, MemoryStore store) {
+        if (args.length > 2 || (args.length == 2 && !isFlushAsyncOption(args[1]))) {
+            return "-ERR syntax error\r\n";
+        }
         store.flushAll();
         return RdsResponseConstant.OK;
     }
@@ -462,8 +488,16 @@ public class CommonCommandHandler implements CommandHandler {
     }
     
     private Object handleFlushdb(int database, String[] args, MemoryStore store) {
+        if (args.length > 2 || (args.length == 2 && !isFlushAsyncOption(args[1]))) {
+            return "-ERR syntax error\r\n";
+        }
         store.flushdb(database);
         return RdsResponseConstant.OK;
+    }
+
+    /** FLUSHALL/FLUSHDB 合法选项：ASYNC|SYNC（大小写不敏感，Redis 7.x）。 */
+    private boolean isFlushAsyncOption(String option) {
+        return "ASYNC".equalsIgnoreCase(option) || "SYNC".equalsIgnoreCase(option);
     }
     
     private Object handleTime(String[] args, MemoryStore store) {
