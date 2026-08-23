@@ -306,7 +306,7 @@ Stream 中的每个消息都有一个唯一的 ID，格式为 `<millisecondsTime
 |------|------|------|
 | **EXISTS** | `EXISTS key [key ...]` | 检查键是否存在 |
 | **DEL** | `DEL key [key ...]` | 删除键 |
-| **UNLINK** | `UNLINK key [key ...]` | 异步回收内存版 DEL |
+| **UNLINK** | `UNLINK key [key ...]` | 删除键（与 DEL 同语义，键立即可见移除；内存回收由 GC 完成） |
 | **EXPIRE** | `EXPIRE key seconds [NX|XX|GT|LT]` | 设置过期时间（支持选项） |
 | **EXPIREAT** | `EXPIREAT key unix-time-seconds` | 在指定 Unix 时间过期 |
 | **PEXPIRE** | `PEXPIRE key milliseconds [NX|XX|GT|LT]` | 以毫秒为单位设置过期时间 |
