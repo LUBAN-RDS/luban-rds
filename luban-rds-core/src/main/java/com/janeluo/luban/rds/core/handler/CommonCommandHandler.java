@@ -55,6 +55,7 @@ public class CommonCommandHandler implements CommandHandler {
     private final Set<String> supportedCommands = Sets.newHashSet(
         RdsCommandConstant.EXISTS,
         RdsCommandConstant.DEL,
+        RdsCommandConstant.UNLINK,
         RdsCommandConstant.EXPIRE,
         RdsCommandConstant.PEXPIRE,
         RdsCommandConstant.TTL,
@@ -95,6 +96,8 @@ public class CommonCommandHandler implements CommandHandler {
                 return handleExists(database, args, store);
             case RdsCommandConstant.DEL:
                 return handleDel(database, args, store);
+            case RdsCommandConstant.UNLINK:
+                return handleUnlink(database, args, store);
             case RdsCommandConstant.EXPIRE:
                 return handleExpire(database, args, store);
             case RdsCommandConstant.PEXPIRE:
@@ -176,6 +179,26 @@ public class CommonCommandHandler implements CommandHandler {
     private Object handleDel(int database, String[] args, MemoryStore store) {
         if (args.length < 2) {
             return "-ERR wrong number of arguments for 'del' command\r\n";
+        }
+        
+        int deletedCount = 0;
+        for (int i = 1; i < args.length; i++) {
+            if (store.del(database, args[i])) {
+                deletedCount++;
+            }
+        }
+        
+        return ":" + deletedCount + "\r\n";
+    }
+    
+    /**
+     * UNLINK：与 DEL 同语义（键立即可见移除、返回删除键数）。
+     * Redis 7 实测 AOF 原样记录 unlink，传播层不改写；Java 内存回收由 GC 兜底，
+     * 不引入后台线程（见 2026-08-23-unlink-command-design.md §3.1）。
+     */
+    private Object handleUnlink(int database, String[] args, MemoryStore store) {
+        if (args.length < 2) {
+            return "-ERR wrong number of arguments for 'unlink' command\r\n";
         }
         
         int deletedCount = 0;
