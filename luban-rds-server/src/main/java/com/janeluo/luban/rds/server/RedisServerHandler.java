@@ -82,7 +82,7 @@ public class RedisServerHandler extends ChannelInboundHandlerAdapter {
                 "SADD","SREM","SISMEMBER","SMEMBERS","SCARD","SPOP","SRANDMEMBER","SMOVE","SUNION","SINTER","SDIFF","SSCAN",
                 "HSET","HGET","HMSET","HMGET","HGETALL","HKEYS","HVALS","HLEN","HEXISTS","HDEL","HINCRBY","HSCAN",
                 "ZADD","ZREM","ZSCORE","ZRANK","ZREVRANK","ZRANGE","ZREVRANGE","ZRANGEBYSCORE","ZCARD","ZCOUNT","ZINCRBY","ZPOPMAX","ZPOPMIN","ZSCAN",
-                "EXPIRE","PEXPIRE","TTL","PTTL","PERSIST","TYPE","KEYS","DEL","EXISTS","DBSIZE","FLUSHDB","FLUSHALL","SCAN",
+                "EXPIRE","PEXPIRE","TTL","PTTL","PERSIST","TYPE","KEYS","DEL","UNLINK","EXISTS","DBSIZE","FLUSHDB","FLUSHALL","SCAN",
                 "SUBSCRIBE","UNSUBSCRIBE","PUBLISH","PSUBSCRIBE","PUNSUBSCRIBE","SSUBSCRIBE","SUNSUBSCRIBE",
                 "EVAL","EVALSHA","SCRIPT","SCRIPT LOAD","SCRIPT EXISTS","SCRIPT FLUSH","SCRIPT KILL",
                 "MULTI","EXEC","DISCARD","WATCH","UNWATCH","QUIT",
@@ -1620,6 +1620,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         if ("SET".equals(n)) return argc >= 3;
         if ("GET".equals(n)) return argc >= 2;
         if ("DEL".equals(n)) return argc >= 2;
+        if ("UNLINK".equals(n)) return argc >= 2;
         if ("EXISTS".equals(n)) return argc >= 2;
         if ("EXPIRE".equals(n)) return argc >= 3;
         if ("TTL".equals(n)) return argc >= 2;
