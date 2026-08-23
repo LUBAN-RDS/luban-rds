@@ -268,6 +268,9 @@ public class CommonCommandHandler implements CommandHandler {
     }
     
     private Object handleFlushAll(String[] args, MemoryStore store) {
+        if (args.length > 2 || (args.length == 2 && !isFlushAsyncOption(args[1]))) {
+            return "-ERR syntax error\r\n";
+        }
         store.flushAll();
         return RdsResponseConstant.OK;
     }
@@ -485,8 +488,16 @@ public class CommonCommandHandler implements CommandHandler {
     }
     
     private Object handleFlushdb(int database, String[] args, MemoryStore store) {
+        if (args.length > 2 || (args.length == 2 && !isFlushAsyncOption(args[1]))) {
+            return "-ERR syntax error\r\n";
+        }
         store.flushdb(database);
         return RdsResponseConstant.OK;
+    }
+
+    /** FLUSHALL/FLUSHDB 合法选项：ASYNC|SYNC（大小写不敏感，Redis 7.x）。 */
+    private boolean isFlushAsyncOption(String option) {
+        return "ASYNC".equalsIgnoreCase(option) || "SYNC".equalsIgnoreCase(option);
     }
     
     private Object handleTime(String[] args, MemoryStore store) {
