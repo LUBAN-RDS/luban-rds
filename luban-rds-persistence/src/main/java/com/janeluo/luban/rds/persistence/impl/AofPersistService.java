@@ -492,6 +492,7 @@ public class AofPersistService implements PersistService {
                     break;
 
                 case "DEL":
+                case "UNLINK":
                     if (args.size() >= 2) {
                         for (int i = 1; i < args.size(); i++) {
                             memoryStore.del(currentDb, args.get(i));

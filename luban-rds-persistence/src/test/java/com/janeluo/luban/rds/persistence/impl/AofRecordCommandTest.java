@@ -1,5 +1,6 @@
 package com.janeluo.luban.rds.persistence.impl;
 
+import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -11,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -226,6 +228,29 @@ public class AofRecordCommandTest {
         expected.write(respFrame("SET", "k2", "v2"));
         expected.write(respFrame("DEL", "k1"));
         assertArrayEquals(expected.toByteArray(), content);
+    }
+
+    /**
+     * UNLINK 帧写入 AOF 后 load 重放应删除键（Redis 7 实测 AOF 原样记录 unlink）。
+     */
+    @Test
+    public void testUnlinkReplayedOnLoad() throws Exception {
+        AofPersistService service = new AofPersistService(TEST_DATA_DIR, 0);
+        try {
+            service.recordCommand(respFrame("SET", "u1", "v1"));
+            service.recordCommand(respFrame("UNLINK", "u1"));
+        } finally {
+            service.close();
+        }
+
+        DefaultMemoryStore store = new DefaultMemoryStore();
+        AofPersistService loadService = new AofPersistService(TEST_DATA_DIR, 0);
+        try {
+            loadService.load(store);
+            assertFalse("UNLINK 重放后键应不存在", store.exists(0, "u1"));
+        } finally {
+            loadService.close();
+        }
     }
 
     /**
