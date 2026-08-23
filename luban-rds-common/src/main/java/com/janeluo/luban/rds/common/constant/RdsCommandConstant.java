@@ -93,6 +93,7 @@ public final class RdsCommandConstant {
 
     public static final String EXISTS = "EXISTS";
     public static final String DEL = "DEL";
+    public static final String UNLINK = "UNLINK";
     public static final String EXPIRE = "EXPIRE";
     public static final String PEXPIRE = "PEXPIRE";
     public static final String TTL = "TTL";
