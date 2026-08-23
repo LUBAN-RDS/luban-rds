@@ -85,4 +85,18 @@ class UnlinkIntegrationTest {
             assertEquals("OK", j.flushDB(FlushMode.ASYNC));
         }
     }
+
+    @Test
+    void flushInvalidOptionReturnsSyntaxError() {
+        try (Jedis j = pool.getResource()) {
+            redis.clients.jedis.Connection conn = j.getConnection();
+            conn.sendCommand(redis.clients.jedis.Protocol.Command.FLUSHALL, "BOGUS");
+            redis.clients.jedis.exceptions.JedisDataException ex =
+                    assertThrows(redis.clients.jedis.exceptions.JedisDataException.class,
+                            conn::getOne);
+            assertTrue(ex.getMessage().contains("syntax error"), "非法参数应报 syntax error: " + ex.getMessage());
+            conn.sendCommand(redis.clients.jedis.Protocol.Command.FLUSHDB, "BOGUS");
+            assertThrows(redis.clients.jedis.exceptions.JedisDataException.class, conn::getOne);
+        }
+    }
 }
