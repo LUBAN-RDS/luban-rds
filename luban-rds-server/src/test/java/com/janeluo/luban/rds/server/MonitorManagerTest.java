@@ -90,6 +90,39 @@ public class MonitorManagerTest {
     // ==================== 命令广播测试 ====================
 
     /**
+     * 测试空闲退避后恢复：worker 空闲退避到稳态（5ms 封顶）后，
+     * 新提交的事件仍能在时限内被消费广播。
+     * 回归测试：修复 parkNanos(100) 纳秒级休眠导致的 CPU 空转时，
+     * 不得引入消费延迟。
+     */
+    @Test
+    public void testIdleBackoffRecovery() throws InterruptedException {
+        Channel channel = mock(Channel.class);
+        when(channel.id()).thenReturn(mock(ChannelId.class));
+        monitorManager.addMonitor(channel, -1, null);
+
+        // 空闲等待，让 worker 完成指数退避并稳定在最大 park 间隔
+        Thread.sleep(200);
+
+        monitorManager.submit(0, "127.0.0.1:1234", "GET", new String[]{"GET", "key"});
+
+        // 退避稳态下事件应在时限内被广播（Mockito timeout 轮询验证）
+        ArgumentCaptor<ByteBuf> captor = ArgumentCaptor.forClass(ByteBuf.class);
+        verify(channel, timeout(200).atLeast(1)).writeAndFlush(captor.capture());
+
+        boolean foundLog = false;
+        for (ByteBuf buf : captor.getAllValues()) {
+            if (buf.toString(StandardCharsets.UTF_8).contains("\"GET\" \"key\"")) {
+                foundLog = true;
+                break;
+            }
+        }
+        assertTrue("Should receive monitor log after idle backoff", foundLog);
+
+        monitorManager.removeMonitor(channel);
+    }
+
+    /**
      * 测试命令广播
      */
     @Test
