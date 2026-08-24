@@ -63,6 +63,12 @@ public class MonitorManager {
     
     /** 事件队列缓冲区 */
     private final MonitorEvent[] queueBuffer = new MonitorEvent[QUEUE_BUFFER_SIZE];
+
+    /** 空闲休眠起步时长（100µs，保证流量恢复时低延迟消费） */
+    private static final long IDLE_PARK_MIN_NANOS = 100_000L;
+
+    /** 空闲休眠退避上限（5ms，空闲稳态每秒至多约 200 次无效唤醒） */
+    private static final long IDLE_PARK_MAX_NANOS = 5_000_000L;
     
     /** 队列头指针（生产者索引） */
     private final AtomicLong queueHead = new AtomicLong(0);
@@ -276,6 +282,7 @@ public class MonitorManager {
      * 使用无锁环形缓冲区实现高吞吐量。
      */
     private void workerLoop() {
+        long idleParkNanos = IDLE_PARK_MIN_NANOS;
         while (!Thread.currentThread().isInterrupted()) {
             try {
                 long currentTail = queueTail.get();
@@ -283,29 +290,33 @@ public class MonitorManager {
                 MonitorEvent event = queueBuffer[idx];
 
                 if (event.ready) {
+                    // 有事件，重置退避
+                    idleParkNanos = IDLE_PARK_MIN_NANOS;
+
                     // 处理事件
                     if (event.command != null) {
                         String logLine = formatLog(event);
-                        
+
                         // 存储到历史缓冲区
                         long seq = historyCursor.getAndIncrement();
                         historyBuffer[(int)(seq & HISTORY_BUFFER_MASK)] = logLine;
-                        
+
                         // 广播给监控客户端
                         if (!monitorClients.isEmpty()) {
                             broadcast(logLine, event);
                         }
                     }
-                    
+
                     // 重置事件状态
                     event.ready = false;
                     event.args = null;
-                    
+
                     // 推进队列尾指针
                     queueTail.lazySet(currentTail + 1);
                 } else {
-                    // 无事件时短暂休眠，避免空转
-                    java.util.concurrent.locks.LockSupport.parkNanos(100); 
+                    // 无事件时休眠并指数退避，避免空转烧 CPU
+                    java.util.concurrent.locks.LockSupport.parkNanos(idleParkNanos);
+                    idleParkNanos = Math.min(idleParkNanos << 1, IDLE_PARK_MAX_NANOS);
                 }
             } catch (Exception e) {
                 logger.error("Error in Monitor worker", e);
