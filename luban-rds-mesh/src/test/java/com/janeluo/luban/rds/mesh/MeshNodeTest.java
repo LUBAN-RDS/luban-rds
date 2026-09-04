@@ -358,4 +358,48 @@ class MeshNodeTest {
         assertTrue(ok);
         assertTrue(ms < 50, "已有效时应立即返回，耗时=" + ms);
     }
+
+    // ==================== D2：RequestVote 不复位接收方选举定时器（9/3 事故） ====================
+
+    @Test
+    void requestVote_doesNotResetElectionTimerOrBackoff() throws Exception {
+        CaptureBus bus = new CaptureBus();
+        MeshState state = new MeshState();
+        state.currentTerm = 1;
+        // 长超时区间：避免测试执行期间定时器自然触发导致 pending 引用合法变更
+        MeshConfig cfg = MeshConfig.builder(A)
+                .addPeer(B, "127.0.0.1:11001").addPeer(C, "127.0.0.1:11002")
+                .electionTimeout(5000, 6000).build();
+        MeshNode node = new MeshNode(cfg, state, bus);
+        node.start();
+        try {
+            com.janeluo.luban.rds.mesh.election.ElectionTimer timer = timerOf(node);
+            timer.onElectionFailed();   // consecutiveFailures=1
+            Object pendingBefore = pendingOf(timer);
+
+            invokeOnRaftThread(node, () -> node.handleRequestVote(B, new RequestVoteMessage(1, B, 0, 0, true)));
+            org.junit.jupiter.api.Assertions.assertSame(pendingBefore, pendingOf(timer),
+                    "PreVote RequestVote 不得重排选举定时器");
+            assertEquals(1, timer.getConsecutiveFailures(), "RequestVote 不得复位选举退避");
+
+            invokeOnRaftThread(node, () -> node.handleRequestVote(B, new RequestVoteMessage(1, B, 0, 0, false)));
+            org.junit.jupiter.api.Assertions.assertSame(pendingBefore, pendingOf(timer),
+                    "正式 RequestVote 也不得重排选举定时器");
+            assertEquals(1, timer.getConsecutiveFailures(), "正式 RequestVote 同样不得复位退避");
+        } finally {
+            node.stop();
+        }
+    }
+
+    private static com.janeluo.luban.rds.mesh.election.ElectionTimer timerOf(MeshNode node) throws Exception {
+        java.lang.reflect.Field f = MeshNode.class.getDeclaredField("electionTimer");
+        f.setAccessible(true);
+        return (com.janeluo.luban.rds.mesh.election.ElectionTimer) f.get(node);
+    }
+
+    private static Object pendingOf(com.janeluo.luban.rds.mesh.election.ElectionTimer timer) throws Exception {
+        java.lang.reflect.Field f = com.janeluo.luban.rds.mesh.election.ElectionTimer.class.getDeclaredField("pending");
+        f.setAccessible(true);
+        return ((java.util.concurrent.atomic.AtomicReference<?>) f.get(timer)).get();
+    }
 }
