@@ -81,6 +81,9 @@ public class MeshNode {
 
     /** 串行化 Raft 状态访问的单线程调度器。 */
     private final ScheduledExecutorService raftExecutor;
+
+    /** 投票收集超时：2× 选举超时上限（D3，9/3 事故）。响应永不到达时的兜底收尾窗口。 */
+    private static final long VOTE_COLLECT_TIMEOUT_MS = 2L * ElectionTimer.DEFAULT_MAX_MS;
     /** ElectionTimer 与心跳定时器复用的调度器（可与 raftExecutor 同一个）。 */
     private final ScheduledExecutorService scheduler;
     /** 落盘专用单线程调度器（与 raftExecutor 解耦：fsync 不得阻塞心跳/RPC 处理）。 */
@@ -706,7 +709,7 @@ public class MeshNode {
                         // 使先超时者有窗口赢得选举，避免并发争票致 term 飙升（选举风暴根因）
                         electionTimer.onElectionFailed();
                     }
-                });
+                }, raftExecutor, VOTE_COLLECT_TIMEOUT_MS);
         currentVoteCollector = collector;
 
         RequestVoteMessage msg = new RequestVoteMessage(term, nodeId, lastLogIndex, lastLogTerm, true);
@@ -746,7 +749,7 @@ public class MeshNode {
                         logger.info("正式选举未达多数派 (granted={}/{})，继续等下一轮", granted, tot);
                         electionTimer.onElectionFailed();
                     }
-                });
+                }, raftExecutor, VOTE_COLLECT_TIMEOUT_MS);
         currentVoteCollector = collector;
 
         RequestVoteMessage msg = new RequestVoteMessage(term, nodeId, t.lastLogIndex, t.lastLogTerm, false);
