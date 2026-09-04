@@ -290,11 +290,13 @@ public class MeshBusClient {
             if (future.isSuccess()) {
                 logger.trace("MeshFrame 已发往节点 {}: {}", targetNodeId, frame);
             } else {
-                logger.error("发送 MeshFrame 到节点 {} 失败", targetNodeId, future.cause());
-                PeerEndpoint ep = nodeEndpoints.get(targetNodeId);
-                if (ep != null) {
-                    scheduleReconnect(targetNodeId, ep);
-                }
+                logger.error("发送 MeshFrame 到节点 {} 失败 (type=0x{})，关闭连接走重连链路",
+                        targetNodeId, Integer.toHexString(frame.getType() & 0xFF), future.cause());
+                // 写失败（编码异常/直接内存 OOM/连接半死）后 channel 可能仍 isActive：
+                // 滞留连接表会被 connect() 复用且永远写不出（9/3 生产事故：OOM 后每秒写失败但连接不重建）。
+                // close 触发 closeFuture 的既有"清表 + 退避重连"链路，无需在此重复 scheduleReconnect
+                //（其 64s 去重窗口会吸收 close 链路里的重复调度）。
+                channel.close();
             }
         });
     }
