@@ -418,4 +418,78 @@ class LogReplicatorTest {
         // 不应抛异常，且 B/C 状态不变
         assertEquals(0L, replicator.getMatchIndex(B));
     }
+
+    // ==================== D4：连续 NACK 节流 + 快照降级（9/3 事故） ====================
+
+    @Test
+    void onAppendEntriesResponse_failure_throttlesResendAfterLimit() {
+        appendEntry(1, setFrame("a", "1"));
+        appendEntry(2, setFrame("b", "2"));
+        replicator.initOnBecomeLeader(config.getOtherNodeIds());
+
+        // 连续 20 次 NACK：前 8 次立即重发，其后不再每次立即重发（节流，增量随心跳节奏）
+        for (int i = 0; i < 20; i++) {
+            bus.clear();
+            replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 0L), false);
+            if (i < 8) {
+                assertNotNull(bus.sent.get(B), "第 " + (i + 1) + " 次 NACK 应立即重发");
+            } else {
+                assertNull(bus.sent.get(B), "超过立即重发上限后不得每次 NACK 立即重发（节流）");
+            }
+        }
+    }
+
+    @Test
+    void onAppendEntriesResponse_success_clearsNackCount() {
+        appendEntry(1, setFrame("a", "1"));
+        replicator.initOnBecomeLeader(config.getOtherNodeIds());
+
+        for (int i = 0; i < 10; i++) {
+            replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 0L), false);
+        }
+        // success 清零后，下一次 NACK 又处于立即重发窗口内
+        replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, true, 1L), false);
+        bus.clear();
+        replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 0L), false);
+        assertNotNull(bus.sent.get(B), "计数清零后恢复立即重发");
+    }
+
+    @Test
+    void fallbackBeyondSnapshotBoundary_triggersSendSnapshot() {
+        state.lastIncludedIndex = 10;
+        state.lastIncludedTerm = 1;
+        for (long i = 11; i <= 15; i++) {
+            appendEntry(i, setFrame("k" + i, "v" + i));
+        }
+        replicator.initOnBecomeLeader(config.getOtherNodeIds());
+        // nextIndex[B] 初始 16；conflict matchIndex=0 逐格回退一次到 15 —— 不越界
+        // 用 matchIndex=10 直接回退到 11：nextIndex-1=10 <= lastIncludedIndex=10 → 越界降级
+        com.janeluo.luban.rds.mesh.replication.SnapshotManager sm =
+                org.mockito.Mockito.mock(com.janeluo.luban.rds.mesh.replication.SnapshotManager.class);
+        org.mockito.Mockito.when(sm.sendSnapshot(B)).thenReturn(1024L);
+        replicator.setSnapshotManager(sm);
+
+        replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 10L), false);
+
+        org.mockito.Mockito.verify(sm).sendSnapshot(B);
+    }
+
+    @Test
+    void fallbackGivesUpAfterThreeFailures() {
+        state.lastIncludedIndex = 10;
+        state.lastIncludedTerm = 1;
+        for (long i = 11; i <= 15; i++) {
+            appendEntry(i, setFrame("k" + i, "v" + i));
+        }
+        replicator.initOnBecomeLeader(config.getOtherNodeIds());
+        com.janeluo.luban.rds.mesh.replication.SnapshotManager sm =
+                org.mockito.Mockito.mock(com.janeluo.luban.rds.mesh.replication.SnapshotManager.class);
+        org.mockito.Mockito.when(sm.sendSnapshot(B)).thenReturn(-1L);   // 持续失败
+        replicator.setSnapshotManager(sm);
+
+        for (int round = 0; round < 5; round++) {
+            replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 10L), false);
+        }
+        org.mockito.Mockito.verify(sm, org.mockito.Mockito.times(3)).sendSnapshot(B);
+    }
 }

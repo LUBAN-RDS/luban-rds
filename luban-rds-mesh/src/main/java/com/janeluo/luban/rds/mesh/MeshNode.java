@@ -360,6 +360,10 @@ public class MeshNode {
      */
     public void setSnapshotManager(SnapshotManager snapshotManager) {
         this.snapshotManager = snapshotManager;
+        // D4b（9/3 事故）：转发给 replicator，启用"回退越界/持续 NACK → 快照重同步"降级
+        if (replicator != null) {
+            replicator.setSnapshotManager(snapshotManager);
+        }
     }
 
     /** 取快照管理器（测试用，可能为 null）。 */

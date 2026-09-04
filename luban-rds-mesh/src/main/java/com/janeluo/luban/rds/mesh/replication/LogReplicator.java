@@ -74,6 +74,39 @@ public class LogReplicator {
     /** peer → matchIndex。becomeLeader 时初始化为 0。 */
     private final Map<String, Long> matchIndex = new ConcurrentHashMap<>();
 
+    /**
+     * 连续 NACK 立即重发上限（D4a，9/3 事故）：超过后不再对每次 NACK 立即重发，
+     * 增量改随心跳节奏传递（心跳每 100ms 复用为积压补发），消除
+     * "NACK→立即重发→再 NACK" 紧密循环（生产实测 4 分钟 6368 次回退）。
+     */
+    static final int IMMEDIATE_RESEND_NACK_LIMIT = 8;
+
+    /** NACK 周期告警间隔（次数）。 */
+    private static final int NACK_WARN_INTERVAL = 32;
+
+    /** peer → 连续 NACK 次数（success 清零；becomeLeader/失去 Leader 时清空）。 */
+    private final Map<String, Long> nackCount = new ConcurrentHashMap<>();
+
+    /**
+     * 连续 NACK 达此值触发快照降级评估（D4b，9/3 事故）：配合节流之上的
+     * "nextIndex 反复震荡对不上"场景，直接用快照重同步终结。
+     */
+    static final int SNAPSHOT_FALLBACK_NACK_THRESHOLD = 128;
+
+    /** 快照重同步连续失败上限：超过后 ERROR 并停止自动重试（等失去 Leader 重置或人工介入）。 */
+    private static final int SNAPSHOT_FALLBACK_MAX_RETRIES = 3;
+
+    /** 快照管理器；null = 未注入（单测/无快照部署），降级判定退化为纯节流。 */
+    private volatile SnapshotManager snapshotManager;
+
+    /** peer → 快照重同步连续失败次数（sendSnapshot 返回 >0 清零）。 */
+    private final Map<String, Integer> snapshotRetry = new ConcurrentHashMap<>();
+
+    /** 注入快照管理器（MeshNode 装配时调用），启用回退越界/持续 NACK 的快照降级。 */
+    public void setSnapshotManager(SnapshotManager snapshotManager) {
+        this.snapshotManager = snapshotManager;
+    }
+
     private final LogApplier applier;
 
     /**
@@ -130,6 +163,7 @@ public class LogReplicator {
     /** becomeLeader 时初始化 nextIndex/matchIndex（DESIGN §5.2）。 */
     public void initOnBecomeLeader(Collection<String> peers) {
         nextIndex.clear();
+        nackCount.clear();
         matchIndex.clear();
         long lastLogIndex = state.getLastLogIndex();
         if (peers != null) {
@@ -148,6 +182,8 @@ public class LogReplicator {
     public void clearOnLoseLeadership() {
         nextIndex.clear();
         matchIndex.clear();
+        nackCount.clear();
+        snapshotRetry.clear();
     }
 
     public Map<String, Long> getNextIndexView() {
@@ -252,6 +288,7 @@ public class LogReplicator {
         }
 
         if (resp.isSuccess()) {
+            nackCount.remove(fromPeer);
             long prevMatch = matchIndex.getOrDefault(fromPeer, 0L);
             if (resp.getMatchIndex() > prevMatch) {
                 matchIndex.put(fromPeer, resp.getMatchIndex());
@@ -279,9 +316,51 @@ public class LogReplicator {
                 nextIndex.put(fromPeer, Math.max(fallback, 1));
                 logger.debug("AppendEntries 失败，回退 nextIndex: peer={} → {}", fromPeer, nextIndex.get(fromPeer));
             }
-            // 立即重发（带回退后的 nextIndex）
-            resendTo(fromPeer);
+            // D4a（9/3 事故）：连续 NACK 节流——上限内立即重发保持 Raft 快速对齐语义，
+            // 超过后不再每次立即重发（增量由心跳路径每 100ms 携带），周期性 WARN 便于诊断
+            long nack = nackCount.merge(fromPeer, 1L, Long::sum);
+            // D4b：回退越界（缺口已被 Leader 快照截断，增量补不了）或持续震荡 → 快照重同步。
+            // lastIncludedIndex=0 表示从未快照，不存在截断缺口，不作越界判定
+            boolean beyondSnapshot = state.lastIncludedIndex > 0
+                    && nextIndex.get(fromPeer) - 1 <= state.lastIncludedIndex;
+            if (beyondSnapshot || nack >= SNAPSHOT_FALLBACK_NACK_THRESHOLD) {
+                nackCount.remove(fromPeer);
+                trySnapshotFallback(fromPeer);
+                return false;
+            }
+            if (nack <= IMMEDIATE_RESEND_NACK_LIMIT) {
+                resendTo(fromPeer);
+            } else if (nack % NACK_WARN_INTERVAL == 0) {
+                logger.warn("AppendEntries 连续 NACK: peer={}, nextIndex={}, matchIndex={}, 连续 {} 次；增量改随心跳节奏传递",
+                        fromPeer, nextIndex.get(fromPeer), matchIndex.get(fromPeer), nack);
+            }
             return false;
+        }
+    }
+
+    /**
+     * 快照降级（D4b，9/3 事故）：接入既有 {@link SnapshotManager#sendSnapshot}（chunked
+     * INSTALL_SNAPSHOT，此前已实现但无调用方）。失败重试上限 {@value #SNAPSHOT_FALLBACK_MAX_RETRIES}
+     * 次后 ERROR 放弃，回归节流模式。
+     */
+    private void trySnapshotFallback(String peer) {
+        SnapshotManager sm = snapshotManager;
+        if (sm == null) {
+            return;
+        }
+        if (snapshotRetry.getOrDefault(peer, 0) >= SNAPSHOT_FALLBACK_MAX_RETRIES) {
+            return;
+        }
+        logger.warn("日志回退触发快照重同步: peer={}, nextIndex={}, lastIncludedIndex={}",
+                peer, nextIndex.get(peer), state.lastIncludedIndex);
+        long sent = sm.sendSnapshot(peer);
+        if (sent > 0) {
+            snapshotRetry.remove(peer);   // chunk 已发完；安装对齐后走 success 路径自然清理
+        } else {
+            int fails = snapshotRetry.merge(peer, 1, Integer::sum);
+            if (fails >= SNAPSHOT_FALLBACK_MAX_RETRIES) {
+                logger.error("快照重同步连续失败 {} 次，停止自动重试: peer={}（回归节流模式）", fails, peer);
+            }
         }
     }
 
