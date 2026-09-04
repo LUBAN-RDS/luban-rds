@@ -193,4 +193,63 @@ class VoteCollectorTest {
         assertTrue(bus.sent.containsKey("nodeB"));
         assertTrue(bus.sent.containsKey("nodeC"));
     }
+
+    // ==================== D3：收集超时（9/3 事故） ====================
+
+    @Test
+    void timeout_noResponses_completesAsLostOnce() throws Exception {
+        java.util.concurrent.ScheduledExecutorService ex =
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        AtomicInteger calls = new AtomicInteger();
+        final AtomicInteger grantedRef = new AtomicInteger();
+        try {
+            VoteCollector vc = new VoteCollector(SELF, 3, true,
+                    (w, t, g, tot) -> { calls.incrementAndGet(); grantedRef.set(g); },
+                    ex, 60);
+            vc.start(Arrays.asList("nodeB", "nodeC"), msg(1L, true), new FakeBus(), 1L);
+
+            Thread.sleep(250);   // > 60ms 超时窗口
+            assertEquals(1, calls.get(), "超时应恰好回调一次");
+            assertTrue(vc.isCompleted(), "collector 应已完结");
+            assertEquals(1, grantedRef.get(), "仅自票，won=false");
+        } finally {
+            ex.shutdownNow();
+        }
+    }
+
+    @Test
+    void timeout_afterCancel_neverFires() throws Exception {
+        java.util.concurrent.ScheduledExecutorService ex =
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        AtomicInteger calls = new AtomicInteger();
+        try {
+            VoteCollector vc = new VoteCollector(SELF, 3, false, (w, t, g, tot) -> calls.incrementAndGet(),
+                    ex, 60);
+            vc.start(Arrays.asList("nodeB", "nodeC"), msg(1L, false), new FakeBus(), 1L);
+            vc.cancel(1L);
+            Thread.sleep(250);
+            assertEquals(1, calls.get(), "仅 cancel 的一次回调，超时任务应被取消");
+        } finally {
+            ex.shutdownNow();
+        }
+    }
+
+    @Test
+    void timeout_grantedBeforeDeadline_winsNormally() throws Exception {
+        java.util.concurrent.ScheduledExecutorService ex =
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        AtomicInteger wins = new AtomicInteger();
+        try {
+            VoteCollector vc = new VoteCollector(SELF, 3, false,
+                    (w, t, g, tot) -> { if (w) wins.incrementAndGet(); }, ex, 200);
+            vc.start(Arrays.asList("nodeB", "nodeC"), msg(1L, false), new FakeBus(), 1L);
+            vc.onVoteReceived("nodeB", new RequestVoteResponse(1L, true), 1L);
+            assertTrue(vc.isCompleted());
+            assertEquals(1, wins.get());
+            Thread.sleep(300);   // 超时点已过，不得再触发回调
+            assertEquals(1, wins.get(), "won 之后超时任务不得产生额外回调");
+        } finally {
+            ex.shutdownNow();
+        }
+    }
 }

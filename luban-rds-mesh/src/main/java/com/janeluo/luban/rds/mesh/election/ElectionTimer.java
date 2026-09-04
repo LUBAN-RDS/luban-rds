@@ -10,8 +10,8 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * 选举超时定时器（DESIGN.md §5.2）。
  * <p>
- * 每个节点持有一个 ElectionTimer。Follower/Candidate 在选举超时区间内未收到合法 AppendEntries
- * 或 RequestVote（即未"看到" Leader 或更高任期候选者）时，超时触发 → 回调 {@code onElectionTimeout}
+ * 每个节点持有一个 ElectionTimer。Follower/Candidate 在选举超时区间内未收到合法
+ * AppendEntries（即未"看到" Leader）时，超时触发 → 回调 {@code onElectionTimeout}
  * （由 MeshNode 注入，调 RaftStateMachine.becomeCandidate → PreVote → RequestVote）。
  * </p>
  *
@@ -67,7 +67,8 @@ public class ElectionTimer {
     /**
      * 连续选举失败次数（PreVote 未达多数派 / 正式选举未达多数派）。
      * 用于计算退避区间：shift = min(consecutiveFailures, MAX_BACKOFF_SHIFT)。
-     * 选举成功或收到合法 AppendEntries/RequestVote 后复位为 0。
+     * 选举成功或收到合法 AppendEntries（Leader 心跳）后复位为 0；
+     * RequestVote（含 PreVote）不复位（对齐 Raft §9.6，见 9/3 事故 D2）。
      */
     private int consecutiveFailures = 0;
 
@@ -165,12 +166,14 @@ public class ElectionTimer {
     }
 
     /**
-     * 选举成功 / 收到合法 AppendEntries/RequestVote 回调。
+     * 选举成功 / 收到合法 AppendEntries（Leader 心跳）回调。
      * 复位连续失败计数，恢复正常选举超时区间。
+     * <p>注意：RequestVote（含 PreVote 探测）<b>不是</b>合法 Leader 信号，不触发本复位
+     * （对齐 Raft §9.6 / etcd；否则双孤 follower 互相探测会互踩退避，见 9/3 生产事故 D2）。</p>
      */
     public synchronized void onElectionSucceeded() {
         if (consecutiveFailures > 0) {
-            logger.debug("选举退避复位: consecutiveFailures 0（收到合法 Leader 信号）");
+            logger.debug("选举退避复位: consecutiveFailures 0（选举成功或收到 Leader 心跳）");
             consecutiveFailures = 0;
         }
     }

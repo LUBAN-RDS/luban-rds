@@ -7,6 +7,7 @@ import java.net.ServerSocket;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -95,6 +96,38 @@ class MeshBusClientTest {
         }
     }
 
+    // ==================== 写失败：立即关闭连接（9/3 事故 D1） ====================
+
+    @Test
+    void sendFailure_closesChannel() throws Exception {
+        MeshBusClient client = new MeshBusClient("node-a", new MeshBusHandler());
+        try {
+            // EmbeddedChannel 模拟"channel 活跃但 writeAndFlush 失败"（编码 OOM/连接半死）：
+            // pipeline 中放入一个必失败出站 handler
+            io.netty.channel.embedded.EmbeddedChannel ch =
+                    new io.netty.channel.embedded.EmbeddedChannel(new io.netty.channel.ChannelOutboundHandlerAdapter() {
+                        @Override
+                        public void write(io.netty.channel.ChannelHandlerContext ctx, Object msg,
+                                          io.netty.channel.ChannelPromise promise) {
+                            promise.setFailure(new RuntimeException("simulated direct memory OOM"));
+                        }
+                    });
+            channels(client).put("node-b", ch);
+            endpoints(client).put("node-b", new MeshBusClient.PeerEndpoint("127.0.0.1", 1));
+
+            client.send("node-b", new MeshFrame("node-a", MessageType.REQUEST_VOTE.getCode(), new byte[0]));
+
+            // EmbeddedChannel 的 promise listener 在调用线程同步执行，close 应已生效；轮询兜底
+            long deadline = System.currentTimeMillis() + 1000;
+            while (ch.isOpen() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10);
+            }
+            assertFalse(ch.isOpen(), "写失败后 channel 应被关闭");
+        } finally {
+            client.close();
+        }
+    }
+
     // ==================== 辅助 ====================
 
     @SuppressWarnings("unchecked")
@@ -105,6 +138,28 @@ class MeshBusClientTest {
     @SuppressWarnings("unchecked")
     private static Map<String, Long> scheduled(MeshBusClient client) {
         return fieldMap(client, "reconnectScheduled");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, io.netty.channel.Channel> channels(MeshBusClient client) {
+        try {
+            java.lang.reflect.Field f = MeshBusClient.class.getDeclaredField("nodeChannels");
+            f.setAccessible(true);
+            return (Map<String, io.netty.channel.Channel>) f.get(client);
+        } catch (Exception e) {
+            throw new RuntimeException("反射读取字段失败: nodeChannels", e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, MeshBusClient.PeerEndpoint> endpoints(MeshBusClient client) {
+        try {
+            java.lang.reflect.Field f = MeshBusClient.class.getDeclaredField("nodeEndpoints");
+            f.setAccessible(true);
+            return (Map<String, MeshBusClient.PeerEndpoint>) f.get(client);
+        } catch (Exception e) {
+            throw new RuntimeException("反射读取字段失败: nodeEndpoints", e);
+        }
     }
 
     private static Map<String, Long> fieldMap(MeshBusClient client, String name) {

@@ -81,6 +81,9 @@ public class MeshNode {
 
     /** 串行化 Raft 状态访问的单线程调度器。 */
     private final ScheduledExecutorService raftExecutor;
+
+    /** 投票收集超时：2× 选举超时上限（D3，9/3 事故）。响应永不到达时的兜底收尾窗口。 */
+    private static final long VOTE_COLLECT_TIMEOUT_MS = 2L * ElectionTimer.DEFAULT_MAX_MS;
     /** ElectionTimer 与心跳定时器复用的调度器（可与 raftExecutor 同一个）。 */
     private final ScheduledExecutorService scheduler;
     /** 落盘专用单线程调度器（与 raftExecutor 解耦：fsync 不得阻塞心跳/RPC 处理）。 */
@@ -357,6 +360,10 @@ public class MeshNode {
      */
     public void setSnapshotManager(SnapshotManager snapshotManager) {
         this.snapshotManager = snapshotManager;
+        // D4b（9/3 事故）：转发给 replicator，启用"回退越界/持续 NACK → 快照重同步"降级
+        if (replicator != null) {
+            replicator.setSnapshotManager(snapshotManager);
+        }
     }
 
     /** 取快照管理器（测试用，可能为 null）。 */
@@ -706,7 +713,7 @@ public class MeshNode {
                         // 使先超时者有窗口赢得选举，避免并发争票致 term 飙升（选举风暴根因）
                         electionTimer.onElectionFailed();
                     }
-                });
+                }, raftExecutor, VOTE_COLLECT_TIMEOUT_MS);
         currentVoteCollector = collector;
 
         RequestVoteMessage msg = new RequestVoteMessage(term, nodeId, lastLogIndex, lastLogTerm, true);
@@ -746,7 +753,7 @@ public class MeshNode {
                         logger.info("正式选举未达多数派 (granted={}/{})，继续等下一轮", granted, tot);
                         electionTimer.onElectionFailed();
                     }
-                });
+                }, raftExecutor, VOTE_COLLECT_TIMEOUT_MS);
         currentVoteCollector = collector;
 
         RequestVoteMessage msg = new RequestVoteMessage(term, nodeId, t.lastLogIndex, t.lastLogTerm, false);
@@ -920,13 +927,13 @@ public class MeshNode {
             applyFollowerSideEffects(decision.transition);
             // 降级时 term 已变化 → 持久化（阶段 11 fsync 在确认路径）
             persistStateSafe("decideRequestVote-term-up");
+            // 降级后不在此 reset 选举定时器：老 pending 到点触发 PreVote 时用的已是新 term，
+            // follower 无 Leader 时发起探测本就是 Raft 正常行为
         }
-        if (decision.resetElectionTimer) {
-            // 先复位退避、再重排定时器：否则 reset 用过期 consecutiveFailures 多带一轮退避。
-            // 收到合法 RequestVote（含 PreVote 探测）→ 有活跃选举活动，复位退避
-            electionTimer.onElectionSucceeded();
-            electionTimer.reset();
-        }
+        // D2（9/3 事故）：收到 RequestVote（含 PreVote）不再复位退避/重排选举定时器。
+        // RequestVote 不是 Leader 存在的证据；双孤 follower 互相探测会互踩定时器并架空
+        // 选举退避（9/3 事故 22 秒无 Leader 僵局的放大器）。对齐 Raft §9.6 / etcd：
+        // 只有合法 AppendEntries（Leader 心跳）才 reset 接收方选举定时器——见 handleAppendEntries。
         // 阶段 11：正式投票（非 PreVote）且 granted → votedFor 已设置 → 持久化
         // （fsync 在回复投票前完成，保证崩溃恢复后不会同任期二次投票）
         if (!msg.isPreVote() && decision.response.isVoteGranted()) {

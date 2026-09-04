@@ -12,8 +12,12 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 投票收集器（DESIGN.md §5.2）：并行发 RequestVote 给其他节点，统计多数派。
@@ -49,6 +53,13 @@ public class VoteCollector {
     private final Set<String> countedNodes;
     private final AtomicBoolean completed;
 
+    /** 收集超时调度器（通常为 raftExecutor）；null = 不超时（兼容旧用法）。 */
+    private final ScheduledExecutorService timeoutScheduler;
+    /** 收集超时毫秒；&lt;=0 = 不超时。 */
+    private final long timeoutMs;
+    /** 待触发的超时任务；won/cancel/timeout 任一收尾时清除。 */
+    private final AtomicReference<ScheduledFuture<?>> timeoutTask = new AtomicReference<>();
+
     /**
      * 投票结果回调。PreVote 多数派与正式多数派由调用方注入不同语义的回调，
      * 使本类不直接依赖 MeshNode 的角色转换逻辑。
@@ -71,6 +82,19 @@ public class VoteCollector {
      * @param outcome     结果回调（达多数派 won=true；未达 won=false）
      */
     public VoteCollector(String selfNodeId, int totalNodes, boolean preVote, VoteOutcome outcome) {
+        this(selfNodeId, totalNodes, preVote, outcome, null, 0L);
+    }
+
+    /**
+     * 带收集超时的构造（9/3 事故 D3）：peer 响应永不到达时，超时窗口内未达多数派则按
+     * won=false 收尾并触发选举退避，不再依赖下一轮选举超时的 cancel 才结束——
+     * 高频定时器下 collector 生命周期被切碎、迟到 granted 被丢弃的竞态由此消除。
+     *
+     * @param timeoutScheduler 超时调度器（应为 raftExecutor，保证回调线程语义一致）；null = 不超时
+     * @param timeoutMs        超时毫秒；&lt;=0 = 不超时
+     */
+    public VoteCollector(String selfNodeId, int totalNodes, boolean preVote, VoteOutcome outcome,
+                         ScheduledExecutorService timeoutScheduler, long timeoutMs) {
         if (selfNodeId == null) {
             throw new IllegalArgumentException("selfNodeId 不能为 null");
         }
@@ -85,6 +109,8 @@ public class VoteCollector {
         this.majority = totalNodes / 2 + 1;
         this.preVote = preVote;
         this.outcome = outcome;
+        this.timeoutScheduler = timeoutScheduler;
+        this.timeoutMs = timeoutMs;
         // 自己一票：Candidate 已投自己（PreVote 也假设自己会同意自己的探测，否则无意义）
         this.granted = new AtomicInteger(1);
         this.countedNodes = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -121,6 +147,7 @@ public class VoteCollector {
         }
         // 单节点场景兜底：广播后立即评估一次（自己已是多数派）
         evaluateOnce(currentTerm);
+        scheduleTimeout(currentTerm);
     }
 
     /**
@@ -151,6 +178,7 @@ public class VoteCollector {
         int g = granted.get();
         if (g >= majority) {
             if (completed.compareAndSet(false, true)) {
+                cancelTimeoutTask();
                 try {
                     outcome.onResult(true, term, g, totalNodes);
                 } catch (Exception e) {
@@ -161,10 +189,40 @@ public class VoteCollector {
     }
 
     /**
+     * 调度收集超时（D3）：超时未达多数派按 won=false 收尾。与 evaluateOnce 的 won、cancel
+     * 通过 {@code completed} CAS 互斥（仅一次收尾）。
+     */
+    private void scheduleTimeout(long term) {
+        if (timeoutScheduler == null || timeoutMs <= 0) {
+            return;
+        }
+        ScheduledFuture<?> f = timeoutScheduler.schedule(() -> {
+            if (completed.compareAndSet(false, true)) {
+                cancelTimeoutTask();
+                try {
+                    outcome.onResult(false, term, granted.get(), totalNodes);
+                } catch (Exception e) {
+                    logger.error("VoteOutcome 回调异常 (timeout, preVote={})", preVote, e);
+                }
+            }
+        }, timeoutMs, TimeUnit.MILLISECONDS);
+        timeoutTask.set(f);
+    }
+
+    /** 取消未触发的超时任务（won/cancel 收尾时调用，防泄漏）。 */
+    private void cancelTimeoutTask() {
+        ScheduledFuture<?> f = timeoutTask.getAndSet(null);
+        if (f != null) {
+            f.cancel(false);
+        }
+    }
+
+    /**
      * 主动结束本次收集（用于选举被中断：收到更高任期 AppendEntries 等）。
      * 触发一次 won=false 的结果回调（仅一次）。
      */
     public void cancel(long term) {
+        cancelTimeoutTask();
         if (completed.compareAndSet(false, true)) {
             try {
                 outcome.onResult(false, term, granted.get(), totalNodes);
