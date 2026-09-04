@@ -102,6 +102,16 @@ public class LogReplicator {
     /** peer → 快照重同步连续失败次数（sendSnapshot 返回 >0 清零）。 */
     private final Map<String, Integer> snapshotRetry = new ConcurrentHashMap<>();
 
+    /**
+     * 快照重同步冷却毫秒：发送成功后需等 follower 加载 RDB 并对齐（几百 MB 需数秒），
+     * 期间 follower 仍会 NACK——冷却窗口内不重复触发，否则形成快照重发风暴。
+     * follower 对齐后走 success 路径清除冷却；冷却过期仍未对齐则允许再试（仍有失败上限保护）。
+     */
+    static final long SNAPSHOT_COOLDOWN_MS = 30_000;
+
+    /** peer → 冷却截止时刻（ms）。 */
+    private final Map<String, Long> snapshotCooldownUntil = new ConcurrentHashMap<>();
+
     /** 注入快照管理器（MeshNode 装配时调用），启用回退越界/持续 NACK 的快照降级。 */
     public void setSnapshotManager(SnapshotManager snapshotManager) {
         this.snapshotManager = snapshotManager;
@@ -184,6 +194,7 @@ public class LogReplicator {
         matchIndex.clear();
         nackCount.clear();
         snapshotRetry.clear();
+        snapshotCooldownUntil.clear();
     }
 
     public Map<String, Long> getNextIndexView() {
@@ -289,6 +300,7 @@ public class LogReplicator {
 
         if (resp.isSuccess()) {
             nackCount.remove(fromPeer);
+            snapshotCooldownUntil.remove(fromPeer);   // follower 已对齐，解除快照冷却
             long prevMatch = matchIndex.getOrDefault(fromPeer, 0L);
             if (resp.getMatchIndex() > prevMatch) {
                 matchIndex.put(fromPeer, resp.getMatchIndex());
@@ -351,11 +363,17 @@ public class LogReplicator {
         if (snapshotRetry.getOrDefault(peer, 0) >= SNAPSHOT_FALLBACK_MAX_RETRIES) {
             return;
         }
+        // 冷却：上次发送成功后等 follower 安装对齐，期间不重发（防快照重发风暴）
+        Long until = snapshotCooldownUntil.get(peer);
+        if (until != null && System.currentTimeMillis() < until) {
+            return;
+        }
         logger.warn("日志回退触发快照重同步: peer={}, nextIndex={}, lastIncludedIndex={}",
                 peer, nextIndex.get(peer), state.lastIncludedIndex);
         long sent = sm.sendSnapshot(peer);
         if (sent > 0) {
             snapshotRetry.remove(peer);   // chunk 已发完；安装对齐后走 success 路径自然清理
+            snapshotCooldownUntil.put(peer, System.currentTimeMillis() + SNAPSHOT_COOLDOWN_MS);
         } else {
             int fails = snapshotRetry.merge(peer, 1, Integer::sum);
             if (fails >= SNAPSHOT_FALLBACK_MAX_RETRIES) {

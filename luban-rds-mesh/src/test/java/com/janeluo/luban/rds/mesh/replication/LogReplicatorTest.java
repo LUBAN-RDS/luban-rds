@@ -492,4 +492,29 @@ class LogReplicatorTest {
         }
         org.mockito.Mockito.verify(sm, org.mockito.Mockito.times(3)).sendSnapshot(B);
     }
+
+    @Test
+    void fallbackInCooldown_doesNotResendSnapshot() {
+        state.lastIncludedIndex = 10;
+        state.lastIncludedTerm = 1;
+        for (long i = 11; i <= 15; i++) {
+            appendEntry(i, setFrame("k" + i, "v" + i));
+        }
+        replicator.initOnBecomeLeader(config.getOtherNodeIds());
+        com.janeluo.luban.rds.mesh.replication.SnapshotManager sm =
+                org.mockito.Mockito.mock(com.janeluo.luban.rds.mesh.replication.SnapshotManager.class);
+        org.mockito.Mockito.when(sm.sendSnapshot(B)).thenReturn(1024L);
+        replicator.setSnapshotManager(sm);
+
+        // 第一次越界 NACK → 发快照；follower 安装期间继续 NACK → 冷却期内不得重发
+        for (int i = 0; i < 10; i++) {
+            replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 10L), false);
+        }
+        org.mockito.Mockito.verify(sm, org.mockito.Mockito.times(1)).sendSnapshot(B);
+
+        // follower 安装对齐（success）后，冷却清除，后续越界可再次触发
+        replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, true, 10L), false);
+        replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 10L), false);
+        org.mockito.Mockito.verify(sm, org.mockito.Mockito.times(2)).sendSnapshot(B);
+    }
 }
