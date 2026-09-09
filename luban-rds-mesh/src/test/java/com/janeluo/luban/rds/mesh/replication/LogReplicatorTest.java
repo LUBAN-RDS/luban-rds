@@ -56,12 +56,18 @@ class LogReplicatorTest {
     /** 捕获所有发出的帧（不发真实网络）。 */
     private static class CaptureBus extends MeshBusClient {
         final Map<String, MeshFrame> sent = new HashMap<>();
+        /** false=模拟对端通道高水位拥塞（isWritable=false） */
+        volatile boolean writable = true;
         CaptureBus() {
             super(A, new MeshBusHandler());
         }
         @Override
         public void send(String targetNodeId, MeshFrame frame) {
             sent.put(targetNodeId, frame);
+        }
+        @Override
+        public boolean isWritable(String nodeId) {
+            return writable;
         }
         void clear() { sent.clear(); }
         AppendEntriesMessage lastAppendEntries(String to) {
@@ -516,5 +522,59 @@ class LogReplicatorTest {
         replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, true, 10L), false);
         replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 10L), false);
         org.mockito.Mockito.verify(sm, org.mockito.Mockito.times(2)).sendSnapshot(B);
+    }
+
+    // ==================== 9/9 生产事故回归：积压补发必须有单帧上限 ====================
+
+    @Test
+    void replicate_backlog_cappedByEntryCount() {
+        // 300 条日志，B 落后（nextIndex 回退到 2）→ 单帧最多 MAX_AE_BATCH_ENTRIES 条，不得全段重发
+        for (int i = 1; i <= 300; i++) {
+            appendEntry(i, setFrame("k" + i, "v" + i));
+        }
+        replicator.initOnBecomeLeader(config.getOtherNodeIds());
+        replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 1L), false); // nextIndex[B]→2
+
+        bus.clear();
+        replicator.replicate(state.getEntry(300), false);
+
+        AppendEntriesMessage toB = bus.lastAppendEntries(B);
+        assertEquals(1L, toB.getPrevLogIndex());
+        assertEquals(256, toB.getEntries().size(), "单帧条数必须封顶（256），全量重发是 9/9 直接内存 OOM 的机制");
+        assertEquals(2L, toB.getEntries().get(0).getIndex());
+        assertEquals(257L, toB.getEntries().get(255).getIndex());
+    }
+
+    @Test
+    void replicate_backlog_cappedByByteBudget() {
+        // 30 条 ~200KB 大 entry，B 从 1 落后 → 单帧总字节不得超 2MB 预算（≥1 条保底）
+        String bigVal = "x".repeat(200 * 1024);
+        for (int i = 1; i <= 30; i++) {
+            appendEntry(i, setFrame("k" + i, bigVal));
+        }
+        replicator.initOnBecomeLeader(config.getOtherNodeIds());
+        replicator.onAppendEntriesResponse(B, new AppendEntriesResponse(1L, false, 1L), false); // nextIndex[B]→2
+
+        bus.clear();
+        replicator.replicate(state.getEntry(30), false);
+
+        AppendEntriesMessage toB = bus.lastAppendEntries(B);
+        long bytes = toB.getEntries().stream().mapToLong(e -> e.encode().length).sum();
+        // B 落后 [2..30] 共 29 条大 entry（~5.8MB），单帧必须截断
+        assertTrue(toB.getEntries().size() < 29, "积压全段进单帧 → 字节预算未生效");
+        assertTrue(toB.getEntries().size() >= 1, "至少 1 条保底");
+        assertTrue(bytes <= 2L * 1024 * 1024 + 256 * 1024, "字节预算超限：实际 " + bytes);
+    }
+
+    @Test
+    void replicate_skipsPeerWhenChannelUnwritable() {
+        appendEntry(1, setFrame("a", "1"));
+        replicator.initOnBecomeLeader(config.getOtherNodeIds());
+        bus.writable = false;
+
+        bus.clear();
+        replicator.replicate(state.getEntry(1), false);
+
+        assertTrue(bus.sent.isEmpty(), "对端通道拥塞（高水位）时应跳过本轮复制，而非无界排队");
     }
 }

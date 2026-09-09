@@ -68,6 +68,12 @@ public class MeshBusClient {
     /** nodeId → 连接断开时刻（ms）；连接成功时清除，用于 isFailed() 阈值判定 */
     private final Map<String, Long> disconnectSince = new ConcurrentHashMap<>();
 
+    /** 发送侧日志节流窗口（ms）：mis-config/网络分区下 WARN/ERROR 按心跳节奏刷屏（9/9 事故 4450+2496 条） */
+    private static final long SEND_LOG_INTERVAL_MS = 5_000;
+
+    /** 日志节流 key → 上次放行时刻（ms） */
+    private final Map<String, Long> sendLogSlots = new ConcurrentHashMap<>();
+
     /** nodeId → 建连互斥锁（常驻，避免集群规模小下的 ABA 竞态） */
     private final Map<String, Object> connectLocks = new ConcurrentHashMap<>();
 
@@ -277,9 +283,22 @@ public class MeshBusClient {
         if (closed) {
             throw new IllegalStateException("MeshBusClient 已关闭");
         }
+        if (isSelf(targetNodeId)) {
+            // 9/9 事故：nodeId 配置重复时 raft 层会把"自己的 id"当 leader 目标回包，
+            // 心跳节奏下每次一条 WARN（单机 10 分钟 4450 条刷屏）。本地短路丢弃 + 节流告警。
+            if (tryAcquireSendLogSlot("self")) {
+                logger.warn("拒绝向本节点自身 nodeId {} 发送帧 (type=0x{})，已丢弃——"
+                                + "若反复出现，请检查 mesh-node-id 是否与 peers 中其他条目配置冲突（同类日志每 {}s 一条）",
+                        targetNodeId, Integer.toHexString(frame.getType() & 0xFF), SEND_LOG_INTERVAL_MS / 1000);
+            }
+            return;
+        }
         Channel channel = nodeChannels.get(targetNodeId);
         if (channel == null || !channel.isActive()) {
-            logger.warn("目标 mesh 节点 {} 未连接，无法发送", targetNodeId);
+            if (tryAcquireSendLogSlot("disconn:" + targetNodeId)) {
+                logger.warn("目标 mesh 节点 {} 未连接，无法发送（重连退避中，同类日志每 {}s 一条）",
+                        targetNodeId, SEND_LOG_INTERVAL_MS / 1000);
+            }
             PeerEndpoint ep = nodeEndpoints.get(targetNodeId);
             if (ep != null) {
                 scheduleReconnect(targetNodeId, ep);
@@ -290,15 +309,41 @@ public class MeshBusClient {
             if (future.isSuccess()) {
                 logger.trace("MeshFrame 已发往节点 {}: {}", targetNodeId, frame);
             } else {
-                logger.error("发送 MeshFrame 到节点 {} 失败 (type=0x{})，关闭连接走重连链路",
-                        targetNodeId, Integer.toHexString(frame.getType() & 0xFF), future.cause());
                 // 写失败（编码异常/直接内存 OOM/连接半死）后 channel 可能仍 isActive：
                 // 滞留连接表会被 connect() 复用且永远写不出（9/3 生产事故：OOM 后每秒写失败但连接不重建）。
                 // close 触发 closeFuture 的既有"清表 + 退避重连"链路，无需在此重复 scheduleReconnect
                 //（其 64s 去重窗口会吸收 close 链路里的重复调度）。
+                if (tryAcquireSendLogSlot("writefail:" + targetNodeId)) {
+                    logger.error("发送 MeshFrame 到节点 {} 失败 (type=0x{})，关闭连接走重连链路（同类日志每 {}s 一条）",
+                            targetNodeId, Integer.toHexString(frame.getType() & 0xFF),
+                            SEND_LOG_INTERVAL_MS / 1000, future.cause());
+                }
                 channel.close();
             }
         });
+    }
+
+    /**
+     * 出站拥塞探测：peer 的 channel 越过写高水位（对端消化不过来）时返回 false。
+     * 无 channel 记录时返回 true——未连接由 {@link #send} 的未连接分支处理，
+     * 复制器跳过逻辑不应因"还没建连"而误判为拥塞。
+     */
+    public boolean isWritable(String nodeId) {
+        Channel ch = nodeChannels.get(nodeId);
+        return ch == null || ch.isWritable();
+    }
+
+    /**
+     * 发送侧日志节流：同一 key 在 {@link #SEND_LOG_INTERVAL_MS} 窗口内只放行一次。
+     */
+    private boolean tryAcquireSendLogSlot(String key) {
+        long now = System.currentTimeMillis();
+        Long last = sendLogSlots.get(key);
+        if (last == null || now - last >= SEND_LOG_INTERVAL_MS) {
+            sendLogSlots.put(key, now);
+            return true;
+        }
+        return false;
     }
 
     /**

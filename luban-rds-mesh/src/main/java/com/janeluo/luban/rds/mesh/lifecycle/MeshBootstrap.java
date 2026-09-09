@@ -106,6 +106,8 @@ public class MeshBootstrap {
 
         // 2. 创建 busClient / busServer / handler（在 MeshNode 之前，便于注入）
         MeshBusHandler busHandler = new MeshBusHandler();
+        // 入站身份冲突防线：丢弃 senderNodeId==自身 id 的帧并 ERROR 指向配置根因（9/9 事故）
+        busHandler.setSelfNodeId(topo.selfNodeId);
         MeshBusClient busClient = new MeshBusClient(topo.selfNodeId, busHandler);
         // busPort：显式配置优先，否则取 peers 拓扑中本节点条目
         int busPort = config.getMeshBusPort() > 0

@@ -109,6 +109,17 @@ public class LogReplicator {
      */
     static final long SNAPSHOT_COOLDOWN_MS = 30_000;
 
+    /**
+     * 单帧 AppendEntries 条数上限（9/9 事故）：peer 的 matchIndex 因身份冲突/永久分区
+     * 永不推进时，积压全段补发让帧随日志线性膨胀（每次心跳重新编码巨帧），
+     * 打爆 Netty 直接内存（生产实测 3.5 分钟 0→1GB 崩溃）。截断后剩余积压
+     * 随后续 ACK 推进逐批送达，复制语义不变。
+     */
+    static final int MAX_AE_BATCH_ENTRIES = 256;
+
+    /** 单帧 AppendEntries 字节预算；单条超大 entry 仍至少发 1 条（否则无法前进）。 */
+    static final int MAX_AE_BATCH_BYTES = 2 * 1024 * 1024;
+
     /** peer → 冷却截止时刻（ms）。 */
     private final Map<String, Long> snapshotCooldownUntil = new ConcurrentHashMap<>();
 
@@ -232,6 +243,12 @@ public class LogReplicator {
         long lastLogIndex = state.getLastLogIndex();
 
         for (String peer : config.getOtherNodeIds()) {
+            // 出站通道拥塞（越过写高水位）：跳过本轮补发而非继续入队——
+            // 配合单帧上限，把直接内存占用钉死在常数级（9/9 事故 outbound 积压侧）。
+            if (!busClient.isWritable(peer)) {
+                logger.debug("peer {} 出站通道拥塞，跳过本轮复制", peer);
+                continue;
+            }
             long ni = getNextIndex(peer);
             if (ni < 1) {
                 ni = 1;
@@ -265,17 +282,41 @@ public class LogReplicator {
     /**
      * 收集 [fromIndex, lastLogIndex] 范围内的日志条目（批量补发用）。
      * {@code fromIndex <= lastIncludedIndex} 的部分已被快照截断，从 lastIncludedIndex+1 开始取。
+     * <p>
+     * 单帧受 {@link #MAX_AE_BATCH_ENTRIES} 条数与 {@link #MAX_AE_BATCH_BYTES} 字节双上限
+     * 截断（首条无条件保留）；剩余积压随 ACK 推进逐批送达。
      */
     private List<LogEntry> collectEntriesFrom(long fromIndex, long lastLogIndex) {
         List<LogEntry> result = new ArrayList<>();
         long start = Math.max(fromIndex, state.lastIncludedIndex + 1);
+        long bytes = 0;
         for (long idx = start; idx <= lastLogIndex; idx++) {
             LogEntry e = state.getEntry(idx);
-            if (e != null) {
-                result.add(e);
+            if (e == null) {
+                continue;
             }
+            long est = estimateEntryBytes(e);
+            if (!result.isEmpty() && (result.size() >= MAX_AE_BATCH_ENTRIES || bytes + est > MAX_AE_BATCH_BYTES)) {
+                break;
+            }
+            bytes += est;
+            result.add(e);
         }
         return result;
+    }
+
+    /** 估算单条 entry 编码后的字节数：固定字段（term/index/len 前缀/dbIndex，约 28B）+ payload + extra。 */
+    private static long estimateEntryBytes(LogEntry e) {
+        long size = 28;
+        byte[] payload = e.getRespPayload();
+        if (payload != null) {
+            size += payload.length;
+        }
+        byte[] extra = e.getExtra();
+        if (extra != null) {
+            size += extra.length;
+        }
+        return size;
     }
 
     // ==================== 响应处理（Leader 侧）====================

@@ -31,6 +31,22 @@ public class MeshBusHandler extends SimpleChannelInboundHandler<MeshFrame> {
      */
     private volatile BiConsumer<String, MeshFrame> messageConsumer;
 
+    /** 本节点 nodeId（MeshBootstrap 接线）；null = 未接线，跳过身份冲突检查。 */
+    private volatile String selfNodeId;
+
+    /** 身份冲突 ERROR 节流窗口（ms）：mis-config 下冲突帧随心跳 50ms 一条，不限流即刷屏。 */
+    private static final long CONFLICT_LOG_INTERVAL_MS = 5_000;
+
+    /** 上次身份冲突 ERROR 时刻（ms）。 */
+    private volatile long lastConflictLogAt;
+
+    /**
+     * 接线本节点 nodeId，启用入站身份冲突检查。由 MeshBootstrap 在装配时调用一次。
+     */
+    public void setSelfNodeId(String selfNodeId) {
+        this.selfNodeId = selfNodeId;
+    }
+
     /**
      * 注册上层消息消费者。
      *
@@ -50,6 +66,21 @@ public class MeshBusHandler extends SimpleChannelInboundHandler<MeshFrame> {
                 fromNodeId,
                 frame.getBodyLength(),
                 formatRemoteAddress(ctx));
+
+        // 身份冲突防线（9/9 事故）：两台机器配置了同一 mesh-node-id 时，"自称是我"的帧
+        // 必然来自对方——转发进 Raft 层会导致投票/复制响应互相错记、matchIndex 永不推进、
+        // leader 积压补发打爆直接内存。丢弃并显式 ERROR 指向配置根因。
+        String self = this.selfNodeId;
+        if (self != null && self.equals(fromNodeId)) {
+            long now = System.currentTimeMillis();
+            if (now - lastConflictLogAt >= CONFLICT_LOG_INTERVAL_MS) {
+                lastConflictLogAt = now;
+                logger.error("mesh 身份冲突：收到 senderNodeId={} 与本节点相同的帧 (type=0x{}, remote={})，"
+                                + "该帧已丢弃——请检查 mesh-node-id 是否与其他节点配置重复",
+                        fromNodeId, Integer.toHexString(frame.getType() & 0xFF), formatRemoteAddress(ctx));
+            }
+            return;
+        }
 
         BiConsumer<String, MeshFrame> consumer = this.messageConsumer;
         if (consumer != null) {
