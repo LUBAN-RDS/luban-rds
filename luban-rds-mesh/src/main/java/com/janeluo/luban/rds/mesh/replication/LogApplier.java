@@ -65,6 +65,18 @@ public class LogApplier {
     public long getApplyScriptMissCount() {
         return applyScriptMissCount.get();
     }
+
+    /**
+     * P1-10（2026-09-11 审计）：apply 侧 PUBLISH 投递回调（channel, message) → 本地接收者数。
+     * 由 server 层装配（PubSubManager 在 server 模块，core/mesh 不可依赖）。
+     * null 时 PUBLISH 交由命令注册表（未注册 → unknown command 响应，历史行为）。
+     */
+    private volatile java.util.function.ToIntBiFunction<String, String> publishHandler;
+
+    /** P1-10：设置 apply 侧 PUBLISH 投递回调。 */
+    public void setPublishHandler(java.util.function.ToIntBiFunction<String, String> handler) {
+        this.publishHandler = handler;
+    }
     /** apply 唯一目标：真实 raw MemoryStore（DefaultMemoryStore）。 */
     private final MemoryStore rawStore;
     /** RESP 解析器（复用 protocol 模块）。 */
@@ -164,6 +176,16 @@ public class LogApplier {
         }
         // handle 入参的 commandName 约定为大写（与 RedisServerHandler.processCommand 一致）
         String upperName = commandName.trim().toUpperCase();
+
+        // P1-10：PUBLISH 经 Raft 复制后，apply 时向本节点订阅者投递（三节点订阅者一致可见）。
+        // 响应 = 本节点接收者数（leader 的 propose 响应即发布节点接收者数，与 Redis 语义一致）。
+        if ("PUBLISH".equals(upperName) && publishHandler != null) {
+            if (args == null || args.length < 3) {
+                return "-ERR wrong number of arguments for 'publish' command\r\n";
+            }
+            int receivers = publishHandler.applyAsInt(args[1], args[2]);
+            return ":" + receivers + "\r\n";
+        }
 
         // apply 只用 raw store + handle，绝不经过拦截层；不写 AOF
         // P1-5（2026-09-11 审计）：执行异常不再转 -ERR 字符串吞掉——节点本地异常

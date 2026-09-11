@@ -875,7 +875,9 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             } else if ("SUNSUBSCRIBE".equals(commandName)) {
                 handleSunsubscribe(ctx, args);
                 return;
-            } else if ("PUBLISH".equals(commandName)) {
+            } else if ("PUBLISH".equals(commandName) && !meshEnabled) {
+                // P1-10（2026-09-11 mesh 审计）：mesh 下 PUBLISH 不本地截走——经 gate 写路径
+                // propose 成 Raft 条目，apply 时各节点向本地订阅者投递（三节点订阅者一致可见）。
                 handlePublish(ctx, args);
                 return;
             }

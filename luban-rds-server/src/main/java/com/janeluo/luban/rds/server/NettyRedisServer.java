@@ -543,6 +543,14 @@ public class NettyRedisServer implements RedisServer {
                 new com.janeluo.luban.rds.mesh.lifecycle.MeshBootstrap();
         this.meshAssembly = bootstrap.bootstrap(config, memoryStore, commandHandler);
 
+        // P1-10（2026-09-11 mesh 审计）：apply 侧 PUBLISH 投递回调——
+        // PUBLISH 经 Raft 复制，apply 时向本节点订阅者投递（PubSubManager 在 server 模块，
+        // 以回调注入避免依赖反转）。propose 响应 = leader 本地接收者数（= Redis 发布节点语义）。
+        if (meshAssembly.getMeshNode().getApplier() != null) {
+            meshAssembly.getMeshNode().getApplier().setPublishHandler(
+                    RedisServerHandler::publishMessage);
+        }
+
         // P1-6（2026-09-11 mesh 审计）：mesh 模式强制 noeviction——淘汰决策只依赖客户端读
         // 路径的访问时间（leader 有、follower 无），经 Raft 同步不可行；确定性兜底 = 不淘汰
         if (memoryStore instanceof com.janeluo.luban.rds.core.store.DefaultMemoryStore) {

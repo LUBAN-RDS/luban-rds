@@ -1519,7 +1519,8 @@ public class MeshNode {
     }
 
     /** 阶段 4：取 applier（测试用，可能为 null）。 */
-    LogApplier getApplier() {
+    /** P1-10：取 applier（server 层装配 publish 投递回调用；可能为 null）。 */
+    public LogApplier getApplier() {
         return applier;
     }
 
