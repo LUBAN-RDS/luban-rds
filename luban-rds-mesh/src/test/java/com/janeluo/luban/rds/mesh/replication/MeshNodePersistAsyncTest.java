@@ -140,7 +140,7 @@ class MeshNodePersistAsyncTest {
             assertFalse(f.isDone(), "落盘未完成时 future 不应完成");
 
             // 两个 Follower 都 ACK（多数派 2/3），但自身仍阻塞在落盘 → commit 不得推进、future 不得完成
-            AppendEntriesResponse ok = new AppendEntriesResponse(1L, true, 1L);
+            AppendEntriesResponse ok = new AppendEntriesResponse(1L, true, 2L) /* P1-3：k 在 index 2 */;
             node.onMessage("b", new MeshFrame("b", MessageType.APPEND_ENTRIES_RESP.getCode(), ok.encode()));
             node.onMessage("c", new MeshFrame("c", MessageType.APPEND_ENTRIES_RESP.getCode(), ok.encode()));
             awaitIdle(node);
@@ -182,7 +182,7 @@ class MeshNodePersistAsyncTest {
             awaitIdle(node);
 
             // 两个 Follower 都 ACK（多数派 2/3），但自身未落盘 → commit 不得推进
-            AppendEntriesResponse ok = new AppendEntriesResponse(1L, true, 1L);
+            AppendEntriesResponse ok = new AppendEntriesResponse(1L, true, 2L) /* P1-3：k 在 index 2 */;
             node.onMessage("b", new MeshFrame("b", MessageType.APPEND_ENTRIES_RESP.getCode(), ok.encode()));
             node.onMessage("c", new MeshFrame("c", MessageType.APPEND_ENTRIES_RESP.getCode(), ok.encode()));
             awaitIdle(node);
@@ -194,7 +194,7 @@ class MeshNodePersistAsyncTest {
             releasePersist.countDown();
             byte[] resp = f.get(3, TimeUnit.SECONDS);
             assertNotNull(resp);
-            assertEquals(1L, state.commitIndex, "落盘完成后 commitIndex 应推进");
+            assertEquals(2L, state.commitIndex, "落盘完成后 commitIndex 应推进（no-op@1+k@2）");
             assertEquals("v", rawStore.get(0, "k"), "apply 应生效");
         } finally {
             releasePersist.countDown();
@@ -230,7 +230,7 @@ class MeshNodePersistAsyncTest {
             java.util.concurrent.ExecutionException ee =
                     assertThrows(java.util.concurrent.ExecutionException.class, () -> f.get(2, TimeUnit.SECONDS));
             assertTrue(ee.getCause() instanceof IllegalStateException, "cause 应为 IllegalStateException");
-            assertEquals(0L, state.getLastLogIndex(), "落盘失败应回滚日志条目");
+            assertEquals(1L, state.getLastLogIndex(), "k 回滚；no-op@1 保留（P1-3：其落盘失败仅 ERROR，不回滚——当前任期锚点截断有害，durableIndex 门控兜底）");
             assertEquals(0, pendingProposalsCount(node), "pending 应清空");
         } finally {
             node.stop();
@@ -328,7 +328,7 @@ class MeshNodePersistAsyncTest {
                 awaitIdle(node);
             }
             // 非 Leader 的落盘失败回调不得截断日志（日志留给新 Leader 复制修复）
-            assertEquals(1L, state.getLastLogIndex(), "非 Leader 不得因落盘失败截断日志");
+            assertEquals(2L, state.getLastLogIndex(), "非 Leader 不得因落盘失败截断日志（no-op@1 + k@2）");
         } finally {
             releasePersist.countDown();
             node.stop();
@@ -359,8 +359,8 @@ class MeshNodePersistAsyncTest {
                 Thread.sleep(10);
                 awaitIdle(node);
             }
-            assertEquals(2L, state.getLastLogIndex(), "propose 两条后日志末尾应为 2");
-            assertEquals(2L, readDurableIndex(node), "两条条目落盘后 durableIndex 应为 2");
+            assertEquals(3L, state.getLastLogIndex(), "no-op@1 + 两条写 = 3");
+            assertEquals(3L, readDurableIndex(node), "三条条目落盘后 durableIndex 应为 3");
 
             // 模拟 Follower 收到新 Leader 的冲突 AppendEntries：entry(term=10, index=1) 与本地
             // term=1 冲突 → truncateAfter(0) 删除本地两条 + 追加 term=10 条目 → 日志末尾收缩为 1
@@ -405,12 +405,18 @@ class MeshNodePersistAsyncTest {
 
             CompletableFuture<byte[]> f = node.propose(setFrame("k", "v"), 0, null);
             assertTrue(persistEntered.await(2, TimeUnit.SECONDS));
+            // P1-3 后 persistEntered 可能由 no-op 的落盘先触发——等 k 的 pending 真正注册后再 stop，
+            // 否则 stop 可能赶在 doPropose 入队前执行，future 以 RejectedExecutionException 完成偏离断言意图
+            for (int i = 0; i < 100 && pendingProposalsCount(node) < 1; i++) {
+                Thread.sleep(10);
+            }
+            assertEquals(1, pendingProposalsCount(node), "k 的 pending 应已注册");
 
             node.stop(); // 在途 propose 未完成时 stop
 
             java.util.concurrent.ExecutionException ee =
                     assertThrows(java.util.concurrent.ExecutionException.class, () -> f.get(2, TimeUnit.SECONDS));
-            assertTrue(ee.getCause() instanceof IllegalStateException, "stop 后 pending 应以异常完成");
+            assertTrue(ee.getCause() instanceof IllegalStateException, "stop 后 pending 应以异常完成，实际 cause=" + ee.getCause());
         } finally {
             releasePersist.countDown();
         }

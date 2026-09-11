@@ -775,8 +775,7 @@ public class MeshNode {
     }
 
     /** 赢得正式选举 → becomeLeader。 */
-    private void onWinElection() {
-        if (stopped) {
+    private void onWinElection() {        if (stopped) {
             return;
         }
         Transition t = stateMachine.becomeLeader(state, nodeId, config.getPeerNodeIds());
@@ -790,6 +789,11 @@ public class MeshNode {
         }
         logger.info("转为 LEADER: term={}，nextIndex={}", t.newTerm, nextIndex);
 
+        // P1-3（2026-09-11 mesh 审计）：新 Leader 追加当前任期 no-op（标准做法）——
+        // §5.4.2 只直接提交 currentTerm 条目，无 no-op 时重启遗留的旧 term 未确认条目
+        // 在无新写入场景下永远无法间接提交（与 P0-2 的 commitIndex 收敛配套）。
+        appendNoOpEntry();
+
         // 启动心跳 + 首轮空 AppendEntries（建立权威 + 续租）
         startHeartbeat();
         broadcastHeartbeat();
@@ -797,6 +801,35 @@ public class MeshNode {
         electionTimer.onElectionSucceeded();
         // 阶段 12：通知角色监听器（Leader 变更）
         notifyRoleListener();
+    }
+
+    /**
+     * P1-3：追加当前任期 no-op 条目（新 Leader 间接提交锚点）。
+     * <p>
+     * 不注册 pendingProposals（无客户端 future）；走既有异步落盘 + 复制路径
+     * （落盘成功后 onPersistSucceeded 推进 durableIndex 并重触发 commit——
+     * no-op 的 currentTerm 使 §5.4.2 Fig-8 检查通过，旧 term tail 随之间接提交）。
+     * 仅在启用 replicator/applier 的节点生效（阶段 3 无复制能力的测试节点跳过）。
+     * </p>
+     */
+    private void appendNoOpEntry() {
+        if (replicator == null) {
+            return;
+        }
+        long index = state.getLastLogIndex() + 1;
+        LogEntry noop = new LogEntry(state.currentTerm, index, new byte[0], 0, LogEntry.NO_OP_EXTRA);
+        state.appendEntry(noop);
+        logger.info("新 Leader 追加 no-op 条目: term={}, index={}", state.currentTerm, index);
+        final long persistIndex = index;
+        persistExecutor.execute(() -> {
+            try {
+                persistHook.run();
+                submitToRaft(() -> onPersistSucceeded(persistIndex));
+            } catch (Exception e) {
+                logger.error("no-op 条目落盘失败: index={}", persistIndex, e);
+            }
+        });
+        replicator.replicate(noop, true);
     }
 
     private void cancelCurrentCollector() {

@@ -33,6 +33,13 @@ import java.nio.charset.StandardCharsets;
  */
 public class LogEntry {
 
+    /**
+     * P1-3（2026-09-11 mesh 审计）：no-op 条目标识。
+     * 新 Leader 上任追加的当前任期锚点条目（空载荷 + 本标识），用于旧任期未确认条目的
+     * 间接提交（§5.4.2 只直接提交 currentTerm 条目）；apply 时跳过命令执行。
+     */
+    public static final byte[] NO_OP_EXTRA = "NO-OP".getBytes(StandardCharsets.ISO_8859_1);
+
     /** 创建时的任期号 */
     private final long term;
 
@@ -85,6 +92,11 @@ public class LogEntry {
     /** 事务扩展载荷；普通写返回 {@code null} */
     public byte[] getExtra() {
         return extra;
+    }
+
+    /** 是否为 no-op 条目（{@link #NO_OP_EXTRA} 逐字节相等；P1-3 新 Leader 间接提交锚点）。 */
+    public boolean isNoOp() {
+        return extra != null && java.util.Arrays.equals(extra, NO_OP_EXTRA);
     }
 
     /**
