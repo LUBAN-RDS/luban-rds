@@ -249,21 +249,8 @@ public class LogReplicator {
                 logger.debug("peer {} 出站通道拥塞，跳过本轮复制", peer);
                 continue;
             }
-            long ni = getNextIndex(peer);
-            if (ni < 1) {
-                ni = 1;
-                nextIndex.put(peer, ni);
-            }
-            // 携带从 nextIndex[peer] 到 log 末尾的所有 entries（批量补发）
-            List<LogEntry> toSend = collectEntriesFrom(ni, lastLogIndex);
-            long prevLogIndex = ni - 1;
-            long prevLogTerm = state.getLogTerm(prevLogIndex);
-
-            AppendEntriesMessage msg = new AppendEntriesMessage(
-                    term, nodeId, prevLogIndex, prevLogTerm, toSend, leaderCommit);
-            MeshFrame frame = new MeshFrame(nodeId, MessageType.APPEND_ENTRIES.getCode(), msg.encode());
             try {
-                busClient.send(peer, frame);
+                busClient.send(peer, buildAeFrame(peer, term, leaderCommit, lastLogIndex));
             } catch (Exception e) {
                 logger.warn("复制 AppendEntries 发往 {} 失败", peer, e);
             }
@@ -277,6 +264,52 @@ public class LogReplicator {
                 leaseRefresher.run();
             }
         }
+    }
+
+    /**
+     * P0-6（2026-09-11 mesh 审计）：心跳帧发送（mesh-timer 线程安全）。
+     * <p>
+     * 仅构建 AppendEntries 帧并异步发送——读取 nextIndex（ConcurrentHashMap）、
+     * term/commitIndex（volatile）、entries（MeshState 读锁访问器）均为单操作线程安全，
+     * 帧内容轻微陈旧最坏触发 follower NACK（自愈）。<b>不做</b> commit 推进/apply/续租
+     * （raft 线程在 AE 响应处理路径的职责）。
+     * </p>
+     */
+    public void sendHeartbeatFrames() {
+        long term = state.currentTerm;
+        if (term <= 0) {
+            return;
+        }
+        long leaderCommit = state.commitIndex;
+        long lastLogIndex = state.getLastLogIndex();
+        for (String peer : config.getOtherNodeIds()) {
+            if (!busClient.isWritable(peer)) {
+                continue; // 出站拥塞背压：跳过本轮（与 replicate 一致）
+            }
+            try {
+                busClient.send(peer, buildAeFrame(peer, term, leaderCommit, lastLogIndex));
+            } catch (Exception e) {
+                logger.warn("心跳发送到 {} 失败", peer, e);
+            }
+        }
+    }
+
+    /**
+     * 构建发往单个 peer 的 AppendEntries 帧（从 nextIndex[peer] 到 lastLogIndex 的批量补发，
+     * {@link #collectEntriesFrom} 双上限截断）。replicate / sendHeartbeatFrames / resendTo 共用。
+     */
+    private MeshFrame buildAeFrame(String peer, long term, long leaderCommit, long lastLogIndex) {
+        long ni = getNextIndex(peer);
+        if (ni < 1) {
+            ni = 1;
+            nextIndex.put(peer, ni);
+        }
+        List<LogEntry> toSend = collectEntriesFrom(ni, lastLogIndex);
+        long prevLogIndex = ni - 1;
+        long prevLogTerm = state.getLogTerm(prevLogIndex);
+        AppendEntriesMessage msg = new AppendEntriesMessage(
+                term, nodeId, prevLogIndex, prevLogTerm, toSend, leaderCommit);
+        return new MeshFrame(nodeId, MessageType.APPEND_ENTRIES.getCode(), msg.encode());
     }
 
     /**
@@ -428,13 +461,7 @@ public class LogReplicator {
         long term = state.currentTerm;
         long leaderCommit = state.commitIndex;
         long lastLogIndex = state.getLastLogIndex();
-        long ni = getNextIndex(peer);
-        List<LogEntry> toSend = collectEntriesFrom(ni, lastLogIndex);
-        long prevLogIndex = ni - 1;
-        long prevLogTerm = state.getLogTerm(prevLogIndex);
-        AppendEntriesMessage msg = new AppendEntriesMessage(
-                term, nodeId, prevLogIndex, prevLogTerm, toSend, leaderCommit);
-        MeshFrame frame = new MeshFrame(nodeId, MessageType.APPEND_ENTRIES.getCode(), msg.encode());
+        MeshFrame frame = buildAeFrame(peer, term, leaderCommit, lastLogIndex);
         try {
             busClient.send(peer, frame);
         } catch (Exception e) {

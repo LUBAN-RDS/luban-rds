@@ -84,8 +84,15 @@ public class MeshNode {
 
     /** 投票收集超时：2× 选举超时上限（D3，9/3 事故）。响应永不到达时的兜底收尾窗口。 */
     private static final long VOTE_COLLECT_TIMEOUT_MS = 2L * ElectionTimer.DEFAULT_MAX_MS;
-    /** ElectionTimer 与心跳定时器复用的调度器（可与 raftExecutor 同一个）。 */
+    /** ElectionTimer 使用的调度器（raftExecutor 单线程：定时器回调是重状态变更，必须与 AE 处理串行）。 */
     private final ScheduledExecutorService scheduler;
+    /**
+     * P0-6（2026-09-11 mesh 审计）：心跳发送/轻量周期任务专用单线程——与 raftExecutor 解耦。
+     * 写积压（apply 挤占 raft 队列 ~200ms）曾延迟心跳 tick 致最敏感 follower PreVote 推翻
+     * 健康 Leader（8/6 选举风暴同构根因）。心跳 tick 在此线程只做帧构建+发送，
+     * 不做 commit 推进/apply/续租（raft 线程职责）。
+     */
+    private final ScheduledExecutorService timerExecutor;
     /** 落盘专用单线程调度器（与 raftExecutor 解耦：fsync 不得阻塞心跳/RPC 处理）。 */
     private final ScheduledExecutorService persistExecutor;
     /** 本节点已落盘的最大日志 index（仅 raft 线程读写；volatile 仅为可见性兜底）。 */
@@ -188,6 +195,12 @@ public class MeshNode {
             return t;
         });
         this.scheduler = this.raftExecutor;
+        // P0-6：心跳发送独立线程——apply 积压不再延迟心跳帧（ElectionTimer 留 raft 线程串行）
+        this.timerExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mesh-timer-" + abbrev(nodeId));
+            t.setDaemon(true);
+            return t;
+        });
         // 落盘线程独立于 raft 线程：写高峰 fsync 不再停摆心跳（选举风暴根因修复）
         this.persistExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "mesh-persist-" + abbrev(nodeId));
@@ -247,6 +260,7 @@ public class MeshNode {
         stopHeartbeat();
         lease.invalidate();
         raftExecutor.shutdownNow();
+        timerExecutor.shutdownNow();
         persistExecutor.shutdownNow();
         // 在途 propose 未完成时 stop：必须以异常 complete，否则 gate 层 get() 永久悬挂
         failAllPendingOnStop();
@@ -795,21 +809,43 @@ public class MeshNode {
 
     // ==================== 心跳（Leader 侧）====================
 
-    /** 启动周期心跳（每 heartbeatIntervalMs 广播空 AppendEntries）。 */
+    /** 启动周期心跳（每 heartbeatIntervalMs 广播 AppendEntries）。P0-6：挂独立 timerExecutor。 */
     private void startHeartbeat() {
         stopHeartbeat();
         long interval = config.getHeartbeatIntervalMs();
-        heartbeatTask = scheduler.scheduleAtFixedRate(() -> {
+        heartbeatTask = timerExecutor.scheduleAtFixedRate(() -> {
             try {
-                if (state.role == MeshRole.LEADER) {
-                    broadcastHeartbeat();
-                } else {
+                if (state.role != MeshRole.LEADER) {
                     // 已非 Leader：定时器自身会因 stopHeartbeat 而停，防御性忽略
+                    return;
                 }
+                if (config.getOtherNodeIds().isEmpty()) {
+                    // 单节点集群：commit/apply/续租是 raft 线程职责，投递回去串行执行
+                    submitToRaft(MeshNode.this::singleNodeHeartbeatTick);
+                    return;
+                }
+                // P0-6：心跳帧构建+发送在 timer 线程完成（读取线程安全访问器：
+                // volatile 标量 + MeshState 读锁 + ConcurrentHashMap），raft 线程积压不影响发送
+                replicator.sendHeartbeatFrames();
             } catch (Exception e) {
                 logger.error("心跳广播异常", e);
             }
         }, interval, interval, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 单节点集群心跳 tick（raft 线程执行）：commit 自检 + apply + 续租
+     * （原 replicate() 的单节点分支——多节点时这些由 AE 响应处理路径驱动）。
+     */
+    private void singleNodeHeartbeatTick() {
+        if (state.role != MeshRole.LEADER || replicator == null) {
+            return;
+        }
+        boolean advanced = replicator.maybeAdvanceCommitIndex();
+        if (advanced) {
+            replicator.applyCommittedEntries();
+        }
+        lease.refreshOnMajorityAck(System.currentTimeMillis());
     }
 
     private void stopHeartbeat() {
