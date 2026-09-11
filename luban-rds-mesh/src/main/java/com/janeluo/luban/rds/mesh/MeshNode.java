@@ -1037,7 +1037,7 @@ public class MeshNode {
     void handleAppendEntries(String fromNodeId, AppendEntriesMessage msg) {
         long commitBefore = state.commitIndex;
         long appliedBefore = state.lastApplied;
-        AppendDecision decision = stateMachine.decideAppendEntries(state, msg, persistHook);
+        AppendDecision decision = stateMachine.decideAppendEntries(state, msg);
         if (decision.transition.kind == Transition.Kind.TO_FOLLOWER) {
             applyFollowerSideEffects(decision.transition);
             // 阶段 11：若 term 自增导致降级 → 持久化（追加的 fsync 已由 decideAppendEntries 内
@@ -1072,6 +1072,22 @@ public class MeshNode {
         // 心跳响应每 100ms 一次，trace 级别（帧级噪声，与 MeshBusCodec 一致）
         logger.trace("回复 AppendEntries: from={}, success={}, match={}",
                 abbrev(fromNodeId), decision.response.isSuccess(), decision.response.getMatchIndex());
+
+        // P0-7（2026-09-11 mesh 审计）：WAL 落盘挪 persistExecutor（与 Leader propose 路径对称）——
+        // follower 不再在 raft 线程同步 fsync（磁盘抖动曾直接阻塞心跳应答与选举定时器）。
+        // 内存追加成功即 ACK；持久化失败仅 ERROR（不回滚内存日志：WAL 落后由 Leader 重发兜底，
+        // 与 onPersistFailed 的 follower 早退语义一致）。
+        if (!msg.getEntries().isEmpty()) {
+            final long persistIndex = state.getLastLogIndex();
+            persistExecutor.execute(() -> {
+                try {
+                    persistHook.run();
+                    submitToRaft(() -> onPersistSucceeded(persistIndex));
+                } catch (Exception e) {
+                    logger.error("follower AppendEntries 落盘失败: lastIndex={}", persistIndex, e);
+                }
+            });
+        }
     }
 
     // ==================== AppendEntries 响应处理（Leader 侧）====================
