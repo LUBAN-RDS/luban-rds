@@ -184,6 +184,10 @@ public class MeshBootstrap {
                     }
                 });
         meshNode.setSnapshotManager(snapshotManager);
+        // P1-4a：快照携带/还原脚本表（脚本缓存属复制状态，快照截断后仍可 EVALSHA）
+        snapshotManager.setScriptTableHooks(
+                com.janeluo.luban.rds.core.handler.LuaCommandHandler::snapshotScripts,
+                com.janeluo.luban.rds.core.handler.LuaCommandHandler::restoreScripts);
 
         // 8. MeshWriteGate（meshNode/rawStore/handler/config + nodeId→serviceAddr 映射 + 本节点地址）
         //    映射与 redirector 同源，供 redirectResponse 把 Leader nodeId 解析成真实 ip:port；

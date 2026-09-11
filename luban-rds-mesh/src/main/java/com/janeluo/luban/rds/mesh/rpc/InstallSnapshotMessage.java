@@ -34,6 +34,12 @@ public class InstallSnapshotMessage extends MeshRpcMessage {
     private final boolean done;
 
     /**
+     * P1-4a（2026-09-11 审计）：随快照携带的 Leader 侧脚本表（sha1 → 脚本文本）。
+     * 仅首 chunk（offset==0）携带；null = 无表（旧版本帧/后续 chunk）。
+     */
+    private final java.util.Map<String, String> scriptTable;
+
+    /**
      * @param term             Leader 任期
      * @param leaderId         Leader nodeId
      * @param lastIncludedTerm 快照对应的最后任期
@@ -44,6 +50,15 @@ public class InstallSnapshotMessage extends MeshRpcMessage {
      */
     public InstallSnapshotMessage(long term, String leaderId, long lastIncludedTerm, long lastIncludedIndex,
                                   long offset, byte[] data, boolean done) {
+        this(term, leaderId, lastIncludedTerm, lastIncludedIndex, offset, data, done, null);
+    }
+
+    /**
+     * P1-4a：带脚本表的构造（仅首 chunk 使用）。
+     */
+    public InstallSnapshotMessage(long term, String leaderId, long lastIncludedTerm, long lastIncludedIndex,
+                                  long offset, byte[] data, boolean done,
+                                  java.util.Map<String, String> scriptTable) {
         super(term);
         this.leaderId = leaderId;
         this.lastIncludedTerm = lastIncludedTerm;
@@ -51,6 +66,12 @@ public class InstallSnapshotMessage extends MeshRpcMessage {
         this.offset = offset;
         this.data = data == null ? new byte[0] : data;
         this.done = done;
+        this.scriptTable = scriptTable;
+    }
+
+    /** P1-4a：随首 chunk 携带的脚本表；null = 无表。 */
+    public java.util.Map<String, String> getScriptTable() {
+        return scriptTable;
     }
 
     public String getLeaderId() {
@@ -88,6 +109,16 @@ public class InstallSnapshotMessage extends MeshRpcMessage {
         out.writeLong(offset);
         LogEntry.writeBytes(out, data);
         out.writeBoolean(done);
+        // P1-4a：脚本表追加于尾部（仅首 chunk 且表非 null 时写；旧版本帧无此段）
+        boolean hasTable = offset == 0 && scriptTable != null;
+        out.writeBoolean(hasTable);
+        if (hasTable) {
+            out.writeInt(scriptTable.size());
+            for (java.util.Map.Entry<String, String> e : scriptTable.entrySet()) {
+                LogEntry.writeUtf8(out, e.getKey() == null ? "" : e.getKey());
+                LogEntry.writeUtf8(out, e.getValue() == null ? "" : e.getValue());
+            }
+        }
     }
 
     /**
@@ -104,8 +135,19 @@ public class InstallSnapshotMessage extends MeshRpcMessage {
             long offset = in.readLong();
             byte[] data = LogEntry.readBytes(in);
             boolean done = in.readBoolean();
+            // P1-4a：脚本表段（旧版本帧无此段，available 守卫向后兼容 → 空表）
+            java.util.Map<String, String> table = null;
+            if (in.available() >= 1 && in.readBoolean()) {
+                int count = in.readInt();
+                table = new java.util.LinkedHashMap<>(Math.max(0, count));
+                for (int i = 0; i < count; i++) {
+                    String sha = LogEntry.readUtf8(in);
+                    String script = LogEntry.readUtf8(in);
+                    table.put(sha, script);
+                }
+            }
             return new InstallSnapshotMessage(term, leaderId, lastIncludedTerm, lastIncludedIndex,
-                    offset, data, done);
+                    offset, data, done, table);
         } catch (Exception e) {
             throw new RuntimeException("InstallSnapshotMessage decode 失败", e);
         }
