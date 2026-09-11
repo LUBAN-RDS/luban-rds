@@ -4,6 +4,8 @@ import com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesResponse;
 import com.janeluo.luban.rds.mesh.rpc.RequestVoteMessage;
 import com.janeluo.luban.rds.mesh.rpc.RequestVoteResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -37,6 +39,8 @@ import java.util.Map;
  * </p>
  */
 public class RaftStateMachine {
+
+    private static final Logger logger = LoggerFactory.getLogger(RaftStateMachine.class);
 
     /**
      * 角色转换结果。携带<strong>纯数据提示</strong>：转换发生 → 调用方据此执行网络/定时器副作用。
@@ -333,6 +337,17 @@ public class RaftStateMachine {
             long idx = entry.getIndex();
             long localTerm = state.getLogTerm(idx);
             if (localTerm >= 0 && localTerm != entry.getTerm()) {
+                // Q1（2026-09-11 审计 P2）：截断边界 < commitIndex = 已提交条目会被删除
+                //（合法 Leader 不应发送与本节点已提交区域冲突的条目），拒绝截断——
+                // 宁可响应失败让 Leader 回退，也不静默丢弃已提交条目。
+                // （truncateAfter(idx-1) 保留 ≤ idx-1：idx-1 ≥ commitIndex 时已提交区域完整）
+                if (idx - 1 < state.commitIndex) {
+                    logger.error("冲突截断点 {} ≤ commitIndex {}，拒绝截断（不变量破坏），index={}",
+                            idx - 1, state.commitIndex, idx);
+                    AppendEntriesResponse resp = new AppendEntriesResponse(state.currentTerm, false,
+                            state.commitIndex);
+                    return new AppendDecision(resp, Transition.none(state.role, state.currentTerm), false);
+                }
                 // 冲突：截断该 index 之后
                 state.truncateAfter(idx - 1);
                 state.appendEntry(entry);
