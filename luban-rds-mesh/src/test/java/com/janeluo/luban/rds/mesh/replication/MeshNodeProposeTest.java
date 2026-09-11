@@ -381,7 +381,8 @@ class MeshNodeProposeTest {
     @Test
     void followerAppliesCommittedEntriesOnLeaderCommitAdvance() throws Exception {
         // Follower 收到带 leaderCommit 的 AppendEntries → apply 到 raw store
-        MeshConfig config = singleNodeConfig();
+        // P1-12b 成员校验（v1.0.25）：AE 来源须在 peers 成员集——把假 Leader 注册为成员
+        MeshConfig config = MeshConfig.builder("solo").addPeer("leaderX", "127.0.0.1:11999").build();
         MeshState state = new MeshState();
         state.currentTerm = 1;
         DefaultMemoryStore rawStore = new DefaultMemoryStore();
