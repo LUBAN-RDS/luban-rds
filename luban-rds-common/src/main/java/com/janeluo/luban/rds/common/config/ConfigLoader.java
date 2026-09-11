@@ -420,6 +420,9 @@ public class ConfigLoader {
                     case "mesh-persist":
                         config.setMeshPersistEnabled("yes".equalsIgnoreCase(value));
                         break;
+                    case "mesh-auth-token":
+                        config.setMeshAuthToken(value);
+                        break;
 
                     default:
                         logger.debug("未知配置项: {} = {}", key, value);

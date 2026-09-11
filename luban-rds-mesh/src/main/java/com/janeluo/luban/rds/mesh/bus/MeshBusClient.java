@@ -13,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -77,7 +78,18 @@ public class MeshBusClient {
     /** nodeId → 建连互斥锁（常驻，避免集群规模小下的 ABA 竞态） */
     private final Map<String, Object> connectLocks = new ConcurrentHashMap<>();
 
+    /**
+     * P1-12a（2026-09-11 审计）：出站握手 token；非空时建连成功即发 BUS_HELLO。
+     * 由 MeshBootstrap 装配（与 busServer 同一 token）；null = 不发送（兼容未启用认证）。
+     */
+    private volatile String authToken;
+
     private volatile boolean closed;
+
+    /** 设置出站握手 token（空 = 关闭）；与 busServer 配置同值。 */
+    public void setAuthToken(String authToken) {
+        this.authToken = (authToken == null || authToken.isEmpty()) ? null : authToken;
+    }
 
     public MeshBusClient(String selfNodeId, MeshBusHandler handler) {
         this.selfNodeId = selfNodeId;
@@ -178,6 +190,18 @@ public class MeshBusClient {
             future.addListener((ChannelFuture f) -> {
                 if (f.isSuccess()) {
                     Channel ch = f.channel();
+                    // P1-12a：token 已配置时先发握手帧（对端认证失败会关连接触发重连路径）
+                    String token = this.authToken;
+                    if (token != null) {
+                        MeshFrame hello = new MeshFrame(selfNodeId,
+                                MessageType.BUS_HELLO.getCode(), token.getBytes(StandardCharsets.UTF_8));
+                        ch.writeAndFlush(hello).addListener(w -> {
+                            if (!w.isSuccess()) {
+                                logger.warn("握手帧发送失败，关闭连接: {}", nodeId, w.cause());
+                                ch.close();
+                            }
+                        });
+                    }
                     nodeChannels.put(nodeId, ch);
                     reconnectAttempts.remove(nodeId);
                     disconnectSince.remove(nodeId);

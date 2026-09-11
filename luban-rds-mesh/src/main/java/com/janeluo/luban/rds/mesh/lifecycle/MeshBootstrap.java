@@ -113,6 +113,12 @@ public class MeshBootstrap {
         int busPort = config.getMeshBusPort() > 0
                 ? config.getMeshBusPort() : topo.selfBusPort;
         MeshBusServer busServer = new MeshBusServer(topo.selfNodeId, busPort, busHandler);
+        // P1-12a：总线握手认证 token（空 = 关闭，兼容滚动升级；先全网升级再统一配置）
+        if (config.getMeshAuthToken() != null && !config.getMeshAuthToken().isEmpty()) {
+            busServer.setAuthToken(config.getMeshAuthToken());
+            busClient.setAuthToken(config.getMeshAuthToken());
+            logger.info("mesh 总线握手认证已启用（mesh-auth-token）");
+        }
 
         // 3. raft-nodes.conf 读写器 + RDB 加载服务（dump.rdb 衔接用）
         String dbDir = config.getDir();

@@ -4,7 +4,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Mesh 总线消息类型枚举（0x60-0x64）。
+ * Mesh 总线消息类型枚举（0x60-0x65）。
  * <p>
  * 与 cluster 模块（{@code GossipMessageType}，0x40 起）的码段不冲突；
  * 对应 Raft 的 5 类 RPC（见 DESIGN.md §4.1）。
@@ -15,6 +15,8 @@ import java.util.Map;
  *   <li>{@link #REQUEST_VOTE}        0x62 Candidate → All：选举投票请求</li>
  *   <li>{@link #REQUEST_VOTE_RESP}   0x63 All → Candidate：投票结果</li>
  *   <li>{@link #INSTALL_SNAPSHOT}    0x64 Leader → Follower：快照传输</li>
+ *   <li>{@link #BUS_HELLO}           0x65 Client → Server：连接握手认证（P1-12，
+ *       body=mesh-auth-token UTF-8 字节，senderNodeId=发起方 nodeId；token 未配置时不发送）</li>
  * </ul>
  */
 public enum MessageType {
@@ -23,7 +25,8 @@ public enum MessageType {
     APPEND_ENTRIES_RESP((byte) 0x61),
     REQUEST_VOTE((byte) 0x62),
     REQUEST_VOTE_RESP((byte) 0x63),
-    INSTALL_SNAPSHOT((byte) 0x64);
+    INSTALL_SNAPSHOT((byte) 0x64),
+    BUS_HELLO((byte) 0x65);
 
     private final byte code;
 

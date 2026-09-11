@@ -325,6 +325,14 @@ public class RdsConfig {
     private int meshServicePort = 0;
 
     /**
+     * P1-12a（2026-09-11 审计）：mesh 总线握手认证 token（{@code mesh-auth-token}）。
+     * <p>空（默认）= 认证关闭，完全兼容旧行为；配置后所有总线连接须先发携带同值 token 的
+     * HELLO 帧方可通信。滚动升级顺序：先全网升级，再统一配置。</p>
+     */
+    private String meshAuthToken = "";
+
+
+    /**
      * mesh 总线端口（节点间 Raft RPC）；未配置时按 peers 列表中本节点条目取。
      */
     private int meshBusPort = 0;
@@ -929,6 +937,14 @@ public class RdsConfig {
 
     public void setMeshServicePort(int meshServicePort) {
         this.meshServicePort = meshServicePort;
+    }
+
+    public String getMeshAuthToken() {
+        return meshAuthToken;
+    }
+
+    public void setMeshAuthToken(String meshAuthToken) {
+        this.meshAuthToken = meshAuthToken != null ? meshAuthToken : "";
     }
 
     public int getMeshBusPort() {
