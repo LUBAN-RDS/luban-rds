@@ -116,6 +116,11 @@ public class LogApplier {
             return "-ERR nil log entry\r\n";
         }
 
+        // P1-3（2026-09-11 mesh 审计）：no-op 条目（新 Leader 间接提交锚点）——跳过命令执行
+        if (entry.isNoOp()) {
+            return "+OK\r\n";
+        }
+
         // 阶段 9：MULTI/EXEC 整事务单条 LogEntry（extra != null）→ 事务分支
         if (entry.getExtra() != null) {
             return applyTransaction(entry);

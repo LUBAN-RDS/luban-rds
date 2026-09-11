@@ -575,6 +575,14 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 MonitorManager.getInstance().submit(currentDatabase, ctx.channel().remoteAddress().toString(), commandName, args);
             }
 
+            // P0-1（2026-09-11 mesh 审计）：mesh 模式禁用事务。EXEC 曾在下方前置分支被本地截走执行，
+            // 事务写只落单节点不经 Raft（三节点发散，切主即丢整批事务数据）。事务 Raft 化
+            // （extra/TransactionPayload）是审计路线图第四组长期项；生产无事务使用，先以显式 -ERR 止血。
+            if (meshEnabled && isMeshDisabledTransactionCommand(commandName)) {
+                writeSimpleError(ctx, "-ERR Transactions are not supported in mesh mode\r\n");
+                return;
+            }
+
             if ("WATCH".equals(commandName)) {
                 logger.debug("Handling WATCH command");
                 handleWatchCommand(ctx, clientInfo, currentDatabase, args);
@@ -895,6 +903,15 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     return;
                 }
                 if (MeshWriteGate.isWriteCommand(commandName)) {
+                    // 路线图#12（2026-09-11 mesh 审计）：只读 EVAL/EVALSHA 本地读。
+                    // 生产写放大源头——门户每请求 2 条 EVAL（1 条纯读 PTTL）恒判写全进 Raft。
+                    // 判定复用 cluster 从节点先例（resolveScriptBody + LuaScriptAnalyzer，
+                    // 取不到脚本保守判写）；follower 上只读脚本仍走 read() 抛 MOVED（P1-7 不动）。
+                    if (isReadOnlyEvalCommand(commandName, args)) {
+                        byte[] resp = meshWriteGate.read(currentDatabase, args);
+                        ctx.writeAndFlush(Unpooled.wrappedBuffer(resp));
+                        return;
+                    }
                     // 写命令：走 Raft propose（阻塞至 commit+apply），返回 apply 产生的响应字节。
                     // 事务 EXEC 已在前置分支处理；此处 rawRespFrame 为单条写命令帧。
                     // gate.write 内部抛 MovedToLeaderException → 下方专用 catch 生成 MOVED/MESHDOWN。
@@ -1004,6 +1021,19 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             } else if (errorBuffer != null) {
                 errorBuffer.release();
             }
+        } catch (com.janeluo.luban.rds.mesh.client.LeaseInvalidException e) {
+            // P1-8（2026-09-11 mesh 审计）：租约失效等待超时/read-index 确认失败此前落通用 catch
+            // 变 -ERR——Redisson 对 ERR 不重试，租约抖动直接变业务失败。转 -TRYAGAIN 自动退避重试
+            //（与 8/7 的 ERR→TRYAGAIN 同类修复，当时漏了此异常）。
+            logger.warn("mesh read lease invalid, client should retry: {}", e.getMessage());
+            Object errorResponse = "TRYAGAIN " + (e.getMessage() != null
+                    ? e.getMessage() : "mesh leader lease expired");
+            ByteBuf errorBuffer = protocolParser.serialize(errorResponse);
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
+            }
         } catch (Exception e) {
             logger.error("Error handling command", e);
             Object errorResponse = "ERR Error handling command";
@@ -1017,6 +1047,48 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     }
 
     // ==================== 阶段 12：mesh 辅助方法 ====================
+
+    /** mesh 模式禁用的事务命令判定（P0-1，2026-09-11 mesh 审计）。 */
+    private static boolean isMeshDisabledTransactionCommand(String commandName) {        if (commandName == null || commandName.isEmpty()) {
+            return false;
+        }
+        switch (commandName.trim().toUpperCase()) {
+            case "MULTI":
+            case "EXEC":
+            case "DISCARD":
+            case "WATCH":
+            case "UNWATCH":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** 直写一行简单错误响应（P0-1 等 mesh 禁用路径复用，统一 errorBuffer 释放惯例）。 */
+    private void writeSimpleError(ChannelHandlerContext ctx, String error) {
+        ByteBuf errorBuffer = protocolParser.serialize(error);
+        if (errorBuffer != null && errorBuffer.isReadable()) {
+            ctx.writeAndFlush(errorBuffer);
+        } else if (errorBuffer != null) {
+            errorBuffer.release();
+        }
+    }
+
+    /**
+     * mesh 模式下 EVAL/EVALSHA 是否判只读（本地读，路线图#12 / 2026-09-11 mesh 审计）。
+     * <p>
+     * 脚本不可解析 / EVALSHA 未命中脚本缓存时保守返回 false（走 Raft——宁多复制不漏复制，
+     * 与 {@link #isWriteCommandOnSlave} 的保守取向一致）。
+     * </p>
+     */
+    private boolean isReadOnlyEvalCommand(String commandName, String[] args) {
+        String cmdUpper = commandName != null ? commandName.toUpperCase() : "";
+        if (!"EVAL".equals(cmdUpper) && !"EVALSHA".equals(cmdUpper)) {
+            return false;
+        }
+        String script = commandHandler.resolveScriptBody(cmdUpper, args);
+        return script != null && LuaScriptAnalyzer.isReadOnlyScript(script);
+    }
 
     /**
      * 判定命令是否应走 mesh gate（写 propose / 读租约校验）。大小写不敏感。

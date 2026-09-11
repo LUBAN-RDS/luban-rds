@@ -218,7 +218,7 @@ public class RaftStateMachine {
         // (1) term < currentTerm → 直接拒
         if (msg.getTerm() < currentTerm) {
             return new VoteDecision(
-                    new RequestVoteResponse(currentTerm, false), t, false);
+                    new RequestVoteResponse(currentTerm, false, msg.isPreVote(), currentTerm), t, false);
         }
 
         // (2) term > currentTerm → 降级 follower
@@ -251,7 +251,7 @@ public class RaftStateMachine {
         boolean resetElectionTimer = (msg.getTerm() >= currentTerm) && candidateUpToDate;
 
         return new VoteDecision(
-                new RequestVoteResponse(currentTerm, grant), t, resetElectionTimer);
+                new RequestVoteResponse(currentTerm, grant, msg.isPreVote(), currentTerm), t, resetElectionTimer);
     }
 
     /**
@@ -278,21 +278,21 @@ public class RaftStateMachine {
      *   <li>prevLogIndex &gt; 0 时校验 prevLogIndex 处任期 == prevLogTerm；不一致 → 拒（让 Leader 回退）</li>
      *   <li>对 entries：若本地已有同 index 但 term 不同 → 截断该 index 之后；追加新条目</li>
      *   <li>推进 commitIndex = min(leaderCommit, lastLogIndex)</li>
-     *   <li>调 persistHook（落盘占位，阶段 11 实现 fsync）——由调用方在持久化完成后才组装 success=true 响应</li>
      *   <li>返回 success=true, matchIndex=最后一条 entry 的 index（或 prevLogIndex）</li>
      * </ol>
      * </p>
      * <p>
-     * <b>持久化时序</b>：本方法在追加日志后调用 {@code persistHook.run()}（阶段 3 为空实现），
-     * 调用方应确保落盘完成后才发响应（DESIGN 决策 18）。阶段 3 persistHook 占位为 no-op。
+     * <b>持久化时序（P0-7，2026-09-11 mesh 审计）</b>：本方法只做内存追加/截断/commit 推进，
+     * 不再内联 fsync——WAL 落盘由调用方（MeshNode.handleAppendEntries）异步提交到
+     * persistExecutor（与 Leader propose 路径对称）。ACK 反映内存追加；follower 崩溃丢失
+     * 未 fsync 条目时由 Leader 重发兜底（commit 门控 = Leader durableIndex + 多数派 ACK）。
      * </p>
      *
      * @param state         节点状态
      * @param msg           AppendEntries 请求
-     * @param persistHook   落盘钩子（追加后、返回 success 前调用；阶段 3 可传 null/空 Runnable）
      * @return [response, transition]
      */
-    public AppendDecision decideAppendEntries(MeshState state, AppendEntriesMessage msg, Runnable persistHook) {
+    public AppendDecision decideAppendEntries(MeshState state, AppendEntriesMessage msg) {
         long currentTerm = state.currentTerm;
 
         // (1) term < currentTerm → 拒
@@ -345,16 +345,7 @@ public class RaftStateMachine {
             lastNewIndex = idx;
         }
 
-        // (6) 落盘（阶段 3 占位）
-        if (persistHook != null) {
-            try {
-                persistHook.run();
-            } catch (Exception e) {
-                // 落盘失败 → 视为不接受（success=false）。阶段 3 persistHook 为 no-op 不会到这。
-                AppendEntriesResponse resp = new AppendEntriesResponse(state.currentTerm, false, prevLogIndex);
-                return new AppendDecision(resp, t, true);
-            }
-        }
+        // (6) P0-7：WAL 落盘由调用方异步提交 persistExecutor（本方法只做内存操作）
 
         // (7) 推进 commitIndex
         long leaderCommit = msg.getLeaderCommit();

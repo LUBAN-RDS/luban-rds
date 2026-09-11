@@ -84,10 +84,18 @@ public class MeshNode {
 
     /** 投票收集超时：2× 选举超时上限（D3，9/3 事故）。响应永不到达时的兜底收尾窗口。 */
     private static final long VOTE_COLLECT_TIMEOUT_MS = 2L * ElectionTimer.DEFAULT_MAX_MS;
-    /** ElectionTimer 与心跳定时器复用的调度器（可与 raftExecutor 同一个）。 */
+    /** ElectionTimer 使用的调度器（raftExecutor 单线程：定时器回调是重状态变更，必须与 AE 处理串行）。 */
     private final ScheduledExecutorService scheduler;
-    /** 落盘专用单线程调度器（与 raftExecutor 解耦：fsync 不得阻塞心跳/RPC 处理）。 */
-    private final ScheduledExecutorService persistExecutor;
+    /**
+     * P0-6（2026-09-11 mesh 审计）：心跳发送/轻量周期任务专用单线程——与 raftExecutor 解耦。
+     * 写积压（apply 挤占 raft 队列 ~200ms）曾延迟心跳 tick 致最敏感 follower PreVote 推翻
+     * 健康 Leader（8/6 选举风暴同构根因）。心跳 tick 在此线程只做帧构建+发送，
+     * 不做 commit 推进/apply/续租（raft 线程职责）。
+     */
+    private final ScheduledExecutorService timerExecutor;
+    /** 落盘专用单线程调度器（与 raftExecutor 解耦：fsync 不得阻塞心跳/RPC 处理）。
+     *  P1-16：具体类型 ScheduledThreadPoolExecutor——暴露 getQueue() 供积压采样。 */
+    private final java.util.concurrent.ScheduledThreadPoolExecutor persistExecutor;
     /** 本节点已落盘的最大日志 index（仅 raft 线程读写；volatile 仅为可见性兜底）。 */
     private volatile long durableIndex;
 
@@ -127,6 +135,26 @@ public class MeshNode {
      * 可为 null（未注入时收到 INSTALL_SNAPSHOT 静默忽略，保持向后兼容）。
      */
     private volatile SnapshotManager snapshotManager;
+
+    /**
+     * P0-8（2026-09-11 mesh 审计）：周期快照检查间隔（ms）。
+     * takePeriodicSnapshotIfNeeded 此前零生产调用 → WAL/内存 log 无界增长、写路径成本随
+     * 运行时长线性上升。timer 线程只投递，快照本体在 raft 线程执行（与 apply 串行保证
+     * dump 一致性，P0-6 后心跳独立不受快照停顿影响）。
+     */
+    static final long SNAPSHOT_CHECK_INTERVAL_MS = 30_000L;
+    /** 周期快照检查任务；setSnapshotManager 晚于 start 时由兜底注册（幂等）。 */
+    private volatile ScheduledFuture<?> snapshotCheckTask;
+
+    /**
+     * P1-16（2026-09-11 mesh 审计）：持久化积压告警阈值（队列深度）。
+     * 不设硬拒绝——丢弃或 CallerRuns 回灌持久化任务都会破坏正确性（回灌 raft 线程 = 复现 P0-6）。
+     * 正确响应是告警 + 排查磁盘瓶颈。
+     */
+    static final int PERSIST_BACKLOG_WARN_THRESHOLD = 1_000;
+    /** 积压告警累计次数（测试可观测）。 */
+    private final java.util.concurrent.atomic.AtomicLong persistBacklogWarnCount =
+            new java.util.concurrent.atomic.AtomicLong();
 
     /** 一条在途 propose：完成句柄 + 请求 key（领导丢失时生成 MOVED 用）。 */
     private static final class PendingProposal {
@@ -188,8 +216,15 @@ public class MeshNode {
             return t;
         });
         this.scheduler = this.raftExecutor;
-        // 落盘线程独立于 raft 线程：写高峰 fsync 不再停摆心跳（选举风暴根因修复）
-        this.persistExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        // P0-6：心跳发送独立线程——apply 积压不再延迟心跳帧（ElectionTimer 留 raft 线程串行）
+        this.timerExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "mesh-timer-" + abbrev(nodeId));
+            t.setDaemon(true);
+            return t;
+        });
+        // 落盘线程独立于 raft 线程：写高峰 fsync 不再停摆心跳（选举风暴根因修复）。
+        // P1-16：直接构造 ScheduledThreadPoolExecutor（暴露 getQueue 供积压采样）。
+        this.persistExecutor = new java.util.concurrent.ScheduledThreadPoolExecutor(1, r -> {
             Thread t = new Thread(r, "mesh-persist-" + abbrev(nodeId));
             t.setDaemon(true);
             return t;
@@ -236,6 +271,10 @@ public class MeshNode {
         started = true;
         logger.info("MeshNode 启动: nodeId={}, term={}, role={}", abbrev(nodeId), state.currentTerm, state.role);
         electionTimer.start();
+        startSnapshotCheck();
+        // P1-16：persistExecutor 积压周期采样（timer 线程，10s）
+        timerExecutor.scheduleAtFixedRate(this::samplePersistBacklog,
+                10_000L, 10_000L, TimeUnit.MILLISECONDS);
     }
 
     public synchronized void stop() {
@@ -245,8 +284,14 @@ public class MeshNode {
         stopped = true;
         electionTimer.stop();
         stopHeartbeat();
+        ScheduledFuture<?> sc = snapshotCheckTask;
+        if (sc != null) {
+            sc.cancel(false);
+            snapshotCheckTask = null;
+        }
         lease.invalidate();
         raftExecutor.shutdownNow();
+        timerExecutor.shutdownNow();
         persistExecutor.shutdownNow();
         // 在途 propose 未完成时 stop：必须以异常 complete，否则 gate 层 get() 永久悬挂
         failAllPendingOnStop();
@@ -364,6 +409,62 @@ public class MeshNode {
         if (replicator != null) {
             replicator.setSnapshotManager(snapshotManager);
         }
+        // P0-8：注入晚于 start 时兜底注册周期快照检查（幂等）
+        if (started) {
+            startSnapshotCheck();
+        }
+    }
+
+    /**
+     * P1-16：persistExecutor 队列积压采样——深度超阈值时 WARN（附 durableIndex 与日志末尾的
+     * 滞后量）。积压的正确响应是告警 + 找磁盘瓶颈，不是拒绝任务。
+     */
+    private void samplePersistBacklog() {
+        if (persistExecutor.isShutdown()) {
+            return;
+        }
+        int depth = persistExecutor.getQueue().size();
+        if (depth > PERSIST_BACKLOG_WARN_THRESHOLD) {
+            persistBacklogWarnCount.incrementAndGet();
+            logger.warn("persistExecutor 积压告警: queueDepth={}, durableIndex={}, lastLogIndex={}"
+                            + "（fsync 慢于写速率，commit/apply 将滞后——检查磁盘）",
+                    depth, durableIndex, state.getLastLogIndex());
+        }
+    }
+
+    /** P1-16：手动触发一次积压采样（测试钩子，与 timer 周期采样同体）。 */
+    void runPersistBacklogSampleForTest() {
+        samplePersistBacklog();
+    }
+
+    /**
+     * P0-8：注册周期快照检查（timer 线程投递 → raft 线程执行快照本体）。
+     * 幂等：已注册或未注入 SnapshotManager 时跳过。
+     */
+    private void startSnapshotCheck() {
+        if (snapshotCheckTask != null || snapshotManager == null) {
+            return;
+        }
+        snapshotCheckTask = timerExecutor.scheduleAtFixedRate(() -> {
+            if (stopped || snapshotManager == null) {
+                return;
+            }
+            runSnapshotCheckOnce();
+        }, SNAPSHOT_CHECK_INTERVAL_MS, SNAPSHOT_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * P0-8：执行一次周期快照检查——把 takePeriodicSnapshotIfNeeded 投递到 raft 线程
+     * （快照创建必须与 apply 串行保证 dump 一致性）。包级可见供测试直驱。
+     */
+    void runSnapshotCheckOnce() {
+        submitToRaft(() -> {
+            try {
+                snapshotManager.takePeriodicSnapshotIfNeeded();
+            } catch (Exception e) {
+                logger.error("周期快照执行异常", e);
+            }
+        });
     }
 
     /** 取快照管理器（测试用，可能为 null）。 */
@@ -761,8 +862,7 @@ public class MeshNode {
     }
 
     /** 赢得正式选举 → becomeLeader。 */
-    private void onWinElection() {
-        if (stopped) {
+    private void onWinElection() {        if (stopped) {
             return;
         }
         Transition t = stateMachine.becomeLeader(state, nodeId, config.getPeerNodeIds());
@@ -776,6 +876,11 @@ public class MeshNode {
         }
         logger.info("转为 LEADER: term={}，nextIndex={}", t.newTerm, nextIndex);
 
+        // P1-3（2026-09-11 mesh 审计）：新 Leader 追加当前任期 no-op（标准做法）——
+        // §5.4.2 只直接提交 currentTerm 条目，无 no-op 时重启遗留的旧 term 未确认条目
+        // 在无新写入场景下永远无法间接提交（与 P0-2 的 commitIndex 收敛配套）。
+        appendNoOpEntry();
+
         // 启动心跳 + 首轮空 AppendEntries（建立权威 + 续租）
         startHeartbeat();
         broadcastHeartbeat();
@@ -783,6 +888,35 @@ public class MeshNode {
         electionTimer.onElectionSucceeded();
         // 阶段 12：通知角色监听器（Leader 变更）
         notifyRoleListener();
+    }
+
+    /**
+     * P1-3：追加当前任期 no-op 条目（新 Leader 间接提交锚点）。
+     * <p>
+     * 不注册 pendingProposals（无客户端 future）；走既有异步落盘 + 复制路径
+     * （落盘成功后 onPersistSucceeded 推进 durableIndex 并重触发 commit——
+     * no-op 的 currentTerm 使 §5.4.2 Fig-8 检查通过，旧 term tail 随之间接提交）。
+     * 仅在启用 replicator/applier 的节点生效（阶段 3 无复制能力的测试节点跳过）。
+     * </p>
+     */
+    private void appendNoOpEntry() {
+        if (replicator == null) {
+            return;
+        }
+        long index = state.getLastLogIndex() + 1;
+        LogEntry noop = new LogEntry(state.currentTerm, index, new byte[0], 0, LogEntry.NO_OP_EXTRA);
+        state.appendEntry(noop);
+        logger.info("新 Leader 追加 no-op 条目: term={}, index={}", state.currentTerm, index);
+        final long persistIndex = index;
+        persistExecutor.execute(() -> {
+            try {
+                persistHook.run();
+                submitToRaft(() -> onPersistSucceeded(persistIndex));
+            } catch (Exception e) {
+                logger.error("no-op 条目落盘失败: index={}", persistIndex, e);
+            }
+        });
+        replicator.replicate(noop, true);
     }
 
     private void cancelCurrentCollector() {
@@ -795,21 +929,43 @@ public class MeshNode {
 
     // ==================== 心跳（Leader 侧）====================
 
-    /** 启动周期心跳（每 heartbeatIntervalMs 广播空 AppendEntries）。 */
+    /** 启动周期心跳（每 heartbeatIntervalMs 广播 AppendEntries）。P0-6：挂独立 timerExecutor。 */
     private void startHeartbeat() {
         stopHeartbeat();
         long interval = config.getHeartbeatIntervalMs();
-        heartbeatTask = scheduler.scheduleAtFixedRate(() -> {
+        heartbeatTask = timerExecutor.scheduleAtFixedRate(() -> {
             try {
-                if (state.role == MeshRole.LEADER) {
-                    broadcastHeartbeat();
-                } else {
+                if (state.role != MeshRole.LEADER) {
                     // 已非 Leader：定时器自身会因 stopHeartbeat 而停，防御性忽略
+                    return;
                 }
+                if (config.getOtherNodeIds().isEmpty()) {
+                    // 单节点集群：commit/apply/续租是 raft 线程职责，投递回去串行执行
+                    submitToRaft(MeshNode.this::singleNodeHeartbeatTick);
+                    return;
+                }
+                // P0-6：心跳帧构建+发送在 timer 线程完成（读取线程安全访问器：
+                // volatile 标量 + MeshState 读锁 + ConcurrentHashMap），raft 线程积压不影响发送
+                replicator.sendHeartbeatFrames();
             } catch (Exception e) {
                 logger.error("心跳广播异常", e);
             }
         }, interval, interval, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 单节点集群心跳 tick（raft 线程执行）：commit 自检 + apply + 续租
+     * （原 replicate() 的单节点分支——多节点时这些由 AE 响应处理路径驱动）。
+     */
+    private void singleNodeHeartbeatTick() {
+        if (state.role != MeshRole.LEADER || replicator == null) {
+            return;
+        }
+        boolean advanced = replicator.maybeAdvanceCommitIndex();
+        if (advanced) {
+            replicator.applyCommittedEntries();
+        }
+        lease.refreshOnMajorityAck(System.currentTimeMillis());
     }
 
     private void stopHeartbeat() {
@@ -908,7 +1064,24 @@ public class MeshNode {
             case INSTALL_SNAPSHOT:
                 // 阶段 10：chunked INSTALL_SNAPSHOT（DESIGN §5.4）
                 if (snapshotManager != null) {
-                    snapshotManager.handleInstallSnapshot(fromNodeId, (InstallSnapshotMessage) msg);
+                    InstallSnapshotMessage snap = (InstallSnapshotMessage) msg;
+                    // P0-4（2026-09-11 mesh 审计）：高 term 快照的任期抬升必须走 becomeFollower
+                    // 完整转换（停心跳/失效租约/取消收集器/落盘/复位定时器）。此前
+                    // SnapshotManager 直接改 currentTerm/votedFor/leaderId 而不降级——
+                    // 自认 Leader 的旧节点收快照后以新 term 双主；term/votedFor 也不落盘。
+                    if (snap.getTerm() > state.currentTerm) {
+                        Transition t = stateMachine.becomeFollower(state, snap.getTerm(), snap.getLeaderId());
+                        applyFollowerSideEffects(t);
+                        persistStateSafe("installSnapshot-term-up");
+                        electionTimer.onElectionSucceeded();
+                        electionTimer.reset();
+                    } else if (snap.getTerm() >= state.currentTerm) {
+                        // P0-4 延伸：每个通过任期校验的合法 chunk 复位选举定时器——
+                        // 数百 MB 快照传输数秒内不因超时发起 PreVote 打断传输
+                        electionTimer.onElectionSucceeded();
+                        electionTimer.reset();
+                    }
+                    snapshotManager.handleInstallSnapshot(fromNodeId, snap);
                 } else {
                     logger.debug("INSTALL_SNAPSHOT 收到但 SnapshotManager 未注入，暂忽略");
                 }
@@ -934,12 +1107,28 @@ public class MeshNode {
         // RequestVote 不是 Leader 存在的证据；双孤 follower 互相探测会互踩定时器并架空
         // 选举退避（9/3 事故 22 秒无 Leader 僵局的放大器）。对齐 Raft §9.6 / etcd：
         // 只有合法 AppendEntries（Leader 心跳）才 reset 接收方选举定时器——见 handleAppendEntries。
-        // 阶段 11：正式投票（非 PreVote）且 granted → votedFor 已设置 → 持久化
-        // （fsync 在回复投票前完成，保证崩溃恢复后不会同任期二次投票）
+        // 阶段 11 + P1-1（2026-09-11 mesh 审计）：正式投票授予 fail-stop——
+        // votedFor 先持久化，成功才发 granted，失败改发 denied。此前 persistStateSafe 吞异常后
+        // 照发 granted：内存已投票、磁盘未写，崩溃恢复后同 term 二次投票 → 双 Leader。
+        // 异步化到 persistExecutor 同时消除 raft 线程投票路径的同步 fsync（P0-6 放大器）。
         if (!msg.isPreVote() && decision.response.isVoteGranted()) {
-            persistStateSafe("decideRequestVote-grant");
+            final RequestVoteResponse granted = decision.response;
+            final RequestVoteResponse denied = new RequestVoteResponse(
+                    granted.getTerm(), false, granted.isPreVote(), granted.getElectionTerm());
+            final String voter = fromNodeId;
+            persistExecutor.execute(() -> {
+                try {
+                    persistHook.run();
+                    sendResponse(voter, MessageType.REQUEST_VOTE_RESP, granted);
+                } catch (Exception e) {
+                    logger.error("votedFor 持久化失败，拒绝授予投票: term={}, candidate={}",
+                            granted.getTerm(), abbrev(voter), e);
+                    sendResponse(voter, MessageType.REQUEST_VOTE_RESP, denied);
+                }
+            });
+            return;
         }
-        // 回复投票结果
+        // PreVote / 拒绝票：无需持久化，立即回复
         sendResponse(fromNodeId, MessageType.REQUEST_VOTE_RESP, decision.response);
         logger.debug("回复 RequestVote: from={}, granted={}, preVote={}",
                 abbrev(fromNodeId), decision.response.isVoteGranted(), msg.isPreVote());
@@ -962,6 +1151,19 @@ public class MeshNode {
             // 无进行中的选举，丢弃（可能是过期响应）
             return;
         }
+        // P0-3（2026-09-11 mesh 审计）：三重轮次校验——term 相等 + 阶段匹配 + 选举轮次相等。
+        // PreVote(term N) 的迟到票不得计入正式选举(term N+1)——此前只按 fromNodeId 去重，
+        // 幽灵票凑多数派可选出无真实多数派的 Leader（同 term 双主）；旧版本帧
+        // electionTerm=0 同样被丢弃（滚动升级窗口保守安全）。
+        if (resp.getTerm() != state.currentTerm
+                || resp.isPreVote() != c.isPreVote()
+                || resp.getElectionTerm() != state.currentTerm) {
+            logger.debug("丢弃轮次不匹配的投票响应: from={}, respTerm={}, respPreVote={}, respElectionTerm={}, "
+                            + "currentTerm={}, stagePreVote={}",
+                    abbrev(fromNodeId), resp.getTerm(), resp.isPreVote(), resp.getElectionTerm(),
+                    state.currentTerm, c.isPreVote());
+            return;
+        }
         // PreVote 响应与正式响应走同一个 collector（currentVoteCollector 指向当前阶段）
         c.onVoteReceived(fromNodeId, resp, state.currentTerm);
     }
@@ -971,7 +1173,7 @@ public class MeshNode {
     void handleAppendEntries(String fromNodeId, AppendEntriesMessage msg) {
         long commitBefore = state.commitIndex;
         long appliedBefore = state.lastApplied;
-        AppendDecision decision = stateMachine.decideAppendEntries(state, msg, persistHook);
+        AppendDecision decision = stateMachine.decideAppendEntries(state, msg);
         if (decision.transition.kind == Transition.Kind.TO_FOLLOWER) {
             applyFollowerSideEffects(decision.transition);
             // 阶段 11：若 term 自增导致降级 → 持久化（追加的 fsync 已由 decideAppendEntries 内
@@ -1006,6 +1208,22 @@ public class MeshNode {
         // 心跳响应每 100ms 一次，trace 级别（帧级噪声，与 MeshBusCodec 一致）
         logger.trace("回复 AppendEntries: from={}, success={}, match={}",
                 abbrev(fromNodeId), decision.response.isSuccess(), decision.response.getMatchIndex());
+
+        // P0-7（2026-09-11 mesh 审计）：WAL 落盘挪 persistExecutor（与 Leader propose 路径对称）——
+        // follower 不再在 raft 线程同步 fsync（磁盘抖动曾直接阻塞心跳应答与选举定时器）。
+        // 内存追加成功即 ACK；持久化失败仅 ERROR（不回滚内存日志：WAL 落后由 Leader 重发兜底，
+        // 与 onPersistFailed 的 follower 早退语义一致）。
+        if (!msg.getEntries().isEmpty()) {
+            final long persistIndex = state.getLastLogIndex();
+            persistExecutor.execute(() -> {
+                try {
+                    persistHook.run();
+                    submitToRaft(() -> onPersistSucceeded(persistIndex));
+                } catch (Exception e) {
+                    logger.error("follower AppendEntries 落盘失败: lastIndex={}", persistIndex, e);
+                }
+            });
+        }
     }
 
     // ==================== AppendEntries 响应处理（Leader 侧）====================
@@ -1018,6 +1236,13 @@ public class MeshNode {
             // 阶段 11：term 自增 → 持久化（fsync 在确认路径）
             persistStateSafe("handleAppendEntriesResponse-term-up");
             electionTimer.reset();
+            return;
+        }
+        // P1-2（2026-09-11 mesh 审计）：旧任期迟到响应直接丢弃——旧 term 的 success 曾推高
+        // matchIndex/nextIndex 并刷新租约（租约虚高旧数据可读窗口 + 复制跳段靠后续 NACK 自愈）
+        if (resp.getTerm() != state.currentTerm) {
+            logger.debug("丢弃过期 AppendEntries 响应: from={}, respTerm={}, currentTerm={}",
+                    abbrev(fromNodeId), resp.getTerm(), state.currentTerm);
             return;
         }
         if (state.role != MeshRole.LEADER) {

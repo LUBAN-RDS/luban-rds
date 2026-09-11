@@ -103,6 +103,43 @@ class MeshStartupLoaderTest {
 
     // ==================== 场景 2：正常恢复（dump.rdb 衔接 + logTail 重放）====================
 
+    /**
+     * P0-2（2026-09-11 mesh 审计）：WAL 落盘 ≠ Raft 已提交。重放 tail 后 commitIndex
+     * 必须保持 lastIncludedIndex——否则旧 Leader 崩溃前落盘但未复制完成的条目（永远不可能
+     * 获多数派）被标为已提交，赢选举后经 leaderCommit 直推污染全集群（幽灵提交）。
+     */
+    @Test
+    void load_replayTail_doesNotAdvanceCommitIndex_uncommittedEntriesStayUncommitted() throws IOException {
+        // dump.rdb 对应 lastIncludedIndex=10，logTail 含 3 条未提交条目（index 11/12/13）
+        DefaultMemoryStore snapStore = new DefaultMemoryStore();
+        snapStore.set(0, "k1", "v1");
+        generateDumpRdb(snapStore);
+        persister.saveDumpRdbIndex(10L);
+
+        MeshState state = new MeshState();
+        state.currentTerm = 5L;
+        state.lastIncludedIndex = 10L;
+        state.lastIncludedTerm = 4L;
+        byte[] setFrame = respFrame("SET", "k2", "v2");
+        state.appendEntry(new LogEntry(5L, 11L, setFrame, 0, null));
+        state.appendEntry(new LogEntry(5L, 12L, setFrame, 0, null));
+        state.appendEntry(new LogEntry(5L, 13L, setFrame, 0, null));
+        persister.save(state, NODE_ID);
+
+        DefaultMemoryStore rawStore = new DefaultMemoryStore();
+        LogApplier applier = new LogApplier(new DefaultCommandHandler(), rawStore);
+        MeshStartupLoader loader = new MeshStartupLoader(
+                persister, persistService, applier, rawStore, DATA_DIR);
+
+        MeshStartupLoader.StartupResult result = loader.load(NODE_ID);
+
+        assertTrue(result.isTrusted);
+        assertEquals(3L, result.replayedCount, "3 条 tail 全部重放（可用性：重启后即可服务）");
+        assertEquals(13L, result.state.lastApplied, "lastApplied 推进到 tail 末条");
+        assertEquals(10L, result.state.commitIndex,
+                "P0-2：commitIndex 保持 lastIncludedIndex，由 Leader 的 leaderCommit 收敛");
+    }
+
     @Test
     void load_normalRecovery_dumpRdbAndLogTail_stateCorrect() throws IOException {
         // 1. 生成 dump.rdb（含 k1=v1），对应 lastIncludedIndex=10
@@ -136,7 +173,7 @@ class MeshStartupLoaderTest {
         assertTrue(result.isTrusted, "dump.rdb 索引匹配 lastIncludedIndex → 可信");
         assertEquals(1L, result.replayedCount, "logTail 1 条应被重放");
         assertEquals(11L, result.state.lastApplied, "lastApplied 推进到 11");
-        assertEquals(11L, result.state.commitIndex, "commitIndex 推进到 11");
+        assertEquals(10L, result.state.commitIndex, "P0-2：commitIndex 保持 lastIncludedIndex=10");
 
         // 快照载入：k1=v1（来自 dump.rdb）
         assertEquals("v1", rawStore.get(0, "k1"), "dump.rdb 载入应恢复 k1=v1");

@@ -199,8 +199,8 @@ class MeshNodeProposeTest {
             // raw store 被 apply 写入
             assertEquals("bar", rawStore.get(0, "foo"));
             // commitIndex / lastApplied 推进
-            assertEquals(1L, state.commitIndex);
-            assertEquals(1L, state.lastApplied);
+            assertEquals(2L, state.commitIndex, "P1-3：no-op@1 + k@2");
+            assertEquals(2L, state.lastApplied);
             // pending 已清空
             assertEquals(0, pendingProposalsCount(node));
         } finally {
@@ -233,8 +233,8 @@ class MeshNodeProposeTest {
             assertEquals("1", rawStore.get(0, "a"));
             assertEquals("2", rawStore.get(0, "b"));
             assertEquals("3", rawStore.get(0, "c"));
-            assertEquals(3L, state.commitIndex);
-            assertEquals(3L, state.lastApplied);
+            assertEquals(4L, state.commitIndex, "P1-3：no-op@1 + 3 条写");
+            assertEquals(4L, state.lastApplied);
         } finally {
             node.stop();
         }

@@ -307,7 +307,7 @@ class RaftStateMachineTest {
         AppendEntriesMessage msg = new AppendEntriesMessage(
                 3L, PEER_B, 0L, 0L, Collections.emptyList(), 0L);
 
-        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg, null);
+        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg);
 
         assertFalse(d.response.isSuccess());
         assertEquals(5L, d.response.getTerm());
@@ -321,7 +321,7 @@ class RaftStateMachineTest {
 
         AppendEntriesMessage msg = new AppendEntriesMessage(
                 7L, PEER_B, 0L, 0L, Collections.emptyList(), 0L);
-        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg, null);
+        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg);
 
         assertEquals(7L, state.currentTerm);
         assertEquals(MeshRole.FOLLOWER, state.role);
@@ -338,7 +338,7 @@ class RaftStateMachineTest {
 
         AppendEntriesMessage msg = new AppendEntriesMessage(
                 5L, PEER_B, 0L, 0L, Collections.emptyList(), 0L);
-        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg, null);
+        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg);
 
         assertEquals(MeshRole.FOLLOWER, state.role);
         assertEquals(RaftStateMachine.Transition.Kind.TO_FOLLOWER, d.transition.kind);
@@ -353,7 +353,7 @@ class RaftStateMachineTest {
         // leader 声称 prevLogIndex=1 prevLogTerm=5（不匹配）
         AppendEntriesMessage msg = new AppendEntriesMessage(
                 5L, PEER_B, 1L, 5L, Collections.emptyList(), 0L);
-        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg, null);
+        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg);
 
         assertFalse(d.response.isSuccess(), "prevLog 不一致应拒");
     }
@@ -366,7 +366,7 @@ class RaftStateMachineTest {
                 5L, PEER_B, 0L, 0L,
                 Arrays.asList(entry(5L, 1L), entry(5L, 2L)), 0L);
 
-        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg, null);
+        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg);
 
         assertTrue(d.response.isSuccess());
         assertEquals(2L, d.response.getMatchIndex());
@@ -385,7 +385,7 @@ class RaftStateMachineTest {
                 5L, PEER_B, 1L, 3L,
                 Arrays.asList(entry(5L, 2L), entry(5L, 3L)), 0L);
 
-        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg, null);
+        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg);
 
         assertTrue(d.response.isSuccess());
         assertEquals(3L, state.getLastLogIndex());
@@ -403,7 +403,7 @@ class RaftStateMachineTest {
                 5L, PEER_B, 0L, 0L,
                 Collections.singletonList(entry(5L, 1L)), 0L);
 
-        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg, null);
+        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg);
 
         assertTrue(d.response.isSuccess());
         assertEquals(1L, state.getLastLogIndex(), "幂等场景不应追加重复条目");
@@ -420,7 +420,7 @@ class RaftStateMachineTest {
         AppendEntriesMessage msg = new AppendEntriesMessage(
                 5L, PEER_B, 2L, 5L, Collections.emptyList(), 2L);
 
-        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg, null);
+        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg);
 
         assertTrue(d.response.isSuccess());
         assertEquals(2L, state.commitIndex, "commitIndex 应推进到 leaderCommit（≤lastLog）");
@@ -435,24 +435,14 @@ class RaftStateMachineTest {
         AppendEntriesMessage msg = new AppendEntriesMessage(
                 5L, PEER_B, 0L, 0L, Collections.emptyList(), 10L);
 
-        sm.decideAppendEntries(state, msg, null);
+        sm.decideAppendEntries(state, msg);
 
         assertEquals(1L, state.commitIndex, "commitIndex 不应超过 lastLogIndex");
     }
 
-    @Test
-    void appendEntries_persistHookInvoked() {
-        state.currentTerm = 5;
-        boolean[] called = {false};
-        Runnable hook = () -> called[0] = true;
-
-        AppendEntriesMessage msg = new AppendEntriesMessage(
-                5L, PEER_B, 0L, 0L, Collections.singletonList(entry(5L, 1L)), 0L);
-
-        sm.decideAppendEntries(state, msg, hook);
-
-        assertTrue(called[0], "落盘 hook 应在追加后被调用");
-    }
+    // appendEntries_persistHookInvoked 已随 P0-7（2026-09-11 mesh 审计）移除：
+    // decideAppendEntries 不再内联落盘（异步化到 MeshNode → persistExecutor，
+    // ACK 不等待 fsync 的行为由 FollowerAsyncPersistTest 覆盖）。
 
     @Test
     void appendEntries_heartbeat_emptyEntries_matchIndexIsPrevLogIndex() {
@@ -463,7 +453,7 @@ class RaftStateMachineTest {
         AppendEntriesMessage msg = new AppendEntriesMessage(
                 5L, PEER_B, 2L, 5L, Collections.emptyList(), 2L);
 
-        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg, null);
+        RaftStateMachine.AppendDecision d = sm.decideAppendEntries(state, msg);
 
         assertTrue(d.response.isSuccess());
         assertEquals(2L, d.response.getMatchIndex(), "心跳 matchIndex 应 = prevLogIndex");

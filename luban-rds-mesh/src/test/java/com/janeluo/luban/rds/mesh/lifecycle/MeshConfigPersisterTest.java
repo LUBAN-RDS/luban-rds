@@ -583,6 +583,34 @@ class MeshConfigPersisterTest {
         assertNull(store.load(NODE_ID));
     }
 
+    /**
+     * P0-8（2026-09-11 mesh 审计）：常态保存分支只拷贝增量——
+     * 预置 50 条已落盘后追加 1 条 save，实际拷贝数应为 1（此前全量拷贝 51 条，
+     * 写路径成本随运行时长线性上升）。
+     */
+    @Test
+    void save_incrementalCopy_onAppendPath() throws IOException {
+        MeshState state = new MeshState();
+        state.currentTerm = 2;
+        for (long i = 1; i <= 50; i++) {
+            state.appendEntry(new com.janeluo.luban.rds.mesh.core.LogEntry(
+                    2L, i, respFrame("SET", "k" + i, "v"), 0, null));
+        }
+        persister.save(state, NODE_ID);   // 首次：重写/追加全量 50 条
+
+        state.appendEntry(new com.janeluo.luban.rds.mesh.core.LogEntry(
+                2L, 51L, respFrame("SET", "k51", "v"), 0, null));
+        persister.save(state, NODE_ID);   // 常态分支：只应拷贝 1 条
+        assertEquals(1, persister.copiedEntriesLastSave,
+                "常态追加分支只拷贝增量（P0-8），实际: " + persister.copiedEntriesLastSave);
+
+        // 往返正确性：load 后 51 条完整
+        MeshState loaded = persister.load(NODE_ID);
+        assertNotNull(loaded);
+        assertEquals(51, loaded.log.size());
+        assertEquals(51L, loaded.log.get(50).getIndex());
+    }
+
     // ==================== 辅助 ====================
 
     /** 构造一个完整 RESP 命令帧（与 LogApplierTest 一致）。 */

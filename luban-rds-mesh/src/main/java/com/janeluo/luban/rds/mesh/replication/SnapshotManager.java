@@ -450,14 +450,9 @@ public class SnapshotManager {
             return;
         }
 
-        // 任期 >= currentTerm：若更大则更新自身 term（降级为 Follower 由上层 MeshNode 统一处理；
-        // 这里至少保证 currentTerm 跟上 Leader）
-        if (msg.getTerm() > currentTerm) {
-            state.currentTerm = msg.getTerm();
-            state.votedFor = null;
-            state.leaderId = msg.getLeaderId();
-            logger.info("handleInstallSnapshot: 更新任期 → {}, leader={}", state.currentTerm, msg.getLeaderId());
-        }
+        // P0-4（2026-09-11 mesh 审计）：msg.term > currentTerm 的任期抬升/降级已上移至
+        // MeshNode.dispatch（becomeFollower 完整转换 + 落盘）。本类不再直接改
+        // currentTerm/votedFor/leaderId——此前不降级直改导致同 term 双 Leader 窗口。
 
         // 2. 会话管理：新会话作废旧累积
         String sessionId = sessionKey(msg);
@@ -523,7 +518,19 @@ public class SnapshotManager {
                     sendSnapshotAck(fromNodeId, state.currentTerm, false, state.lastApplied);
                     return;
                 }
-                // 4a.2 加载到内存 + 落盘 dump.rdb（RdbDataLoader 内部完成 copy 到 dump.rdb + load）
+                // 4a.2 P0-5（2026-09-11 mesh 审计）：快照安装是"替换"不是"合并"——
+                //     先全量清空 rawStore。follower 落后/分歧后才收快照，store 中 leader 已删除、
+                //     快照里不存在的 key 若不清空会在"追平"后继续存在（分歧被重同步固化）。
+                //     mesh 模式下本类是唯一写者且安装期间无其他写，清空时机安全；
+                //     清空失败中止安装（回 ACK false 让 Leader 冷却后重发），绝不加载半清空状态。
+                try {
+                    rawStore.flushAll();
+                } catch (Exception e) {
+                    logger.error("handleInstallSnapshot: 清空 rawStore 失败，中止快照安装", e);
+                    sendSnapshotAck(fromNodeId, state.currentTerm, false, state.lastApplied);
+                    return;
+                }
+                // 4a.3 加载到内存 + 落盘 dump.rdb（RdbDataLoader 内部完成 copy 到 dump.rdb + load）
                 boolean loaded = loadIncomingSnapshot(done.tempFile);
                 if (!loaded) {
                     logger.error("handleInstallSnapshot: 加载快照失败, 会话={}", sessionId);

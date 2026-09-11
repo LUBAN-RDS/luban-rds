@@ -244,10 +244,11 @@ public class MeshStartupLoader {
                         entry.getIndex(), entry.getTerm(), e);
             }
         }
-        // commitIndex 推进到 lastApplied（重放的都是已持久化的 tail，视为已提交）
-        if (state.commitIndex < state.lastApplied) {
-            state.commitIndex = state.lastApplied;
-        }
+        // P0-2（2026-09-11 mesh 审计）：WAL 落盘 ≠ Raft 已提交。旧 Leader 崩溃前落盘但未完成
+        // 复制的条目永远不可能获多数派，若重放后抬高 commitIndex，节点赢选举后将经
+        // leaderCommit 直推污染全集群（幽灵提交，架空 §5.4.2）。commitIndex 保持
+        // lastIncludedIndex 初值，由新 Leader 的 leaderCommit 收敛；重放条目的间接提交
+        // 依赖新 Leader 上任后的 no-op 条目（§5.4.2 只直接提交 currentTerm 条目）。
         return applied;
     }
 
