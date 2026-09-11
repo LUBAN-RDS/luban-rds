@@ -1012,6 +1012,19 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             } else if (errorBuffer != null) {
                 errorBuffer.release();
             }
+        } catch (com.janeluo.luban.rds.mesh.client.LeaseInvalidException e) {
+            // P1-8（2026-09-11 mesh 审计）：租约失效等待超时/read-index 确认失败此前落通用 catch
+            // 变 -ERR——Redisson 对 ERR 不重试，租约抖动直接变业务失败。转 -TRYAGAIN 自动退避重试
+            //（与 8/7 的 ERR→TRYAGAIN 同类修复，当时漏了此异常）。
+            logger.warn("mesh read lease invalid, client should retry: {}", e.getMessage());
+            Object errorResponse = "TRYAGAIN " + (e.getMessage() != null
+                    ? e.getMessage() : "mesh leader lease expired");
+            ByteBuf errorBuffer = protocolParser.serialize(errorResponse);
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
+            }
         } catch (Exception e) {
             logger.error("Error handling command", e);
             Object errorResponse = "ERR Error handling command";
