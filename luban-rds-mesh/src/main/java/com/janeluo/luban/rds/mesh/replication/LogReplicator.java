@@ -384,7 +384,10 @@ public class LogReplicator {
             if (advanced) {
                 applyCommittedEntries();
             }
-            if (refreshLease && leaseRefresher != null) {
+            // P1-2（2026-09-11 mesh 审计）：续租加 matchIndex 前提——follower 确认已含全部
+            // 已提交数据（matchIndex >= commitIndex）才构成有效租约证据。空闲集群
+            // matchIndex == lastLogIndex >= commitIndex 照常续租；追赶中的 ACK 不虚抬租约。
+            if (refreshLease && leaseRefresher != null && resp.getMatchIndex() >= state.commitIndex) {
                 leaseRefresher.run();
             }
             return advanced;

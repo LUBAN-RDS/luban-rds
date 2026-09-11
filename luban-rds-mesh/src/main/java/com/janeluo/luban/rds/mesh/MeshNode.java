@@ -1118,6 +1118,13 @@ public class MeshNode {
             electionTimer.reset();
             return;
         }
+        // P1-2（2026-09-11 mesh 审计）：旧任期迟到响应直接丢弃——旧 term 的 success 曾推高
+        // matchIndex/nextIndex 并刷新租约（租约虚高旧数据可读窗口 + 复制跳段靠后续 NACK 自愈）
+        if (resp.getTerm() != state.currentTerm) {
+            logger.debug("丢弃过期 AppendEntries 响应: from={}, respTerm={}, currentTerm={}",
+                    abbrev(fromNodeId), resp.getTerm(), state.currentTerm);
+            return;
+        }
         if (state.role != MeshRole.LEADER) {
             return;
         }
