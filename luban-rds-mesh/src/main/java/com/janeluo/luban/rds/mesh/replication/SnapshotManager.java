@@ -450,14 +450,9 @@ public class SnapshotManager {
             return;
         }
 
-        // 任期 >= currentTerm：若更大则更新自身 term（降级为 Follower 由上层 MeshNode 统一处理；
-        // 这里至少保证 currentTerm 跟上 Leader）
-        if (msg.getTerm() > currentTerm) {
-            state.currentTerm = msg.getTerm();
-            state.votedFor = null;
-            state.leaderId = msg.getLeaderId();
-            logger.info("handleInstallSnapshot: 更新任期 → {}, leader={}", state.currentTerm, msg.getLeaderId());
-        }
+        // P0-4（2026-09-11 mesh 审计）：msg.term > currentTerm 的任期抬升/降级已上移至
+        // MeshNode.dispatch（becomeFollower 完整转换 + 落盘）。本类不再直接改
+        // currentTerm/votedFor/leaderId——此前不降级直改导致同 term 双 Leader 窗口。
 
         // 2. 会话管理：新会话作废旧累积
         String sessionId = sessionKey(msg);

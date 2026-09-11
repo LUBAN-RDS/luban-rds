@@ -908,7 +908,24 @@ public class MeshNode {
             case INSTALL_SNAPSHOT:
                 // 阶段 10：chunked INSTALL_SNAPSHOT（DESIGN §5.4）
                 if (snapshotManager != null) {
-                    snapshotManager.handleInstallSnapshot(fromNodeId, (InstallSnapshotMessage) msg);
+                    InstallSnapshotMessage snap = (InstallSnapshotMessage) msg;
+                    // P0-4（2026-09-11 mesh 审计）：高 term 快照的任期抬升必须走 becomeFollower
+                    // 完整转换（停心跳/失效租约/取消收集器/落盘/复位定时器）。此前
+                    // SnapshotManager 直接改 currentTerm/votedFor/leaderId 而不降级——
+                    // 自认 Leader 的旧节点收快照后以新 term 双主；term/votedFor 也不落盘。
+                    if (snap.getTerm() > state.currentTerm) {
+                        Transition t = stateMachine.becomeFollower(state, snap.getTerm(), snap.getLeaderId());
+                        applyFollowerSideEffects(t);
+                        persistStateSafe("installSnapshot-term-up");
+                        electionTimer.onElectionSucceeded();
+                        electionTimer.reset();
+                    } else if (snap.getTerm() >= state.currentTerm) {
+                        // P0-4 延伸：每个通过任期校验的合法 chunk 复位选举定时器——
+                        // 数百 MB 快照传输数秒内不因超时发起 PreVote 打断传输
+                        electionTimer.onElectionSucceeded();
+                        electionTimer.reset();
+                    }
+                    snapshotManager.handleInstallSnapshot(fromNodeId, snap);
                 } else {
                     logger.debug("INSTALL_SNAPSHOT 收到但 SnapshotManager 未注入，暂忽略");
                 }
