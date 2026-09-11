@@ -575,6 +575,14 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 MonitorManager.getInstance().submit(currentDatabase, ctx.channel().remoteAddress().toString(), commandName, args);
             }
 
+            // P0-1（2026-09-11 mesh 审计）：mesh 模式禁用事务。EXEC 曾在下方前置分支被本地截走执行，
+            // 事务写只落单节点不经 Raft（三节点发散，切主即丢整批事务数据）。事务 Raft 化
+            // （extra/TransactionPayload）是审计路线图第四组长期项；生产无事务使用，先以显式 -ERR 止血。
+            if (meshEnabled && isMeshDisabledTransactionCommand(commandName)) {
+                writeSimpleError(ctx, "-ERR Transactions are not supported in mesh mode\r\n");
+                return;
+            }
+
             if ("WATCH".equals(commandName)) {
                 logger.debug("Handling WATCH command");
                 handleWatchCommand(ctx, clientInfo, currentDatabase, args);
@@ -1017,6 +1025,33 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     }
 
     // ==================== 阶段 12：mesh 辅助方法 ====================
+
+    /** mesh 模式禁用的事务命令判定（P0-1，2026-09-11 mesh 审计）。 */
+    private static boolean isMeshDisabledTransactionCommand(String commandName) {
+        if (commandName == null || commandName.isEmpty()) {
+            return false;
+        }
+        switch (commandName.trim().toUpperCase()) {
+            case "MULTI":
+            case "EXEC":
+            case "DISCARD":
+            case "WATCH":
+            case "UNWATCH":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** 直写一行简单错误响应（P0-1 等 mesh 禁用路径复用，统一 errorBuffer 释放惯例）。 */
+    private void writeSimpleError(ChannelHandlerContext ctx, String error) {
+        ByteBuf errorBuffer = protocolParser.serialize(error);
+        if (errorBuffer != null && errorBuffer.isReadable()) {
+            ctx.writeAndFlush(errorBuffer);
+        } else if (errorBuffer != null) {
+            errorBuffer.release();
+        }
+    }
 
     /**
      * 判定命令是否应走 mesh gate（写 propose / 读租约校验）。大小写不敏感。
