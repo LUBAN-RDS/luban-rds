@@ -987,12 +987,28 @@ public class MeshNode {
         // RequestVote 不是 Leader 存在的证据；双孤 follower 互相探测会互踩定时器并架空
         // 选举退避（9/3 事故 22 秒无 Leader 僵局的放大器）。对齐 Raft §9.6 / etcd：
         // 只有合法 AppendEntries（Leader 心跳）才 reset 接收方选举定时器——见 handleAppendEntries。
-        // 阶段 11：正式投票（非 PreVote）且 granted → votedFor 已设置 → 持久化
-        // （fsync 在回复投票前完成，保证崩溃恢复后不会同任期二次投票）
+        // 阶段 11 + P1-1（2026-09-11 mesh 审计）：正式投票授予 fail-stop——
+        // votedFor 先持久化，成功才发 granted，失败改发 denied。此前 persistStateSafe 吞异常后
+        // 照发 granted：内存已投票、磁盘未写，崩溃恢复后同 term 二次投票 → 双 Leader。
+        // 异步化到 persistExecutor 同时消除 raft 线程投票路径的同步 fsync（P0-6 放大器）。
         if (!msg.isPreVote() && decision.response.isVoteGranted()) {
-            persistStateSafe("decideRequestVote-grant");
+            final RequestVoteResponse granted = decision.response;
+            final RequestVoteResponse denied = new RequestVoteResponse(
+                    granted.getTerm(), false, granted.isPreVote(), granted.getElectionTerm());
+            final String voter = fromNodeId;
+            persistExecutor.execute(() -> {
+                try {
+                    persistHook.run();
+                    sendResponse(voter, MessageType.REQUEST_VOTE_RESP, granted);
+                } catch (Exception e) {
+                    logger.error("votedFor 持久化失败，拒绝授予投票: term={}, candidate={}",
+                            granted.getTerm(), abbrev(voter), e);
+                    sendResponse(voter, MessageType.REQUEST_VOTE_RESP, denied);
+                }
+            });
+            return;
         }
-        // 回复投票结果
+        // PreVote / 拒绝票：无需持久化，立即回复
         sendResponse(fromNodeId, MessageType.REQUEST_VOTE_RESP, decision.response);
         logger.debug("回复 RequestVote: from={}, granted={}, preVote={}",
                 abbrev(fromNodeId), decision.response.isVoteGranted(), msg.isPreVote());
