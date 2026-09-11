@@ -93,8 +93,9 @@ public class MeshNode {
      * 不做 commit 推进/apply/续租（raft 线程职责）。
      */
     private final ScheduledExecutorService timerExecutor;
-    /** 落盘专用单线程调度器（与 raftExecutor 解耦：fsync 不得阻塞心跳/RPC 处理）。 */
-    private final ScheduledExecutorService persistExecutor;
+    /** 落盘专用单线程调度器（与 raftExecutor 解耦：fsync 不得阻塞心跳/RPC 处理）。
+     *  P1-16：具体类型 ScheduledThreadPoolExecutor——暴露 getQueue() 供积压采样。 */
+    private final java.util.concurrent.ScheduledThreadPoolExecutor persistExecutor;
     /** 本节点已落盘的最大日志 index（仅 raft 线程读写；volatile 仅为可见性兜底）。 */
     private volatile long durableIndex;
 
@@ -144,6 +145,16 @@ public class MeshNode {
     static final long SNAPSHOT_CHECK_INTERVAL_MS = 30_000L;
     /** 周期快照检查任务；setSnapshotManager 晚于 start 时由兜底注册（幂等）。 */
     private volatile ScheduledFuture<?> snapshotCheckTask;
+
+    /**
+     * P1-16（2026-09-11 mesh 审计）：持久化积压告警阈值（队列深度）。
+     * 不设硬拒绝——丢弃或 CallerRuns 回灌持久化任务都会破坏正确性（回灌 raft 线程 = 复现 P0-6）。
+     * 正确响应是告警 + 排查磁盘瓶颈。
+     */
+    static final int PERSIST_BACKLOG_WARN_THRESHOLD = 1_000;
+    /** 积压告警累计次数（测试可观测）。 */
+    private final java.util.concurrent.atomic.AtomicLong persistBacklogWarnCount =
+            new java.util.concurrent.atomic.AtomicLong();
 
     /** 一条在途 propose：完成句柄 + 请求 key（领导丢失时生成 MOVED 用）。 */
     private static final class PendingProposal {
@@ -211,8 +222,9 @@ public class MeshNode {
             t.setDaemon(true);
             return t;
         });
-        // 落盘线程独立于 raft 线程：写高峰 fsync 不再停摆心跳（选举风暴根因修复）
-        this.persistExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        // 落盘线程独立于 raft 线程：写高峰 fsync 不再停摆心跳（选举风暴根因修复）。
+        // P1-16：直接构造 ScheduledThreadPoolExecutor（暴露 getQueue 供积压采样）。
+        this.persistExecutor = new java.util.concurrent.ScheduledThreadPoolExecutor(1, r -> {
             Thread t = new Thread(r, "mesh-persist-" + abbrev(nodeId));
             t.setDaemon(true);
             return t;
@@ -260,6 +272,9 @@ public class MeshNode {
         logger.info("MeshNode 启动: nodeId={}, term={}, role={}", abbrev(nodeId), state.currentTerm, state.role);
         electionTimer.start();
         startSnapshotCheck();
+        // P1-16：persistExecutor 积压周期采样（timer 线程，10s）
+        timerExecutor.scheduleAtFixedRate(this::samplePersistBacklog,
+                10_000L, 10_000L, TimeUnit.MILLISECONDS);
     }
 
     public synchronized void stop() {
@@ -398,6 +413,28 @@ public class MeshNode {
         if (started) {
             startSnapshotCheck();
         }
+    }
+
+    /**
+     * P1-16：persistExecutor 队列积压采样——深度超阈值时 WARN（附 durableIndex 与日志末尾的
+     * 滞后量）。积压的正确响应是告警 + 找磁盘瓶颈，不是拒绝任务。
+     */
+    private void samplePersistBacklog() {
+        if (persistExecutor.isShutdown()) {
+            return;
+        }
+        int depth = persistExecutor.getQueue().size();
+        if (depth > PERSIST_BACKLOG_WARN_THRESHOLD) {
+            persistBacklogWarnCount.incrementAndGet();
+            logger.warn("persistExecutor 积压告警: queueDepth={}, durableIndex={}, lastLogIndex={}"
+                            + "（fsync 慢于写速率，commit/apply 将滞后——检查磁盘）",
+                    depth, durableIndex, state.getLastLogIndex());
+        }
+    }
+
+    /** P1-16：手动触发一次积压采样（测试钩子，与 timer 周期采样同体）。 */
+    void runPersistBacklogSampleForTest() {
+        samplePersistBacklog();
     }
 
     /**
