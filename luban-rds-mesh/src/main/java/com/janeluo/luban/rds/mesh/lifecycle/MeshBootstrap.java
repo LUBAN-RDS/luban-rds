@@ -159,6 +159,10 @@ public class MeshBootstrap {
                     throw new RuntimeException("raft-nodes.conf 保存失败", e);
                 }
             });
+        } else {
+            // Q3（2026-09-11 审计）：mesh-persist=no → 持久性门控短路（弱持久语义显式化）
+            meshNode.setDurableGatingActive(false);
+            logger.warn("mesh-persist=no：持久性门控短路（弱持久语义，仅用于性能测试场景）");
         }
 
         // 7. SnapshotManager（chunked 发送/接收 + 周期快照）

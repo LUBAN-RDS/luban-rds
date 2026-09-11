@@ -128,6 +128,14 @@ public class MeshNode {
     /** 本节点已落盘的最大日志 index（仅 raft 线程读写；volatile 仅为可见性兜底）。 */
     private volatile long durableIndex;
 
+    /**
+     * Q3（2026-09-11 审计）：持久性门控开关——mesh-persist=yes（默认）时为 true，
+     * commit 受 durableIndex 门控；mesh-persist=no 时为 false，durableIndex 视为已跟上
+     * （弱持久语义，仅用于性能测试/低持久性场景，崩溃后已确认写可能丢失）。
+     * 由 MeshBootstrap 装配时设置。
+     */
+    private volatile boolean durableGatingActive = true;
+
     private final ElectionTimer electionTimer;
     private final LeaseManager lease;
 
@@ -272,7 +280,10 @@ public class MeshNode {
         if (applier != null) {
             this.replicator = new LogReplicator(nodeId, config, state, busClient, applier);
             // 自身 match 以已落盘 index 为上限（未落盘不 commit，持久性语义）
-            this.replicator.setDurableIndexSupplier(() -> durableIndex);
+            // Q3（2026-09-11 审计）：mesh-persist=no（durableGatingActive=false）时门控短路——
+            // durableIndex 视为已跟上 lastLogIndex（"凭空 durable"显式化为弱持久语义）
+            this.replicator.setDurableIndexSupplier(() ->
+                    durableGatingActive ? durableIndex : state.getLastLogIndex());
             // apply 完成回调：complete 对应 pendingProposals future（携带 apply 响应对象；序列化为字节）
             this.replicator.setAppliedNotifier(this::onEntryApplied);
             // 多数派 ACK 续租回调（Leader Lease，DESIGN §5.7）
@@ -372,6 +383,16 @@ public class MeshNode {
     void setInboundPermits(int permits) {
         inboundPermits.drainPermits();
         inboundPermits.release(Math.max(1, permits));
+    }
+
+    /** Q3：持久性门控是否生效（mesh-persist=no 时为 false）。 */
+    public boolean isDurableGatingActive() {
+        return durableGatingActive;
+    }
+
+    /** Q3：由装配层设置（mesh-persist=no → false，门控短路）。 */
+    public void setDurableGatingActive(boolean active) {
+        this.durableGatingActive = active;
     }
 
     /** 注入落盘 hook（阶段 11 替换为真实 fsync）。 */
