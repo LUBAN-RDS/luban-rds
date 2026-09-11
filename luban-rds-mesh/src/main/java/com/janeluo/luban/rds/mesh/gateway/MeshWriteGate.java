@@ -315,6 +315,25 @@ public class MeshWriteGate {
      *          命中时直接回 {@link #blockCommandError()}，不进入 propose。
      */
     public byte[] write(byte[] rawRespFrame, int dbIndex, byte[] extra) {
+        return write(null, rawRespFrame, dbIndex, extra);
+    }
+
+    /** P1-9 去重索引上限：极端堆积时整体清空（语义退化为可双写，避免索引自身膨胀）。 */
+    private static final int DEDUP_INDEX_LIMIT = 1024;
+
+    /** P1-9：超时未决 proposal 索引（channelId + sha1(frame) → 在途 future）。 */
+    private final java.util.concurrent.ConcurrentHashMap<String, CompletableFuture<byte[]>> timedOutProposals =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * P1-9（2026-09-11 审计 P1）：带连接标识的写路径——超时未决 proposal 去重。
+     * <p>同连接同帧的重试在原 proposal 仍在途时<b>挂接同一 future</b>，不再生成第二条
+     * Raft 条目（INCR 等非幂等写不再被 TRYAGAIN 重试双写）。原 proposal 落定后索引即清，
+     * 窗口外的重试视为新请求（无客户端协议变更下的承诺边界，残余风险见 docs）。</p>
+     *
+     * @param channelId 连接标识（null = 不参与去重，走原语义）
+     */
+    public byte[] write(String channelId, byte[] rawRespFrame, int dbIndex, byte[] extra) {
         // Q4（2026-09-11 审计 P2）：未知命令（含拼写错误）不生成 Raft 条目——
         // 此前三节点各 apply 一条错误串（日志垃圾）。PUBLISH 由 handler 层处理不经
         // 命令注册表，属豁免白名单（P1-10 将经 Raft 复制）。
@@ -324,6 +343,29 @@ public class MeshWriteGate {
                 && (handler == null || !handler.isCommandRegistered(commandName))) {
             throw new UnknownCommandException(commandName);
         }
+        String dedupKey = channelId == null ? null
+                : channelId + ":" + sha1Hex(rawRespFrame);
+        if (dedupKey != null) {
+            CompletableFuture<byte[]> inFlight = timedOutProposals.get(dedupKey);
+            if (inFlight != null) {
+                if (inFlight.isDone()) {
+                    // 原 proposal 已落定：窗口关闭，清索引，走正常 propose
+                    timedOutProposals.remove(dedupKey, inFlight);
+                } else {
+                    try {
+                        // 挂接原 future（重试 = 对同一在途写的等待）
+                        return inFlight.get(writeTimeoutMs, TimeUnit.MILLISECONDS);
+                    } catch (TimeoutException e) {
+                        throw new RetryableMeshException("mesh write still in flight, retry", e);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("mesh write interrupted", e);
+                    } catch (ExecutionException e) {
+                        return unwrapProposeFailure(e);
+                    }
+                }
+            }
+        }
         CompletableFuture<byte[]> future = meshNode.propose(rawRespFrame, dbIndex, extra);
         try {
             if (writeTimeoutMs > 0) {
@@ -332,6 +374,13 @@ public class MeshWriteGate {
             return future.get();
         } catch (TimeoutException e) {
             // 超时不再等待 future（不 cancel——Raft entry 仍可能后续 commit；由上层决定如何回复客户端）
+            // P1-9：未决 future 进入去重索引——同连接同帧重试挂接原 future，不二次 propose
+            if (dedupKey != null && !future.isDone()) {
+                if (timedOutProposals.size() >= DEDUP_INDEX_LIMIT) {
+                    timedOutProposals.clear();
+                }
+                timedOutProposals.putIfAbsent(dedupKey, future);
+            }
             // 瞬时拥塞 → TRYAGAIN 让客户端自动重试
             throw new RetryableMeshException(
                     "mesh write propose timeout after " + writeTimeoutMs + "ms, retry", e);
@@ -339,18 +388,38 @@ public class MeshWriteGate {
             Thread.currentThread().interrupt();
             throw new RuntimeException("mesh write interrupted", e);
         } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause == null) {
-                cause = e;
+            return unwrapProposeFailure(e);
+        }
+    }
+
+    /** P1-9：propose 异常解包（MOVED 原样抛 / 其它 RuntimeException 直抛 / 包装）。 */
+    private byte[] unwrapProposeFailure(ExecutionException e) throws RuntimeException {
+        Throwable cause = e.getCause();
+        if (cause == null) {
+            cause = e;
+        }
+        if (cause instanceof MovedToLeaderException) {
+            throw (MovedToLeaderException) cause;
+        }
+        if (cause instanceof RuntimeException) {
+            throw (RuntimeException) cause;
+        }
+        throw new RuntimeException("mesh write propose failed", cause);
+    }
+
+    /** P1-9：帧指纹（SHA-1 hex；channelId 已入 key，碰撞概率对本用途足够）。 */
+    private static String sha1Hex(byte[] data) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-1");
+            byte[] digest = md.digest(data == null ? new byte[0] : data);
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
             }
-            if (cause instanceof MovedToLeaderException) {
-                // 非 Leader：原样抛，供上层 catch 生成 MOVED/MESHDOWN
-                throw (MovedToLeaderException) cause;
-            }
-            if (cause instanceof RuntimeException) {
-                throw (RuntimeException) cause;
-            }
-            throw new RuntimeException("mesh write propose failed", cause);
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-1 unavailable", e);
         }
     }
 

@@ -939,7 +939,9 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     // 写命令：走 Raft propose（阻塞至 commit+apply），返回 apply 产生的响应字节。
                     // 事务 EXEC 已在前置分支处理；此处 rawRespFrame 为单条写命令帧。
                     // gate.write 内部抛 MovedToLeaderException → 下方专用 catch 生成 MOVED/MESHDOWN。
-                    byte[] resp = meshWriteGate.write(rawRespFrame, currentDatabase, null);
+                    // P1-9：传 channelId——超时未决 proposal 的同连接同帧重试挂接原 future。
+                    byte[] resp = meshWriteGate.write(
+                            ctx.channel().id().asLongText(), rawRespFrame, currentDatabase, null);
                     ctx.writeAndFlush(Unpooled.wrappedBuffer(resp));
                 } else {
                     // 读命令：走 gate.read（租约校验 + 本地读），返回序列化响应字节。
