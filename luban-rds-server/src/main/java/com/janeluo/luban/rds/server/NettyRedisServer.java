@@ -213,7 +213,7 @@ public class NettyRedisServer implements RedisServer {
         this.commandHandler = new DefaultCommandHandler();
         this.protocolParser = new RedisProtocolParser();
         this.persistService = PersistServiceFactory.createPersistService(
-                config.getPersistMode(), 
+                effectivePersistMode(config), 
                 config.getDir(), 
                 config.getRdbSaveInterval(), 
                 config.getAofFsyncInterval());
@@ -262,7 +262,7 @@ public class NettyRedisServer implements RedisServer {
         this.commandHandler = new DefaultCommandHandler(config.getRequirepass());
         this.protocolParser = new RedisProtocolParser();
         this.persistService = PersistServiceFactory.createPersistService(
-                config.getPersistMode(), 
+                effectivePersistMode(config), 
                 config.getDir(), 
                 config.getRdbSaveInterval(), 
                 config.getAofFsyncInterval());
@@ -1251,6 +1251,21 @@ public class NettyRedisServer implements RedisServer {
         return memoryStore;
     }
     
+
+    /**
+     * P1-17（2026-09-11 mesh 审计）：mesh 模式下 appendonly 配置忽略（AOF 退役，DESIGN v1.2）。
+     * EXEC 残留 AOF 路径已被 P0-1 事务禁用堵死，此处为配置面强制收口——
+     * 持久化仅由 WAL + SnapshotManager RDB 承担，防止"AOF 写入却不经 Raft"的双持久化源。
+     */
+    private static String effectivePersistMode(RdsConfig config) {
+        String mode = config.getPersistMode();
+        if (config.isMeshEnabled() && mode != null && mode.toLowerCase().contains("aof")) {
+            logger.warn("mesh 模式下 appendonly 配置被忽略（AOF 退役）；持久化由 WAL + SnapshotManager RDB 承担");
+            return "rdb";
+        }
+        return mode;
+    }
+
     public PersistService getPersistService() {
         return persistService;
     }
