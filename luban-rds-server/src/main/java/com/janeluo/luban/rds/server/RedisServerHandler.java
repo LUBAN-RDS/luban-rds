@@ -583,6 +583,13 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 return;
             }
 
+            // Q12（2026-09-11 mesh 审计 P3）：mesh 下 ACL 状态各节点独立，SETUSER 需
+            // Raft 化才能一致——显式拒绝优于 Raft 空转 ERR。
+            if (meshEnabled && "ACL".equals(commandName)) {
+                writeSimpleError(ctx, "-ERR ACL is not supported in mesh mode\r\n");
+                return;
+            }
+
             // P1-11（2026-09-11 mesh 审计）：认证检查前移——原检查位于事务分支之后，
             // 未认证客户端可入队事务（follower 上还会本地落地）并获取集群拓扑。
             // 白名单对齐 Redis：仅连接管理命令可在认证前执行。
@@ -1155,7 +1162,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             case "SLOWLOG":
             case "MEMORY":
             case "WAIT":
-            case "acl":
+            case "ACL":
                 // mesh 模式禁用 server 复制/迁移命令（PSYNC/SYNC/REPLCONF/REPLICAOF/SLAVEOF），
                 // 由 mesh Raft 复制接管；放本地路径返回错误，避免经 gate。
             case "PSYNC":

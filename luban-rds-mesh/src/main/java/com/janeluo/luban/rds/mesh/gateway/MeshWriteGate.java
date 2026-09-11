@@ -162,7 +162,9 @@ public class MeshWriteGate {
             "GEOSEARCH", "GEORADIUS", "GEORADIUSBYMEMBER",
             // 连接/控制（非 mutating，不应走 Raft）
             "PING", "ECHO", "AUTH", "HELLO", "RESET", "COMMAND", "INFO", "TIME",
-            "CLIENT", "CONFIG", "ROLE", "LASTSAVE", "SLOWLOG", "acl"
+            "CLIENT", "CONFIG", "ROLE", "LASTSAVE", "SLOWLOG"
+            // Q12（2026-09-11 审计 P3）：原小写 "acl" 死键已删——ACL 命令在 handler 层
+            // mesh 分支显式拒绝（-ERR ACL is not supported in mesh mode），不达 gate。
     );
 
     /**
