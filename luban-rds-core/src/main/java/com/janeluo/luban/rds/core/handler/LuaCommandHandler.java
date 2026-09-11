@@ -44,11 +44,38 @@ public class LuaCommandHandler implements CommandHandler {
     private volatile boolean scriptRunning = false;
     private volatile long scriptTimeoutMs = 5000L;
 
-    /** 脚本缓存，key 为脚本 SHA1，value 为脚本文本。 */
-    private final Map<String, String> scriptCache = Maps.newConcurrentMap();
+    /**
+     * 脚本缓存，key 为脚本 SHA1，value 为脚本文本。
+     * <p>P1-4（2026-09-11 mesh 审计）：静态共享——server 命令面 / Raft apply 侧（LogApplier
+     * 持有的 DefaultCommandHandler 每实例各自 new LuaCommandHandler）/ 嵌套 redis.call 的
+     * SHARED_COMMAND_HANDLER 三套视图合一（PUB_SUB_MANAGER 静态单例先例；单 JVM 单节点语义不变，
+     * SCRIPT FLUSH 全清语义不变）。</p>
+     */
+    private static final Map<String, String> scriptCache = Maps.newConcurrentMap();
 
     /** 共享的命令处理器实例，用于 Lua 脚本中的 redis.call */
     private static final DefaultCommandHandler SHARED_COMMAND_HANDLER = new DefaultCommandHandler();
+
+    /**
+     * P1-4：快照脚本表导出（快照携带脚本表，SnapshotManager 发送时取表）。
+     *
+     * @return 缓存快照（拷贝）
+     */
+    public static java.util.Map<String, String> snapshotScripts() {
+        return new java.util.HashMap<>(scriptCache);
+    }
+
+    /**
+     * P1-4：快照脚本表还原（follower 安装快照后原子重建本地缓存）。
+     *
+     * @param table sha1 → 脚本文本；null 视为空表
+     */
+    public static void restoreScripts(java.util.Map<String, String> table) {
+        scriptCache.clear();
+        if (table != null) {
+            scriptCache.putAll(table);
+        }
+    }
     
     @Override
     public Set<String> supportedCommands() {

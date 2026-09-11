@@ -56,6 +56,15 @@ public class LogApplier {
 
     /** apply 只用这个 handler（直接路由到各命令处理器，不经过拦截层）。 */
     private final DefaultCommandHandler handler;
+
+    /** P1-4：apply 侧 EVALSHA 脚本缓存未命中计数（可观测）。 */
+    private final java.util.concurrent.atomic.AtomicLong applyScriptMissCount =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** P1-4：applyScriptMissCount 访问器（观测/测试）。 */
+    public long getApplyScriptMissCount() {
+        return applyScriptMissCount.get();
+    }
     /** apply 唯一目标：真实 raw MemoryStore（DefaultMemoryStore）。 */
     private final MemoryStore rawStore;
     /** RESP 解析器（复用 protocol 模块）。 */
@@ -159,6 +168,17 @@ public class LogApplier {
         // apply 只用 raw store + handle，绝不经过拦截层；不写 AOF
         try {
             Object response = handler.handle(upperName, entry.getDbIndex(), args, rawStore);
+            // P1-4（2026-09-11 审计）：apply 侧 EVALSHA miss 显式可观测——条目本身合法
+            //（跳过≠毒条目，lastApplied 照常推进），但 miss 意味着脚本缓存与复制状态出现
+            // 窗口（快照截断/重启），需指标暴露。客户端可见面不变：leader gate 回 -NOSCRIPT
+            // 由客户端按 Redis 标准重发 EVAL。
+            if (response instanceof String && ((String) response).startsWith("-NOSCRIPT")) {
+                long misses = applyScriptMissCount.incrementAndGet();
+                if (misses % 100 == 1) {
+                    logger.warn("apply EVALSHA 脚本缓存未命中（快照截断/重启窗口）: index={}, sha={}, 累计={}",
+                            entry.getIndex(), args != null && args.length > 1 ? args[1] : "?", misses);
+                }
+            }
             // handle 返回值即客户端响应对象（+OK\r\n / :1\r\n / 数组…），零转换
             if (response == null) {
                 return "$-1\r\n";
