@@ -1233,11 +1233,8 @@ public class MeshNode {
             });
             return;
         }
-        // PreVote 授予：直接复位（PreVote 不落盘；PreVote 探测授出不改变 votedFor，
-        // 但 candidate 日志已更新且 term 更高，复位语义与正式授予一致）
-        if (decision.response.isVoteGranted()) {
-            electionTimer.reset();
-        }
+        // PreVote 授予不复位（Q2 收窄）：PreVote 不消耗 votedFor，双孤 follower 互相授予
+        // PreVote 会互踩定时器架空退避——正是 D2 要断的路径（MeshNodeTest 既有断言锁定）。
         // PreVote / 拒绝票：无需持久化，立即回复
         sendResponse(fromNodeId, MessageType.REQUEST_VOTE_RESP, decision.response);
         logger.debug("回复 RequestVote: from={}, granted={}, preVote={}",
