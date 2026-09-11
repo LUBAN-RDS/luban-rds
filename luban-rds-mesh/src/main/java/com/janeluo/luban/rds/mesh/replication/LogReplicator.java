@@ -130,6 +130,23 @@ public class LogReplicator {
 
     private final LogApplier applier;
 
+    /** P1-5：apply fail-stop 标志——毒条目后 apply 循环挂起（心跳/复制不受影响）。 */
+    private volatile boolean applyHalted;
+
+    /** P1-5：apply 失败计数（可观测）。 */
+    private final java.util.concurrent.atomic.AtomicLong applyFailureCount =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** P1-5：apply 是否已挂起（观测/测试）。 */
+    public boolean isApplyHalted() {
+        return applyHalted;
+    }
+
+    /** P1-5：apply 失败计数（观测/测试）。 */
+    public long getApplyFailureCount() {
+        return applyFailureCount.get();
+    }
+
     /**
      * 本节点（Leader 自身）已落盘日志 index 提供者；commit 门控用。
      * 默认 = state.getLastLogIndex()（不 gate，向后兼容）；MeshNode 装配为 durableIndex。
@@ -536,6 +553,12 @@ public class LogReplicator {
      * @return 本次 apply 的条目数
      */
     public int applyCommittedEntries() {
+        // P1-5（2026-09-11 审计）：fail-stop——毒条目（apply 抛异常）后 apply 循环挂起，
+        // lastApplied 冻结在毒条目之前。宁可停滞不可分叉：节点继续心跳/应答（线程已分离），
+        // 人工修复数据问题后重启恢复（WAL 重放复现则再 halt，需处置该条目）。
+        if (applyHalted) {
+            return 0;
+        }
         int applied = 0;
         while (state.lastApplied < state.commitIndex) {
             long next = state.lastApplied + 1;
@@ -566,10 +589,13 @@ public class LogReplicator {
                 logger.warn("apply: 暂不支持的条目类型, index={}, 跳过", next);
                 state.lastApplied = next;
             } catch (Exception e) {
-                logger.error("apply 失败, index={}", next, e);
-                // apply 失败不推进 lastApplied，下次 apply 会重试同一条（幂等设计需 store 支撑）
-                // 但为避免持续阻塞 apply 循环，这里仍推进（apply 错误响应已由 LogApplier 返回）
-                state.lastApplied = next;
+                // P1-5：fail-stop——不推进 lastApplied、挂起 apply 循环、指标+ERROR 告警
+                applyFailureCount.incrementAndGet();
+                applyHalted = true;
+                logger.error("apply 异常 fail-stop：lastApplied 冻结在 {}，毒条目 index={} "
+                        + "已挂起 apply 循环。人工修复数据问题后重启节点恢复"
+                        + "（WAL 重放复现则需处置该条目）", state.lastApplied, next, e);
+                break;
             }
         }
         return applied;

@@ -166,6 +166,10 @@ public class LogApplier {
         String upperName = commandName.trim().toUpperCase();
 
         // apply 只用 raw store + handle，绝不经过拦截层；不写 AOF
+        // P1-5（2026-09-11 审计）：执行异常不再转 -ERR 字符串吞掉——节点本地异常
+        //（OOM/Lua 引擎故障）意味着 apply 未确定性执行，吞掉会让三节点分叉不可见。
+        // 抛出 ApplyFailureException 由 apply 循环 fail-stop（命令级 Redis 错误
+        // 仍由 handler 以 -ERR 字符串返回，不受影响）。
         try {
             Object response = handler.handle(upperName, entry.getDbIndex(), args, rawStore);
             // P1-4（2026-09-11 审计）：apply 侧 EVALSHA miss 显式可观测——条目本身合法
@@ -185,8 +189,8 @@ public class LogApplier {
             }
             return response;
         } catch (Exception e) {
-            logger.error("apply: 命令执行异常, cmd={}, index={}", upperName, entry.getIndex(), e);
-            return "-ERR apply command error: " + e.getMessage() + "\r\n";
+            throw new ApplyFailureException(
+                    "apply: 命令执行异常, cmd=" + upperName + ", index=" + entry.getIndex(), e);
         }
     }
 
