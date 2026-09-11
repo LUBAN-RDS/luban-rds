@@ -56,16 +56,23 @@ mesh-self-node-id a1b2c3d4e5f60718293a4b5c6d7e8f900a1b2c3d
 # 以下参数均有默认值，可不配：
 # mesh-election-timeout-min-ms 300      # 选举超时下限（随机化 300-600ms）
 # mesh-election-timeout-max-ms 600
-# mesh-heartbeat-interval-ms 100        # Leader 心跳周期
+# mesh-heartbeat-interval-ms 100        # Leader 心跳周期（v1.0.24+ 独立 mesh-timer 线程发送，apply 积压不延迟心跳）
 # mesh-lease-duration-ms 1200           # 读租约时长（= 2 × electionTimeout）
 # mesh-read-consistency LEASE           # 读模式：LEASE（默认）/ READ_INDEX
 # mesh-read-lease-wait-ms 1000          # 租约失效时等待续租的上限
-# mesh-snapshot-log-threshold 100000    # 每 N 条日志触发周期快照
+# mesh-snapshot-log-threshold 100000    # 每 N 条日志触发周期快照（v1.0.24+ 已接入调度：每 30s 检查，根治 WAL/日志无界增长）
 # mesh-bus-port 0                       # 0 = 按 peers 条目取
 # mesh-service-port 0                   # 0 = 用全局 port（单机多实例必配为不同值）
 ```
 
 > **互斥约束**：`mesh-enabled yes` 与 `cluster-enabled yes` 不能同时启用，启动时校验中止。
+
+> **mesh 模式事务禁用（v1.0.24+）**：`MULTI/EXEC/DISCARD/WATCH/UNWATCH` 返回
+> `-ERR Transactions are not supported in mesh mode`。事务曾绕过 Raft 本地执行（三节点发散），
+> Raft 化事务为长期路线图项；生产无事务使用，禁用即止血。
+
+> **运维观测（v1.0.24+）**：`persistExecutor 积压告警` WARN 日志（队列深度 > 1000 时输出，
+> 附 durableIndex 滞后量）——出现即说明 fsync 慢于写速率，应检查磁盘。
 
 ## 3. 启动 3 节点
 
