@@ -80,6 +80,16 @@ public class MeshNode {
     private final java.util.concurrent.atomic.AtomicLong unknownPeerFrames =
             new java.util.concurrent.atomic.AtomicLong();
 
+    /** P1-13：入站帧分发许可（默认 4096）——重发风暴下有界排队；permits 可注入便于测试。 */
+    private final java.util.concurrent.Semaphore inboundPermits;
+
+    /** P1-13：入站帧因许可耗尽的丢弃计数。 */
+    private final java.util.concurrent.atomic.AtomicLong inboundDropped =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** 入站许可默认值。 */
+    static final int DEFAULT_INBOUND_PERMITS = 4096;
+
     /** Q7：单条 entry 编码大小上限（12MB）——低于总线帧 16MB 上限留余量。 */
     static final long MAX_ENTRY_BYTES = 12L * 1024 * 1024;
 
@@ -227,6 +237,7 @@ public class MeshNode {
         this.nodeId = config.getSelfNodeId();
         this.state = state;
         this.busClient = busClient;
+        this.inboundPermits = new java.util.concurrent.Semaphore(DEFAULT_INBOUND_PERMITS);
         this.stateMachine = stateMachine;
         // 单线程：保证 Raft 状态变更串行化
         this.raftExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -350,6 +361,17 @@ public class MeshNode {
     /** P1-12b：非成员来源帧丢弃计数（观测/测试）。 */
     public long getUnknownPeerFrameCount() {
         return unknownPeerFrames.get();
+    }
+
+    /** P1-13：入站帧因许可耗尽的丢弃计数（观测/测试）。 */
+    public long getInboundDroppedCount() {
+        return inboundDropped.get();
+    }
+
+    /** P1-13：调整入站许可数（仅测试/运维动态调参用；运行中调小不影响已获许可）。 */
+    void setInboundPermits(int permits) {
+        inboundPermits.drainPermits();
+        inboundPermits.release(Math.max(1, permits));
     }
 
     /** 注入落盘 hook（阶段 11 替换为真实 fsync）。 */
@@ -1082,11 +1104,24 @@ public class MeshNode {
         }
         // peer 在线信号：出站断连时立即重置重连退避（避免节点重启后干等最长 64s 退避窗口）
         busClient.notifyPeerAlive(fromNodeId);
+        // P1-13（2026-09-11 审计）：入站准入控制——对端重发风暴下有界排队。
+        // 只约束入站帧分发；内部任务（持久化回调/timer tick/propose）不经信号量（I7），
+        // 其队列拒绝语义不受影响。所有 Raft RPC 均可安全重发，丢弃只降活性不破正确性。
+        if (!inboundPermits.tryAcquire()) {
+            long dropped = inboundDropped.incrementAndGet();
+            if (dropped % 1000 == 1) {
+                logger.warn("入站帧分发许可耗尽，丢弃: from={}, type={}, 累计丢弃={}",
+                        fromNodeId, type, dropped);
+            }
+            return;
+        }
         raftExecutor.execute(() -> {
             try {
                 dispatch(fromNodeId, type, msg);
             } catch (Exception e) {
                 logger.error("处理消息异常: from={}, type={}", fromNodeId, type, e);
+            } finally {
+                inboundPermits.release();
             }
         });
     }
