@@ -61,6 +61,15 @@ public class ElectionTimer {
     private final AtomicReference<java.util.concurrent.ScheduledFuture<?>> pending =
             new AtomicReference<>();
 
+    /** Q2：调度次数计数（start/reset 共用 scheduleNext；观测/测试用）。 */
+    private final java.util.concurrent.atomic.AtomicLong scheduleCount =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Q2：调度次数（观测/测试）。 */
+    public long getScheduleCount() {
+        return scheduleCount.get();
+    }
+
     private volatile boolean started;
     private volatile boolean stopped;
 
@@ -187,6 +196,7 @@ public class ElectionTimer {
 
     private void scheduleNext() {
         long delay = nextTimeoutMs();
+        scheduleCount.incrementAndGet();
         // 同步块保证 pending 的"取消旧的 + 设置新的"原子（与 stop/start/reset 互斥）
         java.util.concurrent.ScheduledFuture<?> prev = pending.getAndSet(null);
         if (prev != null) {

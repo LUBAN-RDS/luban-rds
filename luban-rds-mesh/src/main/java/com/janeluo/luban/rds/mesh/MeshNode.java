@@ -1207,6 +1207,9 @@ public class MeshNode {
         // RequestVote 不是 Leader 存在的证据；双孤 follower 互相探测会互踩定时器并架空
         // 选举退避（9/3 事故 22 秒无 Leader 僵局的放大器）。对齐 Raft §9.6 / etcd：
         // 只有合法 AppendEntries（Leader 心跳）才 reset 接收方选举定时器——见 handleAppendEntries。
+        // Q2（2026-09-11 审计 P2）：唯一例外 = 授出选票（decision.resetElectionTimer 语义）——
+        // §5.2 标准行为；votedFor 每 term 唯一，授予复位不可能被同 term 反复探测利用
+        //（denied / 过期 term 均不复位，D2 语义不变）。
         // 阶段 11 + P1-1（2026-09-11 mesh 审计）：正式投票授予 fail-stop——
         // votedFor 先持久化，成功才发 granted，失败改发 denied。此前 persistStateSafe 吞异常后
         // 照发 granted：内存已投票、磁盘未写，崩溃恢复后同 term 二次投票 → 双 Leader。
@@ -1219,6 +1222,8 @@ public class MeshNode {
             persistExecutor.execute(() -> {
                 try {
                     persistHook.run();
+                    // Q2：授予生效（持久化成功）后复位选举定时器（§5.2）
+                    electionTimer.reset();
                     sendResponse(voter, MessageType.REQUEST_VOTE_RESP, granted);
                 } catch (Exception e) {
                     logger.error("votedFor 持久化失败，拒绝授予投票: term={}, candidate={}",
@@ -1227,6 +1232,11 @@ public class MeshNode {
                 }
             });
             return;
+        }
+        // PreVote 授予：直接复位（PreVote 不落盘；PreVote 探测授出不改变 votedFor，
+        // 但 candidate 日志已更新且 term 更高，复位语义与正式授予一致）
+        if (decision.response.isVoteGranted()) {
+            electionTimer.reset();
         }
         // PreVote / 拒绝票：无需持久化，立即回复
         sendResponse(fromNodeId, MessageType.REQUEST_VOTE_RESP, decision.response);
