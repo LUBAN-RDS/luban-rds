@@ -918,12 +918,20 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     ctx.writeAndFlush(Unpooled.wrappedBuffer(err));
                     return;
                 }
+                // Q4（2026-09-11 审计 P2）：XREADGROUP 显式不支持——PEL 未 Raft 化，
+                // 判写会单节点改 PEL，判读语义错误。
+                if ("XREADGROUP".equals(commandName)) {
+                    writeSimpleError(ctx, "-ERR XREADGROUP is not supported in mesh mode\r\n");
+                    return;
+                }
                 if (MeshWriteGate.isWriteCommand(commandName)) {
                     // 路线图#12（2026-09-11 mesh 审计）：只读 EVAL/EVALSHA 本地读。
                     // 生产写放大源头——门户每请求 2 条 EVAL（1 条纯读 PTTL）恒判写全进 Raft。
                     // 判定复用 cluster 从节点先例（resolveScriptBody + LuaScriptAnalyzer，
                     // 取不到脚本保守判写）；follower 上只读脚本仍走 read() 抛 MOVED（P1-7 不动）。
-                    if (isReadOnlyEvalCommand(commandName, args)) {
+                    // Q4：SCRIPT EXISTS 子命令是纯读，不进 Raft。
+                    if (isReadOnlyEvalCommand(commandName, args)
+                            || isScriptExistsRead(commandName, args)) {
                         byte[] resp = meshWriteGate.read(currentDatabase, args);
                         ctx.writeAndFlush(Unpooled.wrappedBuffer(resp));
                         return;
@@ -1026,6 +1034,15 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             } else if (errorBuffer != null) {
                 errorBuffer.release();
             }
+        } catch (com.janeluo.luban.rds.mesh.gateway.UnknownCommandException e) {
+            // Q4（2026-09-11 审计 P2）：未知命令不进 Raft，对齐 Redis 错误串
+            Object errorResponse = "ERR " + e.getMessage();
+            ByteBuf errorBuffer = protocolParser.serialize(errorResponse);
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
+            }
         } catch (RetryableMeshException e) {
             // mesh 瞬时不可用（Leader 刚降级新 Leader 未知 / propose 超时）→ -TRYAGAIN
             // 集群感知客户端（Redisson/Jedis）自动退避重试
@@ -1116,6 +1133,15 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
      * 与 {@link #isWriteCommandOnSlave} 的保守取向一致）。
      * </p>
      */
+    /**
+     * Q4（2026-09-11 审计 P2）：SCRIPT EXISTS 子命令是纯读（查脚本缓存存在性，不 mutating）。
+     * gate 层 SCRIPT 整体判写（LOAD 改缓存），EXISTS 子命令在 handler 层特判走读路径。
+     */
+    private static boolean isScriptExistsRead(String commandName, String[] args) {
+        return "SCRIPT".equals(commandName) && args != null && args.length >= 2
+                && "EXISTS".equalsIgnoreCase(args[1]);
+    }
+
     private boolean isReadOnlyEvalCommand(String commandName, String[] args) {
         String cmdUpper = commandName != null ? commandName.toUpperCase() : "";
         if (!"EVAL".equals(cmdUpper) && !"EVALSHA".equals(cmdUpper)) {

@@ -158,6 +158,8 @@ public class MeshWriteGate {
             "XREAD", "XINFO",
             // 集合扫描 / 随机
             "HSCAN", "SSCAN", "ZSCAN", "SRANDMEMBER",
+            // Q4（2026-09-11 审计 P2）：KEYS 是纯读，原默认判写进 Raft（读放大 + 日志垃圾）
+            "KEYS",
             // geo 读
             "GEOSEARCH", "GEORADIUS", "GEORADIUSBYMEMBER",
             // 连接/控制（非 mutating，不应走 Raft）
@@ -313,6 +315,15 @@ public class MeshWriteGate {
      *          命中时直接回 {@link #blockCommandError()}，不进入 propose。
      */
     public byte[] write(byte[] rawRespFrame, int dbIndex, byte[] extra) {
+        // Q4（2026-09-11 审计 P2）：未知命令（含拼写错误）不生成 Raft 条目——
+        // 此前三节点各 apply 一条错误串（日志垃圾）。PUBLISH 由 handler 层处理不经
+        // 命令注册表，属豁免白名单（P1-10 将经 Raft 复制）。
+        String commandName = extractCommandName(rawRespFrame);
+        if (commandName != null && !commandName.isEmpty()
+                && !"PUBLISH".equals(commandName)
+                && (handler == null || !handler.isCommandRegistered(commandName))) {
+            throw new UnknownCommandException(commandName);
+        }
         CompletableFuture<byte[]> future = meshNode.propose(rawRespFrame, dbIndex, extra);
         try {
             if (writeTimeoutMs > 0) {
@@ -553,6 +564,56 @@ public class MeshWriteGate {
      * @param commandName 命令名（args[0]）；null/空返回 true（保守当写）
      * @return true=写路径（propose）；false=读路径（本地读）
      */
+    /**
+     * Q4（2026-09-11 审计 P2）：从完整 RESP 命令帧解析命令名（第一个 bulk string）。
+     * <p>仅解析数组头 + 第一个元素，不持有帧；帧畸形/不可解析返回 {@code null}（调用方跳过预检）。</p>
+     */
+    public static String extractCommandName(byte[] respFrame) {
+        if (respFrame == null || respFrame.length < 4 || respFrame[0] != '*') {
+            return null;
+        }
+        try {
+            int pos = 1;
+            while (pos < respFrame.length && respFrame[pos] != '\r') {
+                pos++;
+            }
+            if (pos + 1 >= respFrame.length || respFrame[pos + 1] != '\n') {
+                return null;
+            }
+            pos += 2;
+            // 第 1 个元素：命令名 bulk string（$len\r\n<data>\r\n）
+            return parseBulkStringAt(respFrame, pos);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 解析 pos 处 bulk string（$len\r\n<data>），返回 US_ASCII 数据；非法返回 null。 */
+    private static String parseBulkStringAt(byte[] frame, int pos) {
+        if (pos >= frame.length || frame[pos] != '$') {
+            return null;
+        }
+        pos++;
+        int lenStart = pos;
+        while (pos < frame.length && frame[pos] != '\r') {
+            pos++;
+        }
+        if (pos + 1 >= frame.length || frame[pos + 1] != '\n') {
+            return null;
+        }
+        int len;
+        try {
+            len = Integer.parseInt(new String(frame, lenStart, pos - lenStart,
+                    java.nio.charset.StandardCharsets.US_ASCII));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (len < 0 || pos + 2 + len > frame.length) {
+            return null;
+        }
+        return new String(frame, pos + 2, len, java.nio.charset.StandardCharsets.US_ASCII);
+    }
+
     public static boolean isWriteCommand(String commandName) {
         if (commandName == null || commandName.isEmpty()) {
             return true;
