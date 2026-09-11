@@ -583,6 +583,15 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 return;
             }
 
+            // P1-11（2026-09-11 mesh 审计）：认证检查前移——原检查位于事务分支之后，
+            // 未认证客户端可入队事务（follower 上还会本地落地）并获取集群拓扑。
+            // 白名单对齐 Redis：仅连接管理命令可在认证前执行。
+            if (commandHandler.isAuthRequired() && !clientInfo.isAuthenticated()
+                    && !isPreAuthAllowed(commandName)) {
+                writeSimpleError(ctx, "-NOAUTH Authentication required.\r\n");
+                return;
+            }
+
             if ("WATCH".equals(commandName)) {
                 logger.debug("Handling WATCH command");
                 handleWatchCommand(ctx, clientInfo, currentDatabase, args);
@@ -1049,6 +1058,25 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     // ==================== 阶段 12：mesh 辅助方法 ====================
 
     /** mesh 模式禁用的事务命令判定（P0-1，2026-09-11 mesh 审计）。 */
+    /**
+     * 认证前白名单（P1-11，2026-09-11 mesh 审计）：对齐 Redis 仅放行连接管理命令。
+     * 大小写不敏感。MULTI/EXEC/WATCH/CLUSTER 等一律要求先认证。
+     */
+    public static boolean isPreAuthAllowed(String commandName) {
+        if (commandName == null || commandName.isEmpty()) {
+            return false;
+        }
+        switch (commandName.toUpperCase()) {
+            case "AUTH":
+            case "QUIT":
+            case "HELLO":
+            case "RESET":
+                return true;
+            default:
+                return false;
+        }
+    }
+
     private static boolean isMeshDisabledTransactionCommand(String commandName) {        if (commandName == null || commandName.isEmpty()) {
             return false;
         }
