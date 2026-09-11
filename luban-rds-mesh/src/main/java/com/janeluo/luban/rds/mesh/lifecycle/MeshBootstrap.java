@@ -122,6 +122,9 @@ public class MeshBootstrap {
         // P1-12b：入站连接上限（默认 32）
         busServer.setMaxInboundConnections(config.getMeshBusMaxInbound());
 
+        // Q8（2026-09-11 审计 P2）：busClient 的 NioEventLoopGroup 非 daemon——装配中途
+        // 失败（如 raft-nodes.conf 损坏、磁盘 IO 错误）必须释放，否则线程泄漏。
+        try {
         // 3. raft-nodes.conf 读写器 + RDB 加载服务（dump.rdb 衔接用）
         String dbDir = config.getDir();
         MeshConfigPersister persister = new MeshConfigPersister(dbDir);
@@ -199,8 +202,12 @@ public class MeshBootstrap {
                 abbrev(topo.selfNodeId), topo.nodeIdToServiceAddr.size() - 1, busPort,
                 state.currentTerm, state.role);
 
-        return new MeshAssembly(meshNode, writeGate, redirector, clusterCommands,
-                lifecycleListener, busClient, busServer, snapshotManager);
+            return new MeshAssembly(meshNode, writeGate, redirector, clusterCommands,
+                    lifecycleListener, busClient, busServer, snapshotManager);
+        } catch (RuntimeException e) {
+            busClient.close();
+            throw e;
+        }
     }
 
     // ==================== 启动状态恢复（§5.5）====================

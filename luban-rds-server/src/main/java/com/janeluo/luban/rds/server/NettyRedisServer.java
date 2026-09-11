@@ -981,6 +981,15 @@ public class NettyRedisServer implements RedisServer {
         } catch (Exception e) {
             logger.error("Failed to start LbRDS server", e);
             stop();
+            // Q8（2026-09-11 审计）：失败时 running 尚未置位，stop() 直接返回——
+            // 须显式释放 mesh 组件（busClient 的 NioEventLoopGroup 为非 daemon 线程）
+            if (meshEnabled && meshAssembly != null) {
+                stopMeshComponents();
+            }
+            // P1-14（2026-09-11 mesh 审计）：启动失败必须向上抛——吞异常导致 main 打完
+            // "启动成功"后 join 永久阻塞（僵尸进程），RedisServerMain 的 exit(1) 永不触发；
+            // Spring 嵌入场景则表现为 bean 创建失败并携带根因。
+            throw new IllegalStateException("LbRDS server failed to start", e);
         }
     }
     
