@@ -509,7 +509,8 @@ public class MeshWriteGate {
     public String redirectResponse(String key) {
         String leaderAddr = resolveLeaderServiceAddr();
         if (leaderAddr == null || leaderAddr.isEmpty()) {
-            return "-MESHDOWN The mesh cluster has no leader\r\n";
+            // Q5（2026-09-11 审计 P2）：无 Leader 返回标准 -CLUSTERDOWN（主流客户端退避重试）
+        return MeshClientRedirector.MESHDOWN_RESPONSE;
         }
         // D2: 自重定向守卫——解析出的 Leader 地址等于本节点自身地址时，本节点明明非 Leader
         // 却 MOVED 回自己，客户端会死循环（Redisson "MOVED redirection loop detected"）。
