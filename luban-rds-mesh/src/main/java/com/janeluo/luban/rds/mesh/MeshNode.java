@@ -1362,9 +1362,9 @@ public class MeshNode {
         // 阶段 4：注入 replicator 时，委托给 replicator 处理（matchIndex/nextIndex/commit/apply）
         if (replicator != null) {
             replicator.onAppendEntriesResponse(fromNodeId, resp, true);
-            // 同步 MeshNode 的 nextIndex/matchIndex 视图（供 broadcastHeartbeat 兼容读取；阶段 3 map）
-            nextIndex.putAll(replicator.getNextIndexView());
-            matchIndex.putAll(replicator.getMatchIndexView());
+            // Q9（2026-09-11 审计 P2）：删除每响应的双拷贝视图同步（getNextIndexView/
+            // getMatchIndexView 各一次 HashMap 拷贝 + putAll）——replicator 路径下本地
+            // nextIndex/matchIndex 只写不读（读取方均为 replicator==null 的阶段 3 回退路径）
             return;
         }
 
