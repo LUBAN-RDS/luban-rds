@@ -331,6 +331,12 @@ public class RdsConfig {
      */
     private String meshAuthToken = "";
 
+    /**
+     * P1-12b（2026-09-11 审计）：mesh 总线入站连接上限（{@code mesh-bus-max-inbound}）。
+     * <p>默认 32；&lt;=0 表示不限制。防伪造流量/故障客户端耗尽连接。</p>
+     */
+    private int meshBusMaxInbound = 32;
+
 
     /**
      * mesh 总线端口（节点间 Raft RPC）；未配置时按 peers 列表中本节点条目取。
@@ -945,6 +951,14 @@ public class RdsConfig {
 
     public void setMeshAuthToken(String meshAuthToken) {
         this.meshAuthToken = meshAuthToken != null ? meshAuthToken : "";
+    }
+
+    public int getMeshBusMaxInbound() {
+        return meshBusMaxInbound;
+    }
+
+    public void setMeshBusMaxInbound(int meshBusMaxInbound) {
+        this.meshBusMaxInbound = meshBusMaxInbound;
     }
 
     public int getMeshBusPort() {

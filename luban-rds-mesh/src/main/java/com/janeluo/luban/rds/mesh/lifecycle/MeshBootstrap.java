@@ -119,6 +119,8 @@ public class MeshBootstrap {
             busClient.setAuthToken(config.getMeshAuthToken());
             logger.info("mesh 总线握手认证已启用（mesh-auth-token）");
         }
+        // P1-12b：入站连接上限（默认 32）
+        busServer.setMaxInboundConnections(config.getMeshBusMaxInbound());
 
         // 3. raft-nodes.conf 读写器 + RDB 加载服务（dump.rdb 衔接用）
         String dbDir = config.getDir();

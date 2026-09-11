@@ -53,6 +53,20 @@ public class MeshBusServer {
     private final java.util.concurrent.atomic.AtomicLong rejectedAuthCount =
             new java.util.concurrent.atomic.AtomicLong();
 
+    /**
+     * P1-12b（2026-09-11 审计）：入站连接数上限；&lt;=0 = 不限（默认 32）。
+     * 防 P1-12 场景下的连接耗尽。须在 {@link #start()} 前设置。
+     */
+    private volatile int maxInboundConnections = 32;
+
+    /** 当前入站连接数。 */
+    private final java.util.concurrent.atomic.AtomicInteger inboundConnections =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** 超限拒绝计数（可观测）。 */
+    private final java.util.concurrent.atomic.AtomicLong rejectedInboundCount =
+            new java.util.concurrent.atomic.AtomicLong();
+
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
     private Channel channel;
@@ -80,6 +94,16 @@ public class MeshBusServer {
         return rejectedAuthCount.get();
     }
 
+    /** 设置入站连接上限（&lt;=0 = 不限）；须在 start() 前调用。 */
+    public void setMaxInboundConnections(int max) {
+        this.maxInboundConnections = max;
+    }
+
+    /** 超限拒绝计数。 */
+    public long getRejectedInboundCount() {
+        return rejectedInboundCount.get();
+    }
+
     /**
      * 启动服务端：bind busPort。
      */
@@ -102,6 +126,17 @@ public class MeshBusServer {
                     .childHandler(new ChannelInitializer<SocketChannel>() {
                         @Override
                         protected void initChannel(SocketChannel ch) {
+                            // P1-12b：入站连接上限——超限立即关闭并计数
+                            int current = inboundConnections.incrementAndGet();
+                            if (maxInboundConnections > 0 && current > maxInboundConnections) {
+                                rejectedInboundCount.incrementAndGet();
+                                logger.warn("入站连接超限（{}/{}），拒绝: remote={}",
+                                        current, maxInboundConnections, ch.remoteAddress());
+                                inboundConnections.decrementAndGet();
+                                ch.close();
+                                return;
+                            }
+                            ch.closeFuture().addListener(f -> inboundConnections.decrementAndGet());
                             ch.pipeline().addLast(
                                     new MeshBusCodec.Encoder(),
                                     new MeshBusCodec.Decoder());

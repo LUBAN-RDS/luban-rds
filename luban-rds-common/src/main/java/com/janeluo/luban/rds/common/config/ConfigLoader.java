@@ -423,6 +423,9 @@ public class ConfigLoader {
                     case "mesh-auth-token":
                         config.setMeshAuthToken(value);
                         break;
+                    case "mesh-bus-max-inbound":
+                        config.setMeshBusMaxInbound(Integer.parseInt(value));
+                        break;
 
                     default:
                         logger.debug("未知配置项: {} = {}", key, value);

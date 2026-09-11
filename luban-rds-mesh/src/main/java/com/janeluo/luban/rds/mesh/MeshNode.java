@@ -75,6 +75,10 @@ public class MeshNode {
 
     private final String nodeId;
     private final MeshConfig config;
+
+    /** P1-12b：非成员来源帧丢弃计数（可观测）。 */
+    private final java.util.concurrent.atomic.AtomicLong unknownPeerFrames =
+            new java.util.concurrent.atomic.AtomicLong();
     private final MeshState state;
     private final MeshBusClient busClient;
     private final RaftStateMachine stateMachine;
@@ -326,6 +330,11 @@ public class MeshNode {
 
     public MeshState getState() {
         return state;
+    }
+
+    /** P1-12b：非成员来源帧丢弃计数（观测/测试）。 */
+    public long getUnknownPeerFrameCount() {
+        return unknownPeerFrames.get();
     }
 
     /** 注入落盘 hook（阶段 11 替换为真实 fsync）。 */
@@ -1022,6 +1031,16 @@ public class MeshNode {
      * @param frame      总线帧
      */
     public void onMessage(String fromNodeId, MeshFrame frame) {
+        // P1-12b（2026-09-11 审计）：成员校验——非 peers 成员的来源直接丢弃，
+        // 防任意能连 busPort 的主体注入高 term 帧（压制选举）或伪造 leaderId（MOVED 劫持）。
+        if (fromNodeId == null || fromNodeId.isEmpty()
+                || !config.getPeerNodeIds().contains(fromNodeId)) {
+            long dropped = unknownPeerFrames.incrementAndGet();
+            if (dropped % 1000 == 1) {
+                logger.warn("未知来源帧丢弃（成员校验失败）: from={}, 累计={}", fromNodeId, dropped);
+            }
+            return;
+        }
         MessageType type;
         try {
             type = MessageType.fromCode(frame.getType());
