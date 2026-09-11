@@ -337,6 +337,18 @@ public class RdsConfig {
      */
     private int meshBusMaxInbound = 32;
 
+    /**
+     * P1-15（2026-09-11 审计）：mesh 写超时（{@code mesh-write-timeout-ms}，默认 5000）。
+     * <p>gate 写路径 propose 阻塞上限；配合写幂等去重（P1-9），超时后同连接同帧重试安全。</p>
+     */
+    private long meshWriteTimeoutMs = 5000;
+
+    /**
+     * P1-15：mesh 全局在途写上限（{@code mesh-max-inflight-writes}，默认 256；&lt;=0 不限）。
+     * <p>超限新写立即 -TRYAGAIN，保证 pipeline 写风暴下业务线程占用有界。</p>
+     */
+    private int meshMaxInflightWrites = 256;
+
 
     /**
      * mesh 总线端口（节点间 Raft RPC）；未配置时按 peers 列表中本节点条目取。
@@ -959,6 +971,22 @@ public class RdsConfig {
 
     public void setMeshBusMaxInbound(int meshBusMaxInbound) {
         this.meshBusMaxInbound = meshBusMaxInbound;
+    }
+
+    public long getMeshWriteTimeoutMs() {
+        return meshWriteTimeoutMs;
+    }
+
+    public void setMeshWriteTimeoutMs(long meshWriteTimeoutMs) {
+        this.meshWriteTimeoutMs = meshWriteTimeoutMs;
+    }
+
+    public int getMeshMaxInflightWrites() {
+        return meshMaxInflightWrites;
+    }
+
+    public void setMeshMaxInflightWrites(int meshMaxInflightWrites) {
+        this.meshMaxInflightWrites = meshMaxInflightWrites;
     }
 
     public int getMeshBusPort() {

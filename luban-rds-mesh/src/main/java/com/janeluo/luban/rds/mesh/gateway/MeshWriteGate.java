@@ -102,7 +102,32 @@ public class MeshWriteGate {
     /** 响应序列化（读路径 Object → RESP 字节；复用 protocol 模块）。 */
     private final RedisProtocolParser protocolParser;
     /** 写路径 propose 阻塞超时（ms）。 */
-    private final long writeTimeoutMs;
+    private long writeTimeoutMs;
+
+    /**
+     * P1-15（2026-09-11 审计 P1）：全局在途写上限（&lt;=0 = 不限，默认 256）——
+     * pipeline N 条写串行 N×5s 占业务线程的根治：超限立即 -TRYAGAIN，占用有界。
+     */
+    private int maxInflightWrites = 256;
+
+    /** P1-15：当前在途写数（超时放弃但未落定的 proposal 也计入，直到 future 落定）。 */
+    private final java.util.concurrent.atomic.AtomicInteger inflightWrites =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** P1-15：运行时调整在途写上限（&lt;=0 = 不限）。 */
+    public void setMaxInflightWrites(int max) {
+        this.maxInflightWrites = max;
+    }
+
+    /** P1-15：当前在途写数（观测/测试）。 */
+    public int getInflightWrites() {
+        return inflightWrites.get();
+    }
+
+    /** P1-15：运行时调整写超时（ms；&lt;=0 表示不超时）。须在对外服务前设置。 */
+    public void setWriteTimeoutMs(long timeoutMs) {
+        this.writeTimeoutMs = timeoutMs;
+    }
     /**
      * 读一致性配置（DESIGN §5.7）。null 时按默认 LEASE 行为：租约有效本地读、
      * 失效 awaitValid({@link #DEFAULT_READ_LEASE_WAIT_MS})。
@@ -366,7 +391,15 @@ public class MeshWriteGate {
                 }
             }
         }
+        // P1-15：在途写并发上限——超限立即 TRYAGAIN（不进入 propose），业务线程占用有界。
+        // 计数经 whenComplete 回收：超时放弃但稍后落定的 future 也会正确递减。
+        if (maxInflightWrites > 0 && inflightWrites.incrementAndGet() > maxInflightWrites) {
+            inflightWrites.decrementAndGet();
+            throw new RetryableMeshException("mesh inflight writes saturated ("
+                    + maxInflightWrites + "), retry");
+        }
         CompletableFuture<byte[]> future = meshNode.propose(rawRespFrame, dbIndex, extra);
+        future.whenComplete((r, t) -> inflightWrites.decrementAndGet());
         try {
             if (writeTimeoutMs > 0) {
                 return future.get(writeTimeoutMs, TimeUnit.MILLISECONDS);

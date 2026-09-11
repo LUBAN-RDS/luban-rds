@@ -194,6 +194,11 @@ public class MeshBootstrap {
         //    selfServiceAddr 供自重定向守卫（解析出的 leaderAddr 等于自己时改发 MESHDOWN，防死循环）。
         MeshWriteGate writeGate = new MeshWriteGate(meshNode, rawStore, handler, meshConfig,
                 topo.nodeIdToServiceAddr, topo.selfServiceAddr);
+        // P1-15：写超时与在途写上限可配（默认 5000ms / 256）
+        if (config.getMeshWriteTimeoutMs() > 0) {
+            writeGate.setWriteTimeoutMs(config.getMeshWriteTimeoutMs());
+        }
+        writeGate.setMaxInflightWrites(config.getMeshMaxInflightWrites());
 
         // 9. MeshClientRedirector（nodeId→serviceAddr 映射 + 本节点地址，自重定向守卫）
         MeshClientRedirector redirector = new MeshClientRedirector(topo.nodeIdToServiceAddr, topo.selfServiceAddr);
