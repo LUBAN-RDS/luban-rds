@@ -903,6 +903,15 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     return;
                 }
                 if (MeshWriteGate.isWriteCommand(commandName)) {
+                    // 路线图#12（2026-09-11 mesh 审计）：只读 EVAL/EVALSHA 本地读。
+                    // 生产写放大源头——门户每请求 2 条 EVAL（1 条纯读 PTTL）恒判写全进 Raft。
+                    // 判定复用 cluster 从节点先例（resolveScriptBody + LuaScriptAnalyzer，
+                    // 取不到脚本保守判写）；follower 上只读脚本仍走 read() 抛 MOVED（P1-7 不动）。
+                    if (isReadOnlyEvalCommand(commandName, args)) {
+                        byte[] resp = meshWriteGate.read(currentDatabase, args);
+                        ctx.writeAndFlush(Unpooled.wrappedBuffer(resp));
+                        return;
+                    }
                     // 写命令：走 Raft propose（阻塞至 commit+apply），返回 apply 产生的响应字节。
                     // 事务 EXEC 已在前置分支处理；此处 rawRespFrame 为单条写命令帧。
                     // gate.write 内部抛 MovedToLeaderException → 下方专用 catch 生成 MOVED/MESHDOWN。
@@ -1040,8 +1049,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     // ==================== 阶段 12：mesh 辅助方法 ====================
 
     /** mesh 模式禁用的事务命令判定（P0-1，2026-09-11 mesh 审计）。 */
-    private static boolean isMeshDisabledTransactionCommand(String commandName) {
-        if (commandName == null || commandName.isEmpty()) {
+    private static boolean isMeshDisabledTransactionCommand(String commandName) {        if (commandName == null || commandName.isEmpty()) {
             return false;
         }
         switch (commandName.trim().toUpperCase()) {
@@ -1064,6 +1072,22 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
         } else if (errorBuffer != null) {
             errorBuffer.release();
         }
+    }
+
+    /**
+     * mesh 模式下 EVAL/EVALSHA 是否判只读（本地读，路线图#12 / 2026-09-11 mesh 审计）。
+     * <p>
+     * 脚本不可解析 / EVALSHA 未命中脚本缓存时保守返回 false（走 Raft——宁多复制不漏复制，
+     * 与 {@link #isWriteCommandOnSlave} 的保守取向一致）。
+     * </p>
+     */
+    private boolean isReadOnlyEvalCommand(String commandName, String[] args) {
+        String cmdUpper = commandName != null ? commandName.toUpperCase() : "";
+        if (!"EVAL".equals(cmdUpper) && !"EVALSHA".equals(cmdUpper)) {
+            return false;
+        }
+        String script = commandHandler.resolveScriptBody(cmdUpper, args);
+        return script != null && LuaScriptAnalyzer.isReadOnlyScript(script);
     }
 
     /**
