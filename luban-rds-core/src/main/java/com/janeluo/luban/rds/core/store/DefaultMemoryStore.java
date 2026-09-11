@@ -384,6 +384,23 @@ public class DefaultMemoryStore implements MemoryStore {
     
     // 内存淘汰策略
     private String maxMemoryPolicy = POLICY_NOEVICTION;
+
+    /**
+     * P1-6（2026-09-11 mesh 审计）：强制 noeviction 覆盖开关（mesh 模式确定性收口）。
+     * 置位后淘汰策略一律按 noeviction 执行（内存满 → 写返回 OOM），CONFIG SET
+     * maxmemory-policy 也被上层拦截——保证三节点淘汰行为一致。
+     */
+    private volatile boolean noEvictionOverride = false;
+
+    /** P1-6：设置强制 noeviction 覆盖。 */
+    public void setNoEvictionOverride(boolean override) {
+        this.noEvictionOverride = override;
+    }
+
+    /** P1-6：强制 noeviction 是否生效。 */
+    public boolean isNoEvictionOverride() {
+        return noEvictionOverride;
+    }
     
     @Override
     public String getMaxMemoryPolicy() {
@@ -393,6 +410,10 @@ public class DefaultMemoryStore implements MemoryStore {
     @Override
     public void setMaxMemoryPolicy(String policy) {
         if (policy == null) return;
+        // P1-6：强制 noeviction 生效期间拒绝切走（含 CONFIG SET 热切换），保证确定性
+        if (noEvictionOverride && !POLICY_NOEVICTION.equals(policy)) {
+            return;
+        }
         switch (policy) {
             case POLICY_NOEVICTION:
             case POLICY_ALLKEYS_LRU:
@@ -593,12 +614,18 @@ public class DefaultMemoryStore implements MemoryStore {
         if (maxMemory <= 0) {
             return true; // 没有内存限制
         }
-        
+
         // 如果当前内存加上需要的大小不超过限制，直接返回
         if (usedMemory.get() + requiredSize <= maxMemory) {
             return true;
         }
-        
+
+        // P1-6：强制 noeviction——存在内存压力时不做任何淘汰，直接失败（写路径回 OOM 错误）。
+        // 注意必须在压力判定之后：无压力的普通写入不受影响。
+        if (noEvictionOverride) {
+            return false;
+        }
+
         // 根据淘汰策略进行内存回收
         switch (maxMemoryPolicy) {
             case POLICY_NOEVICTION:

@@ -543,6 +543,18 @@ public class NettyRedisServer implements RedisServer {
                 new com.janeluo.luban.rds.mesh.lifecycle.MeshBootstrap();
         this.meshAssembly = bootstrap.bootstrap(config, memoryStore, commandHandler);
 
+        // P1-6（2026-09-11 mesh 审计）：mesh 模式强制 noeviction——淘汰决策只依赖客户端读
+        // 路径的访问时间（leader 有、follower 无），经 Raft 同步不可行；确定性兜底 = 不淘汰
+        if (memoryStore instanceof com.janeluo.luban.rds.core.store.DefaultMemoryStore) {
+            ((com.janeluo.luban.rds.core.store.DefaultMemoryStore) memoryStore).setNoEvictionOverride(true);
+        }
+        if (config.getMaxmemory() > 0
+                && !com.janeluo.luban.rds.core.store.DefaultMemoryStore.POLICY_NOEVICTION
+                        .equalsIgnoreCase(config.getMaxmemoryPolicy())) {
+            logger.warn("mesh 模式下淘汰策略强制 noeviction（确定性要求），原配置 {} 被忽略",
+                    config.getMaxmemoryPolicy());
+        }
+
         logger.info("mesh 模式初始化完成: nodeId={}, peers={}",
                 config.getMeshSelfNodeId(),
                 meshAssembly.getClientRedirector() != null ? "ready" : "n/a");
