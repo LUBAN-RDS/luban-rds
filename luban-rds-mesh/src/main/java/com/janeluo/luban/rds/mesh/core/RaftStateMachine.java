@@ -218,7 +218,7 @@ public class RaftStateMachine {
         // (1) term < currentTerm → 直接拒
         if (msg.getTerm() < currentTerm) {
             return new VoteDecision(
-                    new RequestVoteResponse(currentTerm, false), t, false);
+                    new RequestVoteResponse(currentTerm, false, msg.isPreVote(), currentTerm), t, false);
         }
 
         // (2) term > currentTerm → 降级 follower
@@ -251,7 +251,7 @@ public class RaftStateMachine {
         boolean resetElectionTimer = (msg.getTerm() >= currentTerm) && candidateUpToDate;
 
         return new VoteDecision(
-                new RequestVoteResponse(currentTerm, grant), t, resetElectionTimer);
+                new RequestVoteResponse(currentTerm, grant, msg.isPreVote(), currentTerm), t, resetElectionTimer);
     }
 
     /**

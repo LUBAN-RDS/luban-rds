@@ -181,7 +181,7 @@ class MeshNodeTest {
 
             // 2. B 同意 PreVote（自己+B = 多数派）
             bus.clear();
-            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(5L, true)));
+            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(5L, true, true, 5L)));
             node.awaitIdle();
 
             // PreVote 多数派 → 触发正式选举（term+1=6）
@@ -195,7 +195,7 @@ class MeshNodeTest {
 
             // 3. B 同意正式投票（自己+B=2 多数派）
             bus.clear();
-            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(6L, true)));
+            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(6L, true, false, 6L)));
             node.awaitIdle();
 
             // 4. 应转 Leader
@@ -255,10 +255,10 @@ class MeshNodeTest {
                 } catch (Exception e) { throw new RuntimeException(e); }
             });
             // PreVote B 同意
-            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(5L, true)));
+            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(5L, true, true, 5L)));
             node.awaitIdle();
             // 正式 B 同意
-            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(6L, true)));
+            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(6L, true, false, 6L)));
             node.awaitIdle();
             assertTrue(node.isLeader());
             assertFalse(node.lease().isValid(System.currentTimeMillis()), "Leader 初始租约应失效");
@@ -302,9 +302,9 @@ class MeshNodeTest {
                     m.invoke(node);
                 } catch (Exception e) { throw new RuntimeException(e); }
             });
-            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(5L, true)));
+            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(5L, true, true, 5L)));
             node.awaitIdle();
-            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(6L, true)));
+            node.onMessage(B, frame(B, MessageType.REQUEST_VOTE_RESP, new RequestVoteResponse(6L, true, false, 6L)));
             node.awaitIdle();
             assertTrue(node.isLeader());
 

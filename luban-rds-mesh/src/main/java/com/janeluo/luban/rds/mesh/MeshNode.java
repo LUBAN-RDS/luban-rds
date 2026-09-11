@@ -962,6 +962,19 @@ public class MeshNode {
             // 无进行中的选举，丢弃（可能是过期响应）
             return;
         }
+        // P0-3（2026-09-11 mesh 审计）：三重轮次校验——term 相等 + 阶段匹配 + 选举轮次相等。
+        // PreVote(term N) 的迟到票不得计入正式选举(term N+1)——此前只按 fromNodeId 去重，
+        // 幽灵票凑多数派可选出无真实多数派的 Leader（同 term 双主）；旧版本帧
+        // electionTerm=0 同样被丢弃（滚动升级窗口保守安全）。
+        if (resp.getTerm() != state.currentTerm
+                || resp.isPreVote() != c.isPreVote()
+                || resp.getElectionTerm() != state.currentTerm) {
+            logger.debug("丢弃轮次不匹配的投票响应: from={}, respTerm={}, respPreVote={}, respElectionTerm={}, "
+                            + "currentTerm={}, stagePreVote={}",
+                    abbrev(fromNodeId), resp.getTerm(), resp.isPreVote(), resp.getElectionTerm(),
+                    state.currentTerm, c.isPreVote());
+            return;
+        }
         // PreVote 响应与正式响应走同一个 collector（currentVoteCollector 指向当前阶段）
         c.onVoteReceived(fromNodeId, resp, state.currentTerm);
     }
