@@ -79,6 +79,21 @@ public class MeshNode {
     /** P1-12b：非成员来源帧丢弃计数（可观测）。 */
     private final java.util.concurrent.atomic.AtomicLong unknownPeerFrames =
             new java.util.concurrent.atomic.AtomicLong();
+
+    /** Q7：单条 entry 编码大小上限（12MB）——低于总线帧 16MB 上限留余量。 */
+    static final long MAX_ENTRY_BYTES = 12L * 1024 * 1024;
+
+    /** Q7：估算 entry 编码字节数（固定字段约 28B + payload + extra，与 LogReplicator 估算口径一致）。 */
+    static long estimateEntryBytes(byte[] payload, byte[] extra) {
+        long size = 28;
+        if (payload != null) {
+            size += payload.length;
+        }
+        if (extra != null) {
+            size += extra.length;
+        }
+        return size;
+    }
     private final MeshState state;
     private final MeshBusClient busClient;
     private final RaftStateMachine stateMachine;
@@ -515,6 +530,16 @@ public class MeshNode {
         if (applier == null || replicator == null) {
             CompletableFuture<byte[]> f = new CompletableFuture<>();
             f.completeExceptionally(new IllegalStateException("MeshNode 未启用 apply 能力（applier 未注入）"));
+            return f;
+        }
+
+        // Q7（2026-09-11 审计）：条目大小预检——超限直接异常完成，不追加 log、不进复制，
+        // 消灭"Encoder 静默丢弃 → 100ms 重发 → 再丢弃"死循环与 future 永久悬挂
+        if (estimateEntryBytes(respPayload, extra) > MAX_ENTRY_BYTES) {
+            CompletableFuture<byte[]> f = new CompletableFuture<>();
+            f.completeExceptionally(new com.janeluo.luban.rds.mesh.gateway.RequestTooLargeException(
+                    "request too large: " + estimateEntryBytes(respPayload, extra)
+                            + " bytes exceeds limit " + MAX_ENTRY_BYTES));
             return f;
         }
 

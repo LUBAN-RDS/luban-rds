@@ -1034,6 +1034,15 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             } else if (errorBuffer != null) {
                 errorBuffer.release();
             }
+        } catch (com.janeluo.luban.rds.mesh.gateway.RequestTooLargeException e) {
+            // Q7（2026-09-11 审计 P2）：超大条目 fail-fast，明确报错而非悬挂/TRYAGAIN
+            Object errorResponse = "ERR " + e.getMessage();
+            ByteBuf errorBuffer = protocolParser.serialize(errorResponse);
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
+            }
         } catch (com.janeluo.luban.rds.mesh.gateway.UnknownCommandException e) {
             // Q4（2026-09-11 审计 P2）：未知命令不进 Raft，对齐 Redis 错误串
             Object errorResponse = "ERR " + e.getMessage();
