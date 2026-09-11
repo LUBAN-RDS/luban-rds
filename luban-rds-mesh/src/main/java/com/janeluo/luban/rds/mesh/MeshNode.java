@@ -75,6 +75,35 @@ public class MeshNode {
 
     private final String nodeId;
     private final MeshConfig config;
+
+    /** P1-12b：非成员来源帧丢弃计数（可观测）。 */
+    private final java.util.concurrent.atomic.AtomicLong unknownPeerFrames =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** P1-13：入站帧分发许可（默认 4096）——重发风暴下有界排队；permits 可注入便于测试。 */
+    private final java.util.concurrent.Semaphore inboundPermits;
+
+    /** P1-13：入站帧因许可耗尽的丢弃计数。 */
+    private final java.util.concurrent.atomic.AtomicLong inboundDropped =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** 入站许可默认值。 */
+    static final int DEFAULT_INBOUND_PERMITS = 4096;
+
+    /** Q7：单条 entry 编码大小上限（12MB）——低于总线帧 16MB 上限留余量。 */
+    static final long MAX_ENTRY_BYTES = 12L * 1024 * 1024;
+
+    /** Q7：估算 entry 编码字节数（固定字段约 28B + payload + extra，与 LogReplicator 估算口径一致）。 */
+    static long estimateEntryBytes(byte[] payload, byte[] extra) {
+        long size = 28;
+        if (payload != null) {
+            size += payload.length;
+        }
+        if (extra != null) {
+            size += extra.length;
+        }
+        return size;
+    }
     private final MeshState state;
     private final MeshBusClient busClient;
     private final RaftStateMachine stateMachine;
@@ -98,6 +127,14 @@ public class MeshNode {
     private final java.util.concurrent.ScheduledThreadPoolExecutor persistExecutor;
     /** 本节点已落盘的最大日志 index（仅 raft 线程读写；volatile 仅为可见性兜底）。 */
     private volatile long durableIndex;
+
+    /**
+     * Q3（2026-09-11 审计）：持久性门控开关——mesh-persist=yes（默认）时为 true，
+     * commit 受 durableIndex 门控；mesh-persist=no 时为 false，durableIndex 视为已跟上
+     * （弱持久语义，仅用于性能测试/低持久性场景，崩溃后已确认写可能丢失）。
+     * 由 MeshBootstrap 装配时设置。
+     */
+    private volatile boolean durableGatingActive = true;
 
     private final ElectionTimer electionTimer;
     private final LeaseManager lease;
@@ -208,6 +245,7 @@ public class MeshNode {
         this.nodeId = config.getSelfNodeId();
         this.state = state;
         this.busClient = busClient;
+        this.inboundPermits = new java.util.concurrent.Semaphore(DEFAULT_INBOUND_PERMITS);
         this.stateMachine = stateMachine;
         // 单线程：保证 Raft 状态变更串行化
         this.raftExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -242,7 +280,10 @@ public class MeshNode {
         if (applier != null) {
             this.replicator = new LogReplicator(nodeId, config, state, busClient, applier);
             // 自身 match 以已落盘 index 为上限（未落盘不 commit，持久性语义）
-            this.replicator.setDurableIndexSupplier(() -> durableIndex);
+            // Q3（2026-09-11 审计）：mesh-persist=no（durableGatingActive=false）时门控短路——
+            // durableIndex 视为已跟上 lastLogIndex（"凭空 durable"显式化为弱持久语义）
+            this.replicator.setDurableIndexSupplier(() ->
+                    durableGatingActive ? durableIndex : state.getLastLogIndex());
             // apply 完成回调：complete 对应 pendingProposals future（携带 apply 响应对象；序列化为字节）
             this.replicator.setAppliedNotifier(this::onEntryApplied);
             // 多数派 ACK 续租回调（Leader Lease，DESIGN §5.7）
@@ -326,6 +367,32 @@ public class MeshNode {
 
     public MeshState getState() {
         return state;
+    }
+
+    /** P1-12b：非成员来源帧丢弃计数（观测/测试）。 */
+    public long getUnknownPeerFrameCount() {
+        return unknownPeerFrames.get();
+    }
+
+    /** P1-13：入站帧因许可耗尽的丢弃计数（观测/测试）。 */
+    public long getInboundDroppedCount() {
+        return inboundDropped.get();
+    }
+
+    /** P1-13：调整入站许可数（仅测试/运维动态调参用；运行中调小不影响已获许可）。 */
+    void setInboundPermits(int permits) {
+        inboundPermits.drainPermits();
+        inboundPermits.release(Math.max(1, permits));
+    }
+
+    /** Q3：持久性门控是否生效（mesh-persist=no 时为 false）。 */
+    public boolean isDurableGatingActive() {
+        return durableGatingActive;
+    }
+
+    /** Q3：由装配层设置（mesh-persist=no → false，门控短路）。 */
+    public void setDurableGatingActive(boolean active) {
+        this.durableGatingActive = active;
     }
 
     /** 注入落盘 hook（阶段 11 替换为真实 fsync）。 */
@@ -506,6 +573,16 @@ public class MeshNode {
         if (applier == null || replicator == null) {
             CompletableFuture<byte[]> f = new CompletableFuture<>();
             f.completeExceptionally(new IllegalStateException("MeshNode 未启用 apply 能力（applier 未注入）"));
+            return f;
+        }
+
+        // Q7（2026-09-11 审计）：条目大小预检——超限直接异常完成，不追加 log、不进复制，
+        // 消灭"Encoder 静默丢弃 → 100ms 重发 → 再丢弃"死循环与 future 永久悬挂
+        if (estimateEntryBytes(respPayload, extra) > MAX_ENTRY_BYTES) {
+            CompletableFuture<byte[]> f = new CompletableFuture<>();
+            f.completeExceptionally(new com.janeluo.luban.rds.mesh.gateway.RequestTooLargeException(
+                    "request too large: " + estimateEntryBytes(respPayload, extra)
+                            + " bytes exceeds limit " + MAX_ENTRY_BYTES));
             return f;
         }
 
@@ -1022,6 +1099,16 @@ public class MeshNode {
      * @param frame      总线帧
      */
     public void onMessage(String fromNodeId, MeshFrame frame) {
+        // P1-12b（2026-09-11 审计）：成员校验——非 peers 成员的来源直接丢弃，
+        // 防任意能连 busPort 的主体注入高 term 帧（压制选举）或伪造 leaderId（MOVED 劫持）。
+        if (fromNodeId == null || fromNodeId.isEmpty()
+                || !config.getPeerNodeIds().contains(fromNodeId)) {
+            long dropped = unknownPeerFrames.incrementAndGet();
+            if (dropped % 1000 == 1) {
+                logger.warn("未知来源帧丢弃（成员校验失败）: from={}, 累计={}", fromNodeId, dropped);
+            }
+            return;
+        }
         MessageType type;
         try {
             type = MessageType.fromCode(frame.getType());
@@ -1038,11 +1125,24 @@ public class MeshNode {
         }
         // peer 在线信号：出站断连时立即重置重连退避（避免节点重启后干等最长 64s 退避窗口）
         busClient.notifyPeerAlive(fromNodeId);
+        // P1-13（2026-09-11 审计）：入站准入控制——对端重发风暴下有界排队。
+        // 只约束入站帧分发；内部任务（持久化回调/timer tick/propose）不经信号量（I7），
+        // 其队列拒绝语义不受影响。所有 Raft RPC 均可安全重发，丢弃只降活性不破正确性。
+        if (!inboundPermits.tryAcquire()) {
+            long dropped = inboundDropped.incrementAndGet();
+            if (dropped % 1000 == 1) {
+                logger.warn("入站帧分发许可耗尽，丢弃: from={}, type={}, 累计丢弃={}",
+                        fromNodeId, type, dropped);
+            }
+            return;
+        }
         raftExecutor.execute(() -> {
             try {
                 dispatch(fromNodeId, type, msg);
             } catch (Exception e) {
                 logger.error("处理消息异常: from={}, type={}", fromNodeId, type, e);
+            } finally {
+                inboundPermits.release();
             }
         });
     }
@@ -1107,6 +1207,9 @@ public class MeshNode {
         // RequestVote 不是 Leader 存在的证据；双孤 follower 互相探测会互踩定时器并架空
         // 选举退避（9/3 事故 22 秒无 Leader 僵局的放大器）。对齐 Raft §9.6 / etcd：
         // 只有合法 AppendEntries（Leader 心跳）才 reset 接收方选举定时器——见 handleAppendEntries。
+        // Q2（2026-09-11 审计 P2）：唯一例外 = 授出选票（decision.resetElectionTimer 语义）——
+        // §5.2 标准行为；votedFor 每 term 唯一，授予复位不可能被同 term 反复探测利用
+        //（denied / 过期 term 均不复位，D2 语义不变）。
         // 阶段 11 + P1-1（2026-09-11 mesh 审计）：正式投票授予 fail-stop——
         // votedFor 先持久化，成功才发 granted，失败改发 denied。此前 persistStateSafe 吞异常后
         // 照发 granted：内存已投票、磁盘未写，崩溃恢复后同 term 二次投票 → 双 Leader。
@@ -1119,6 +1222,8 @@ public class MeshNode {
             persistExecutor.execute(() -> {
                 try {
                     persistHook.run();
+                    // Q2：授予生效（持久化成功）后复位选举定时器（§5.2）
+                    electionTimer.reset();
                     sendResponse(voter, MessageType.REQUEST_VOTE_RESP, granted);
                 } catch (Exception e) {
                     logger.error("votedFor 持久化失败，拒绝授予投票: term={}, candidate={}",
@@ -1128,6 +1233,8 @@ public class MeshNode {
             });
             return;
         }
+        // PreVote 授予不复位（Q2 收窄）：PreVote 不消耗 votedFor，双孤 follower 互相授予
+        // PreVote 会互踩定时器架空退避——正是 D2 要断的路径（MeshNodeTest 既有断言锁定）。
         // PreVote / 拒绝票：无需持久化，立即回复
         sendResponse(fromNodeId, MessageType.REQUEST_VOTE_RESP, decision.response);
         logger.debug("回复 RequestVote: from={}, granted={}, preVote={}",
@@ -1252,9 +1359,9 @@ public class MeshNode {
         // 阶段 4：注入 replicator 时，委托给 replicator 处理（matchIndex/nextIndex/commit/apply）
         if (replicator != null) {
             replicator.onAppendEntriesResponse(fromNodeId, resp, true);
-            // 同步 MeshNode 的 nextIndex/matchIndex 视图（供 broadcastHeartbeat 兼容读取；阶段 3 map）
-            nextIndex.putAll(replicator.getNextIndexView());
-            matchIndex.putAll(replicator.getMatchIndexView());
+            // Q9（2026-09-11 审计 P2）：删除每响应的双拷贝视图同步（getNextIndexView/
+            // getMatchIndexView 各一次 HashMap 拷贝 + putAll）——replicator 路径下本地
+            // nextIndex/matchIndex 只写不读（读取方均为 replicator==null 的阶段 3 回退路径）
             return;
         }
 
@@ -1412,7 +1519,8 @@ public class MeshNode {
     }
 
     /** 阶段 4：取 applier（测试用，可能为 null）。 */
-    LogApplier getApplier() {
+    /** P1-10：取 applier（server 层装配 publish 投递回调用；可能为 null）。 */
+    public LogApplier getApplier() {
         return applier;
     }
 

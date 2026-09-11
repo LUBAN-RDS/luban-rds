@@ -83,10 +83,21 @@ public class DefaultCommandHandler {
         if (handler == null) {
             return "-ERR unknown command '" + command + "'\r\n";
         }
-        
+
         return handler.handle(database, args, store);
     }
-    
+
+    /**
+     * Q4（2026-09-11 mesh 审计 P2）：命令是否已注册。
+     * <p>供 mesh gate 写入口预检——未注册命令不生成 Raft 条目，直接报 unknown command。</p>
+     *
+     * @param command 命令名（大小写不敏感）
+     * @return true=已注册
+     */
+    public boolean isCommandRegistered(String command) {
+        return command != null && commandHandlers.containsKey(command.toUpperCase());
+    }
+
     /**
      * 获取配置的密码
      */

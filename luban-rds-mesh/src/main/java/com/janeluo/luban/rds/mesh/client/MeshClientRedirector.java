@@ -24,7 +24,8 @@ import java.util.Map;
  *           非 bus 端口 11000）。</li>
  *     </ul>
  *   </li>
- *   <li><b>未知/无 Leader</b>：{@code "-MESHDOWN The mesh cluster has no leader\r\n"}。
+ *   <li><b>未知/无 Leader</b>：{@code "-CLUSTERDOWN The cluster is down\r\n"}（Q5，2026-09-11
+ *       审计：由自造 MESHDOWN 对齐为 Redis 标准错误码）。
  *       建议客户端指数退避重试（默认 200ms 起步、上限 2s，DESIGN §5.3）。</li>
  * </ul>
  *
@@ -44,25 +45,30 @@ import java.util.Map;
  */
 public class MeshClientRedirector {
 
-    /** 无 Leader 时返回的 MESHDOWN 响应（DESIGN §5.3）。 */
-    public static final String MESHDOWN_RESPONSE = "-MESHDOWN The mesh cluster has no leader\r\n";
+    /**
+     * 无 Leader 时返回的响应（DESIGN §5.3）。
+     * <p>Q5（2026-09-11 审计 P2）：自造错误码 MESHDOWN 改为标准 {@code -CLUSTERDOWN}——
+     * 主流集群客户端不识别 MESHDOWN 不重试，CLUSTERDOWN 有退避重试语义。
+     * 字段名保留历史名避免无谓 diff。</p>
+     */
+    public static final String MESHDOWN_RESPONSE = "-CLUSTERDOWN The cluster is down\r\n";
 
     /**
      * 自重定向兜底响应：解析出的 Leader 地址等于本节点自身地址时返回（D2 守卫）。
      * <p>此时本节点明确非 Leader（抛 {@link MovedToLeaderException} 的前置条件），发 MOVED 到自己
-     * 会让客户端死循环（Redisson "MOVED redirection loop detected"）；改发 MESHDOWN 让客户端退避重试，
+     * 会让客户端死循环（Redisson "MOVED redirection loop detected"）；改发 CLUSTERDOWN 让客户端退避重试，
      * 等 Leader 稳定 / 拓扑刷新后 MOVED 到正确地址。</p>
      */
     public static final String MESHDOWN_SELF_REDIRECT_RESPONSE =
-            "-MESHDOWN redirect target is self; cluster topology unstable\r\n";
+            "-CLUSTERDOWN redirect target is self; cluster topology unstable\r\n";
 
     /**
      * Leader 不可达兜底响应：解析出的 Leader 地址不在已知 peers 映射里时返回（P3 守卫）。
      * <p>选举风暴中 leaderId 可能短暂指向已死节点或无效地址，MOVED 过去客户端连不上，
-     * 还可能在多节点间形成循环。改发 MESHDOWN 让客户端感知集群不可用并重试。</p>
+     * 还可能在多节点间形成循环。改发 CLUSTERDOWN 让客户端感知集群不可用并重试。</p>
      */
     public static final String MESHDOWN_LEADER_UNREACHABLE_RESPONSE =
-            "-MESHDOWN redirect target unreachable; cluster topology unstable\r\n";
+            "-CLUSTERDOWN redirect target unreachable; cluster topology unstable\r\n";
 
     /** nodeId → service 地址（{@code "ip:port"}，service 端口）映射；只读。 */
     private final Map<String, String> nodeIdToServiceAddr;

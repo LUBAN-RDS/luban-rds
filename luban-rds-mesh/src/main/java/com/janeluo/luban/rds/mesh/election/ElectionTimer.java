@@ -61,6 +61,15 @@ public class ElectionTimer {
     private final AtomicReference<java.util.concurrent.ScheduledFuture<?>> pending =
             new AtomicReference<>();
 
+    /** Q2：调度次数计数（start/reset 共用 scheduleNext；观测/测试用）。 */
+    private final java.util.concurrent.atomic.AtomicLong scheduleCount =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Q2：调度次数（观测/测试）。 */
+    public long getScheduleCount() {
+        return scheduleCount.get();
+    }
+
     private volatile boolean started;
     private volatile boolean stopped;
 
@@ -187,28 +196,36 @@ public class ElectionTimer {
 
     private void scheduleNext() {
         long delay = nextTimeoutMs();
+        scheduleCount.incrementAndGet();
         // 同步块保证 pending 的"取消旧的 + 设置新的"原子（与 stop/start/reset 互斥）
         java.util.concurrent.ScheduledFuture<?> prev = pending.getAndSet(null);
         if (prev != null) {
             prev.cancel(false);
         }
-        // 用一个持有 future 引用的 holder，回调触发时验证它仍是当前注册的任务
-        final java.util.concurrent.atomic.AtomicReference<java.util.concurrent.ScheduledFuture<?>> slot =
-                new java.util.concurrent.atomic.AtomicReference<>();
+        // Q10（2026-09-11 审计 P2）：回调有效性判据 = 未被 cancel。
+        // 原实现用"slot 未发布 → 丢弃"判过期，但回调可能先于 slot.set 执行（delay≈0 窗口），
+        // 首次调度即被误判丢弃 → 选举超时静默丢失。scheduleNext/stop 均 synchronized，
+        // cancel 与 schedule 互斥：回调运行时若已被 cancel 必然是重置/停止所致，丢弃正确；
+        // 未被 cancel（哪怕 pending 尚未发布）就是当前唯一的有效定时器，必须触发。
+        final java.util.concurrent.ScheduledFuture<?>[] self =
+                new java.util.concurrent.ScheduledFuture<?>[1];
         java.util.concurrent.ScheduledFuture<?> future = scheduler.schedule(() -> {
-            // 触发时校验：当前注册的任务必须是自己（否则说明已被 reset/stop 取消替换，丢弃此次触发）
-            if (slot.get() == null) {
+            if (self[0] != null && self[0].isCancelled()) {
                 return;
             }
-            pending.compareAndSet(slot.get(), null);
+            pending.compareAndSet(self[0], null);
             try {
                 onElectionTimeout.run();
             } catch (Exception e) {
                 logger.error("选举超时回调异常", e);
             }
         }, delay, TimeUnit.MILLISECONDS);
-        slot.set(future);
+        self[0] = future;
         pending.set(future);
+        // 竞态收尾：回调已在发布前触发（fire-before-publish）则清理残留的 done future
+        if (future.isDone()) {
+            pending.compareAndSet(future, null);
+        }
     }
 
     private void cancelPending() {

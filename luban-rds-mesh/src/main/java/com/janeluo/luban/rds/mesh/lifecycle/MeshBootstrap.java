@@ -113,7 +113,18 @@ public class MeshBootstrap {
         int busPort = config.getMeshBusPort() > 0
                 ? config.getMeshBusPort() : topo.selfBusPort;
         MeshBusServer busServer = new MeshBusServer(topo.selfNodeId, busPort, busHandler);
+        // P1-12a：总线握手认证 token（空 = 关闭，兼容滚动升级；先全网升级再统一配置）
+        if (config.getMeshAuthToken() != null && !config.getMeshAuthToken().isEmpty()) {
+            busServer.setAuthToken(config.getMeshAuthToken());
+            busClient.setAuthToken(config.getMeshAuthToken());
+            logger.info("mesh 总线握手认证已启用（mesh-auth-token）");
+        }
+        // P1-12b：入站连接上限（默认 32）
+        busServer.setMaxInboundConnections(config.getMeshBusMaxInbound());
 
+        // Q8（2026-09-11 审计 P2）：busClient 的 NioEventLoopGroup 非 daemon——装配中途
+        // 失败（如 raft-nodes.conf 损坏、磁盘 IO 错误）必须释放，否则线程泄漏。
+        try {
         // 3. raft-nodes.conf 读写器 + RDB 加载服务（dump.rdb 衔接用）
         String dbDir = config.getDir();
         MeshConfigPersister persister = new MeshConfigPersister(dbDir);
@@ -148,6 +159,10 @@ public class MeshBootstrap {
                     throw new RuntimeException("raft-nodes.conf 保存失败", e);
                 }
             });
+        } else {
+            // Q3（2026-09-11 审计）：mesh-persist=no → 持久性门控短路（弱持久语义显式化）
+            meshNode.setDurableGatingActive(false);
+            logger.warn("mesh-persist=no：持久性门控短路（弱持久语义，仅用于性能测试场景）");
         }
 
         // 7. SnapshotManager（chunked 发送/接收 + 周期快照）
@@ -169,12 +184,21 @@ public class MeshBootstrap {
                     }
                 });
         meshNode.setSnapshotManager(snapshotManager);
+        // P1-4a：快照携带/还原脚本表（脚本缓存属复制状态，快照截断后仍可 EVALSHA）
+        snapshotManager.setScriptTableHooks(
+                com.janeluo.luban.rds.core.handler.LuaCommandHandler::snapshotScripts,
+                com.janeluo.luban.rds.core.handler.LuaCommandHandler::restoreScripts);
 
         // 8. MeshWriteGate（meshNode/rawStore/handler/config + nodeId→serviceAddr 映射 + 本节点地址）
         //    映射与 redirector 同源，供 redirectResponse 把 Leader nodeId 解析成真实 ip:port；
         //    selfServiceAddr 供自重定向守卫（解析出的 leaderAddr 等于自己时改发 MESHDOWN，防死循环）。
         MeshWriteGate writeGate = new MeshWriteGate(meshNode, rawStore, handler, meshConfig,
                 topo.nodeIdToServiceAddr, topo.selfServiceAddr);
+        // P1-15：写超时与在途写上限可配（默认 5000ms / 256）
+        if (config.getMeshWriteTimeoutMs() > 0) {
+            writeGate.setWriteTimeoutMs(config.getMeshWriteTimeoutMs());
+        }
+        writeGate.setMaxInflightWrites(config.getMeshMaxInflightWrites());
 
         // 9. MeshClientRedirector（nodeId→serviceAddr 映射 + 本节点地址，自重定向守卫）
         MeshClientRedirector redirector = new MeshClientRedirector(topo.nodeIdToServiceAddr, topo.selfServiceAddr);
@@ -191,8 +215,12 @@ public class MeshBootstrap {
                 abbrev(topo.selfNodeId), topo.nodeIdToServiceAddr.size() - 1, busPort,
                 state.currentTerm, state.role);
 
-        return new MeshAssembly(meshNode, writeGate, redirector, clusterCommands,
-                lifecycleListener, busClient, busServer, snapshotManager);
+            return new MeshAssembly(meshNode, writeGate, redirector, clusterCommands,
+                    lifecycleListener, busClient, busServer, snapshotManager);
+        } catch (RuntimeException e) {
+            busClient.close();
+            throw e;
+        }
     }
 
     // ==================== 启动状态恢复（§5.5）====================

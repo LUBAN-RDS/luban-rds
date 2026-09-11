@@ -102,7 +102,32 @@ public class MeshWriteGate {
     /** 响应序列化（读路径 Object → RESP 字节；复用 protocol 模块）。 */
     private final RedisProtocolParser protocolParser;
     /** 写路径 propose 阻塞超时（ms）。 */
-    private final long writeTimeoutMs;
+    private long writeTimeoutMs;
+
+    /**
+     * P1-15（2026-09-11 审计 P1）：全局在途写上限（&lt;=0 = 不限，默认 256）——
+     * pipeline N 条写串行 N×5s 占业务线程的根治：超限立即 -TRYAGAIN，占用有界。
+     */
+    private int maxInflightWrites = 256;
+
+    /** P1-15：当前在途写数（超时放弃但未落定的 proposal 也计入，直到 future 落定）。 */
+    private final java.util.concurrent.atomic.AtomicInteger inflightWrites =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** P1-15：运行时调整在途写上限（&lt;=0 = 不限）。 */
+    public void setMaxInflightWrites(int max) {
+        this.maxInflightWrites = max;
+    }
+
+    /** P1-15：当前在途写数（观测/测试）。 */
+    public int getInflightWrites() {
+        return inflightWrites.get();
+    }
+
+    /** P1-15：运行时调整写超时（ms；&lt;=0 表示不超时）。须在对外服务前设置。 */
+    public void setWriteTimeoutMs(long timeoutMs) {
+        this.writeTimeoutMs = timeoutMs;
+    }
     /**
      * 读一致性配置（DESIGN §5.7）。null 时按默认 LEASE 行为：租约有效本地读、
      * 失效 awaitValid({@link #DEFAULT_READ_LEASE_WAIT_MS})。
@@ -158,11 +183,15 @@ public class MeshWriteGate {
             "XREAD", "XINFO",
             // 集合扫描 / 随机
             "HSCAN", "SSCAN", "ZSCAN", "SRANDMEMBER",
+            // Q4（2026-09-11 审计 P2）：KEYS 是纯读，原默认判写进 Raft（读放大 + 日志垃圾）
+            "KEYS",
             // geo 读
             "GEOSEARCH", "GEORADIUS", "GEORADIUSBYMEMBER",
             // 连接/控制（非 mutating，不应走 Raft）
             "PING", "ECHO", "AUTH", "HELLO", "RESET", "COMMAND", "INFO", "TIME",
-            "CLIENT", "CONFIG", "ROLE", "LASTSAVE", "SLOWLOG", "acl"
+            "CLIENT", "CONFIG", "ROLE", "LASTSAVE", "SLOWLOG"
+            // Q12（2026-09-11 审计 P3）：原小写 "acl" 死键已删——ACL 命令在 handler 层
+            // mesh 分支显式拒绝（-ERR ACL is not supported in mesh mode），不达 gate。
     );
 
     /**
@@ -311,7 +340,66 @@ public class MeshWriteGate {
      *          命中时直接回 {@link #blockCommandError()}，不进入 propose。
      */
     public byte[] write(byte[] rawRespFrame, int dbIndex, byte[] extra) {
+        return write(null, rawRespFrame, dbIndex, extra);
+    }
+
+    /** P1-9 去重索引上限：极端堆积时整体清空（语义退化为可双写，避免索引自身膨胀）。 */
+    private static final int DEDUP_INDEX_LIMIT = 1024;
+
+    /** P1-9：超时未决 proposal 索引（channelId + sha1(frame) → 在途 future）。 */
+    private final java.util.concurrent.ConcurrentHashMap<String, CompletableFuture<byte[]>> timedOutProposals =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * P1-9（2026-09-11 审计 P1）：带连接标识的写路径——超时未决 proposal 去重。
+     * <p>同连接同帧的重试在原 proposal 仍在途时<b>挂接同一 future</b>，不再生成第二条
+     * Raft 条目（INCR 等非幂等写不再被 TRYAGAIN 重试双写）。原 proposal 落定后索引即清，
+     * 窗口外的重试视为新请求（无客户端协议变更下的承诺边界，残余风险见 docs）。</p>
+     *
+     * @param channelId 连接标识（null = 不参与去重，走原语义）
+     */
+    public byte[] write(String channelId, byte[] rawRespFrame, int dbIndex, byte[] extra) {
+        // Q4（2026-09-11 审计 P2）：未知命令（含拼写错误）不生成 Raft 条目——
+        // 此前三节点各 apply 一条错误串（日志垃圾）。PUBLISH 由 handler 层处理不经
+        // 命令注册表，属豁免白名单（P1-10 将经 Raft 复制）。
+        String commandName = extractCommandName(rawRespFrame);
+        if (commandName != null && !commandName.isEmpty()
+                && !"PUBLISH".equals(commandName)
+                && (handler == null || !handler.isCommandRegistered(commandName))) {
+            throw new UnknownCommandException(commandName);
+        }
+        String dedupKey = channelId == null ? null
+                : channelId + ":" + sha1Hex(rawRespFrame);
+        if (dedupKey != null) {
+            CompletableFuture<byte[]> inFlight = timedOutProposals.get(dedupKey);
+            if (inFlight != null) {
+                if (inFlight.isDone()) {
+                    // 原 proposal 已落定：窗口关闭，清索引，走正常 propose
+                    timedOutProposals.remove(dedupKey, inFlight);
+                } else {
+                    try {
+                        // 挂接原 future（重试 = 对同一在途写的等待）
+                        return inFlight.get(writeTimeoutMs, TimeUnit.MILLISECONDS);
+                    } catch (TimeoutException e) {
+                        throw new RetryableMeshException("mesh write still in flight, retry", e);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("mesh write interrupted", e);
+                    } catch (ExecutionException e) {
+                        return unwrapProposeFailure(e);
+                    }
+                }
+            }
+        }
+        // P1-15：在途写并发上限——超限立即 TRYAGAIN（不进入 propose），业务线程占用有界。
+        // 计数经 whenComplete 回收：超时放弃但稍后落定的 future 也会正确递减。
+        if (maxInflightWrites > 0 && inflightWrites.incrementAndGet() > maxInflightWrites) {
+            inflightWrites.decrementAndGet();
+            throw new RetryableMeshException("mesh inflight writes saturated ("
+                    + maxInflightWrites + "), retry");
+        }
         CompletableFuture<byte[]> future = meshNode.propose(rawRespFrame, dbIndex, extra);
+        future.whenComplete((r, t) -> inflightWrites.decrementAndGet());
         try {
             if (writeTimeoutMs > 0) {
                 return future.get(writeTimeoutMs, TimeUnit.MILLISECONDS);
@@ -319,6 +407,13 @@ public class MeshWriteGate {
             return future.get();
         } catch (TimeoutException e) {
             // 超时不再等待 future（不 cancel——Raft entry 仍可能后续 commit；由上层决定如何回复客户端）
+            // P1-9：未决 future 进入去重索引——同连接同帧重试挂接原 future，不二次 propose
+            if (dedupKey != null && !future.isDone()) {
+                if (timedOutProposals.size() >= DEDUP_INDEX_LIMIT) {
+                    timedOutProposals.clear();
+                }
+                timedOutProposals.putIfAbsent(dedupKey, future);
+            }
             // 瞬时拥塞 → TRYAGAIN 让客户端自动重试
             throw new RetryableMeshException(
                     "mesh write propose timeout after " + writeTimeoutMs + "ms, retry", e);
@@ -326,18 +421,38 @@ public class MeshWriteGate {
             Thread.currentThread().interrupt();
             throw new RuntimeException("mesh write interrupted", e);
         } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause == null) {
-                cause = e;
+            return unwrapProposeFailure(e);
+        }
+    }
+
+    /** P1-9：propose 异常解包（MOVED 原样抛 / 其它 RuntimeException 直抛 / 包装）。 */
+    private byte[] unwrapProposeFailure(ExecutionException e) throws RuntimeException {
+        Throwable cause = e.getCause();
+        if (cause == null) {
+            cause = e;
+        }
+        if (cause instanceof MovedToLeaderException) {
+            throw (MovedToLeaderException) cause;
+        }
+        if (cause instanceof RuntimeException) {
+            throw (RuntimeException) cause;
+        }
+        throw new RuntimeException("mesh write propose failed", cause);
+    }
+
+    /** P1-9：帧指纹（SHA-1 hex；channelId 已入 key，碰撞概率对本用途足够）。 */
+    private static String sha1Hex(byte[] data) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-1");
+            byte[] digest = md.digest(data == null ? new byte[0] : data);
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
             }
-            if (cause instanceof MovedToLeaderException) {
-                // 非 Leader：原样抛，供上层 catch 生成 MOVED/MESHDOWN
-                throw (MovedToLeaderException) cause;
-            }
-            if (cause instanceof RuntimeException) {
-                throw (RuntimeException) cause;
-            }
-            throw new RuntimeException("mesh write propose failed", cause);
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-1 unavailable", e);
         }
     }
 
@@ -496,7 +611,8 @@ public class MeshWriteGate {
     public String redirectResponse(String key) {
         String leaderAddr = resolveLeaderServiceAddr();
         if (leaderAddr == null || leaderAddr.isEmpty()) {
-            return "-MESHDOWN The mesh cluster has no leader\r\n";
+            // Q5（2026-09-11 审计 P2）：无 Leader 返回标准 -CLUSTERDOWN（主流客户端退避重试）
+        return MeshClientRedirector.MESHDOWN_RESPONSE;
         }
         // D2: 自重定向守卫——解析出的 Leader 地址等于本节点自身地址时，本节点明明非 Leader
         // 却 MOVED 回自己，客户端会死循环（Redisson "MOVED redirection loop detected"）。
@@ -551,6 +667,56 @@ public class MeshWriteGate {
      * @param commandName 命令名（args[0]）；null/空返回 true（保守当写）
      * @return true=写路径（propose）；false=读路径（本地读）
      */
+    /**
+     * Q4（2026-09-11 审计 P2）：从完整 RESP 命令帧解析命令名（第一个 bulk string）。
+     * <p>仅解析数组头 + 第一个元素，不持有帧；帧畸形/不可解析返回 {@code null}（调用方跳过预检）。</p>
+     */
+    public static String extractCommandName(byte[] respFrame) {
+        if (respFrame == null || respFrame.length < 4 || respFrame[0] != '*') {
+            return null;
+        }
+        try {
+            int pos = 1;
+            while (pos < respFrame.length && respFrame[pos] != '\r') {
+                pos++;
+            }
+            if (pos + 1 >= respFrame.length || respFrame[pos + 1] != '\n') {
+                return null;
+            }
+            pos += 2;
+            // 第 1 个元素：命令名 bulk string（$len\r\n<data>\r\n）
+            return parseBulkStringAt(respFrame, pos);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 解析 pos 处 bulk string（$len\r\n<data>），返回 US_ASCII 数据；非法返回 null。 */
+    private static String parseBulkStringAt(byte[] frame, int pos) {
+        if (pos >= frame.length || frame[pos] != '$') {
+            return null;
+        }
+        pos++;
+        int lenStart = pos;
+        while (pos < frame.length && frame[pos] != '\r') {
+            pos++;
+        }
+        if (pos + 1 >= frame.length || frame[pos + 1] != '\n') {
+            return null;
+        }
+        int len;
+        try {
+            len = Integer.parseInt(new String(frame, lenStart, pos - lenStart,
+                    java.nio.charset.StandardCharsets.US_ASCII));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (len < 0 || pos + 2 + len > frame.length) {
+            return null;
+        }
+        return new String(frame, pos + 2, len, java.nio.charset.StandardCharsets.US_ASCII);
+    }
+
     public static boolean isWriteCommand(String commandName) {
         if (commandName == null || commandName.isEmpty()) {
             return true;

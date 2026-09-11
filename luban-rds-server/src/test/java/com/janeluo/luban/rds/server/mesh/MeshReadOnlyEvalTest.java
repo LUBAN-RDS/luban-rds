@@ -55,7 +55,7 @@ class MeshReadOnlyEvalTest {
         }
 
         @Override
-        public byte[] write(byte[] rawRespFrame, int dbIndex, byte[] extra) {
+        public byte[] write(String channelId, byte[] rawRespFrame, int dbIndex, byte[] extra) {
             writeCalls.incrementAndGet();
             // 不真正 propose（记录路由决策即可；写脚本进 Raft 的行为由 mesh 模块测试覆盖）
             return "-ERR write path reached in test\r\n".getBytes(StandardCharsets.US_ASCII);

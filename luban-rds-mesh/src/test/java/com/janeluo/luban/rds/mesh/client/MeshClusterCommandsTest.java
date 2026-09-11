@@ -134,12 +134,15 @@ class MeshClusterCommandsTest {
     }
 
     @Test
-    void clusterSlots_noLeader_returnsEmptyArray() {
+    void clusterSlots_noLeader_returnsClusterDown() {
         MeshClusterCommands cmd = new MeshClusterCommands(
                 () -> null, () -> null, buildThreeNodes(), NODE_A);
         byte[] resp = cmd.clusterSlots();
         String s = new String(resp, StandardCharsets.ISO_8859_1);
-        assertEquals("*0\r\n", s, "无 Leader 时 SLOTS 应返回空数组 *0\\r\\n");
+        // Q5（2026-09-11 审计 P2）：无 Leader 返回标准 -CLUSTERDOWN（客户端退避重试），
+        // 而非空数组 *0（813 事故：严格客户端据此初始化挂死）
+        assertTrue(s.startsWith("-CLUSTERDOWN"),
+                "无 Leader 时 SLOTS 应返回 -CLUSTERDOWN，实际: " + s);
     }
 
     @Test
@@ -154,11 +157,11 @@ class MeshClusterCommandsTest {
     }
 
     @Test
-    void clusterSlots_emptyLeaderAddrAndNodeIdNotInNodes_returnsEmptyArray() {
-        // leaderAddr 空 + leaderNodeId 不在 allNodes → 无法补全，返回空数组
+    void clusterSlots_emptyLeaderAddrAndNodeIdNotInNodes_returnsClusterDown() {
+        // leaderAddr 空 + leaderNodeId 不在 allNodes → 无法补全，返回 -CLUSTERDOWN（Q5）
         MeshClusterCommands cmd = new MeshClusterCommands(
                 () -> "unknown-node", () -> "", buildThreeNodes(), NODE_A);
-        assertEquals("*0\r\n", new String(cmd.clusterSlots(), StandardCharsets.ISO_8859_1));
+        assertTrue(new String(cmd.clusterSlots(), StandardCharsets.ISO_8859_1).startsWith("-CLUSTERDOWN"));
     }
 
     @Test

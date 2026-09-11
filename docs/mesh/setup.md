@@ -63,6 +63,10 @@ mesh-self-node-id a1b2c3d4e5f60718293a4b5c6d7e8f900a1b2c3d
 # mesh-snapshot-log-threshold 100000    # 每 N 条日志触发周期快照（v1.0.24+ 已接入调度：每 30s 检查，根治 WAL/日志无界增长）
 # mesh-bus-port 0                       # 0 = 按 peers 条目取
 # mesh-service-port 0                   # 0 = 用全局 port（单机多实例必配为不同值）
+# mesh-auth-token my-shared-secret      # v1.0.25+ 总线握手认证（默认空 = 关闭；滚动升级顺序：先全网升级再统一配置）
+# mesh-bus-max-inbound 32               # v1.0.25+ 总线入站连接上限（<=0 不限）
+# mesh-write-timeout-ms 5000            # v1.0.25+ 写路径 propose 阻塞上限（P1-9 同连接同帧重试去重使其安全）
+# mesh-max-inflight-writes 256          # v1.0.25+ 全局在途写上限（超限立即 -TRYAGAIN；<=0 不限）
 ```
 
 > **互斥约束**：`mesh-enabled yes` 与 `cluster-enabled yes` 不能同时启用，启动时校验中止。
@@ -73,6 +77,20 @@ mesh-self-node-id a1b2c3d4e5f60718293a4b5c6d7e8f900a1b2c3d
 
 > **运维观测（v1.0.24+）**：`persistExecutor 积压告警` WARN 日志（队列深度 > 1000 时输出，
 > 附 durableIndex 滞后量）——出现即说明 fsync 慢于写速率，应检查磁盘。
+
+> **v1.0.25 行为变更（P1 收官）**：
+> - **总线认证**：配 `mesh-auth-token` 后所有总线连接须先握手（HELLO 帧）方可通信；
+>   token 未配置完全兼容旧行为。**滚动升级顺序：先全网升级到 1.0.25，再统一配 token**。
+> - **错误码对齐**：集群无 Leader/自重定向/不可达统一返回标准 `-CLUSTERDOWN`（替代自造
+>   `MESHDOWN`）——主流集群客户端（Redisson/Jedis）对 CLUSTERDOWN 有退避重试语义。
+> - **PUBLISH 经 Raft 复制**：三节点订阅者一致可见；响应值 = 发布节点（Leader）接收者数。
+> - **淘汰强制 noeviction**：mesh 下 `maxmemory-policy` 非 noeviction 的配置被忽略
+>   （确定性要求），内存满返回 OOM 错误；`CONFIG SET maxmemory-policy` 不再生效。
+> - **AOF 强制退役**：mesh 下 `appendonly` 配置被忽略（持久化 = WAL + SnapshotManager RDB）。
+> - **XREADGROUP 不支持**：PEL 未 Raft 化，显式返回错误。
+> - **毒条目 fail-stop**：apply 异常时 lastApplied 冻结 + ERROR 告警（人工恢复语义：
+>   修复数据问题后重启节点；WAL 重放复现则需处置该条目，宁可停滞不可分叉）。
+> - **启动快速失败**：`start()` 失败（如总线端口占用）进程非零退出，不再出现僵尸进程。
 
 ## 3. 启动 3 节点
 

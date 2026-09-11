@@ -213,7 +213,7 @@ public class NettyRedisServer implements RedisServer {
         this.commandHandler = new DefaultCommandHandler();
         this.protocolParser = new RedisProtocolParser();
         this.persistService = PersistServiceFactory.createPersistService(
-                config.getPersistMode(), 
+                effectivePersistMode(config), 
                 config.getDir(), 
                 config.getRdbSaveInterval(), 
                 config.getAofFsyncInterval());
@@ -262,7 +262,7 @@ public class NettyRedisServer implements RedisServer {
         this.commandHandler = new DefaultCommandHandler(config.getRequirepass());
         this.protocolParser = new RedisProtocolParser();
         this.persistService = PersistServiceFactory.createPersistService(
-                config.getPersistMode(), 
+                effectivePersistMode(config), 
                 config.getDir(), 
                 config.getRdbSaveInterval(), 
                 config.getAofFsyncInterval());
@@ -542,6 +542,26 @@ public class NettyRedisServer implements RedisServer {
         com.janeluo.luban.rds.mesh.lifecycle.MeshBootstrap bootstrap =
                 new com.janeluo.luban.rds.mesh.lifecycle.MeshBootstrap();
         this.meshAssembly = bootstrap.bootstrap(config, memoryStore, commandHandler);
+
+        // P1-10（2026-09-11 mesh 审计）：apply 侧 PUBLISH 投递回调——
+        // PUBLISH 经 Raft 复制，apply 时向本节点订阅者投递（PubSubManager 在 server 模块，
+        // 以回调注入避免依赖反转）。propose 响应 = leader 本地接收者数（= Redis 发布节点语义）。
+        if (meshAssembly.getMeshNode().getApplier() != null) {
+            meshAssembly.getMeshNode().getApplier().setPublishHandler(
+                    RedisServerHandler::publishMessage);
+        }
+
+        // P1-6（2026-09-11 mesh 审计）：mesh 模式强制 noeviction——淘汰决策只依赖客户端读
+        // 路径的访问时间（leader 有、follower 无），经 Raft 同步不可行；确定性兜底 = 不淘汰
+        if (memoryStore instanceof com.janeluo.luban.rds.core.store.DefaultMemoryStore) {
+            ((com.janeluo.luban.rds.core.store.DefaultMemoryStore) memoryStore).setNoEvictionOverride(true);
+        }
+        if (config.getMaxmemory() > 0
+                && !com.janeluo.luban.rds.core.store.DefaultMemoryStore.POLICY_NOEVICTION
+                        .equalsIgnoreCase(config.getMaxmemoryPolicy())) {
+            logger.warn("mesh 模式下淘汰策略强制 noeviction（确定性要求），原配置 {} 被忽略",
+                    config.getMaxmemoryPolicy());
+        }
 
         logger.info("mesh 模式初始化完成: nodeId={}, peers={}",
                 config.getMeshSelfNodeId(),
@@ -981,6 +1001,15 @@ public class NettyRedisServer implements RedisServer {
         } catch (Exception e) {
             logger.error("Failed to start LbRDS server", e);
             stop();
+            // Q8（2026-09-11 审计）：失败时 running 尚未置位，stop() 直接返回——
+            // 须显式释放 mesh 组件（busClient 的 NioEventLoopGroup 为非 daemon 线程）
+            if (meshEnabled && meshAssembly != null) {
+                stopMeshComponents();
+            }
+            // P1-14（2026-09-11 mesh 审计）：启动失败必须向上抛——吞异常导致 main 打完
+            // "启动成功"后 join 永久阻塞（僵尸进程），RedisServerMain 的 exit(1) 永不触发；
+            // Spring 嵌入场景则表现为 bean 创建失败并携带根因。
+            throw new IllegalStateException("LbRDS server failed to start", e);
         }
     }
     
@@ -1251,6 +1280,21 @@ public class NettyRedisServer implements RedisServer {
         return memoryStore;
     }
     
+
+    /**
+     * P1-17（2026-09-11 mesh 审计）：mesh 模式下 appendonly 配置忽略（AOF 退役，DESIGN v1.2）。
+     * EXEC 残留 AOF 路径已被 P0-1 事务禁用堵死，此处为配置面强制收口——
+     * 持久化仅由 WAL + SnapshotManager RDB 承担，防止"AOF 写入却不经 Raft"的双持久化源。
+     */
+    private static String effectivePersistMode(RdsConfig config) {
+        String mode = config.getPersistMode();
+        if (config.isMeshEnabled() && mode != null && mode.toLowerCase().contains("aof")) {
+            logger.warn("mesh 模式下 appendonly 配置被忽略（AOF 退役）；持久化由 WAL + SnapshotManager RDB 承担");
+            return "rdb";
+        }
+        return mode;
+    }
+
     public PersistService getPersistService() {
         return persistService;
     }

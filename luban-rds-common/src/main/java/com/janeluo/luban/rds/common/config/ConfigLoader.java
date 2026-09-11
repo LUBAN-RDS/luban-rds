@@ -420,6 +420,18 @@ public class ConfigLoader {
                     case "mesh-persist":
                         config.setMeshPersistEnabled("yes".equalsIgnoreCase(value));
                         break;
+                    case "mesh-auth-token":
+                        config.setMeshAuthToken(value);
+                        break;
+                    case "mesh-bus-max-inbound":
+                        config.setMeshBusMaxInbound(Integer.parseInt(value));
+                        break;
+                    case "mesh-write-timeout-ms":
+                        config.setMeshWriteTimeoutMs(Long.parseLong(value));
+                        break;
+                    case "mesh-max-inflight-writes":
+                        config.setMeshMaxInflightWrites(Integer.parseInt(value));
+                        break;
 
                     default:
                         logger.debug("未知配置项: {} = {}", key, value);

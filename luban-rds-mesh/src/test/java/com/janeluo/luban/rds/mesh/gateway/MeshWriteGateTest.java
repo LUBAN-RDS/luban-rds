@@ -249,7 +249,7 @@ class MeshWriteGateTest {
         MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler());
 
         String resp = gate.redirectResponse("anykey");
-        assertTrue(resp.startsWith("-MESHDOWN"), "resp=" + resp);
+        assertTrue(resp.startsWith("-CLUSTERDOWN"), "resp=" + resp);
         assertTrue(resp.endsWith("\r\n"));
     }
 
@@ -267,7 +267,7 @@ class MeshWriteGateTest {
 
     /**
      * D2 自重定向守卫：解析出的 Leader 地址等于本节点自身地址时，redirectResponse 不下发 MOVED
-     * （会触发客户端死循环），改发 MESHDOWN。
+     * （会触发客户端死循环），改发 CLUSTERDOWN。
      */
     @Test
     void redirectResponse_leaderAddrEqualsSelf_returnsMeshdownNotMoved() {
@@ -280,7 +280,7 @@ class MeshWriteGateTest {
                 null, map, "10.0.0.1:6379");
 
         String resp = gate.redirectResponse("foo");
-        assertTrue(resp.startsWith("-MESHDOWN"), "应返回 MESHDOWN 而非 MOVED 到自己: " + resp);
+        assertTrue(resp.startsWith("-CLUSTERDOWN"), "应返回 CLUSTERDOWN 而非 MOVED 到自己: " + resp);
         assertTrue(resp.contains("self"), "应是自重定向 MESHDOWN: " + resp);
     }
 
@@ -314,7 +314,7 @@ class MeshWriteGateTest {
         when(node.getLeaderId()).thenReturn("deadNode");
 
         // 映射只含 node-a / node-b，deadNode 不在里面 → leaderAddr 解析不到
-        // 但这里 getLeaderId 返回 deadNode，映射查无 → resolveLeaderServiceAddr 返回 null → MESHDOWN
+        // 但这里 getLeaderId 返回 deadNode，映射查无 → resolveLeaderServiceAddr 返回 null → CLUSTERDOWN
         // 为测试 P3 的 containsValue 路径，需要 leaderAddr 能解析但不在映射 values 里
         java.util.Map<String, String> map = new java.util.HashMap<>();
         map.put("node-a", "10.0.0.1:6379");
@@ -324,13 +324,13 @@ class MeshWriteGateTest {
         // P3 的 containsValue 路径需要 resolveLeaderServiceAddr 返回非 null 但不在 values 里，
         // 这需要 MovedToLeaderException 直接带 serviceAddr。redirectResponse 走 resolveLeaderServiceAddr，
         // 它只从 map 查 leaderId。所以 redirectResponse 的 P3 路径在实际中由 MeshClientRedirector 覆盖。
-        // 这里测试映射查无 leaderId 的场景 → MESHDOWN no leader（已有路径）
+        // 这里测试映射查无 leaderId 的场景 → CLUSTERDOWN no leader（已有路径）
         MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler(),
                 null, map, "10.0.0.3:6379");
 
         String resp = gate.redirectResponse("foo");
-        // deadNode 不在映射 → resolveLeaderServiceAddr 返回 null → MESHDOWN no leader
-        assertTrue(resp.startsWith("-MESHDOWN"), "查无 leader 应返回 MESHDOWN: " + resp);
+        // deadNode 不在映射 → resolveLeaderServiceAddr 返回 null → CLUSTERDOWN no leader
+        assertTrue(resp.startsWith("-CLUSTERDOWN"), "查无 leader 应返回 CLUSTERDOWN: " + resp);
     }
 
     // ==================== isWriteCommand 判定 ====================

@@ -93,6 +93,36 @@ public class SnapshotManager {
     private final Runnable persistHook;
 
     /**
+     * P1-4a（2026-09-11 审计）：发送快照时导出 Leader 侧脚本表（sha1 → 脚本文本）。
+     * {@code null} = 不携带（旧版兼容路径）。由 MeshBootstrap 装配 LuaCommandHandler::snapshotScripts。
+     */
+    private volatile java.util.function.Supplier<java.util.Map<String, String>> scriptTableSupplier;
+
+    /** P1-4a：安装快照后还原脚本表；{@code null} = 忽略。装配 LuaCommandHandler::restoreScripts。 */
+    private volatile java.util.function.Consumer<java.util.Map<String, String>> scriptTableConsumer;
+
+    /** P1-4a：设置脚本表导出/还原钩子（任一可为 null）。 */
+    public void setScriptTableHooks(
+            java.util.function.Supplier<java.util.Map<String, String>> supplier,
+            java.util.function.Consumer<java.util.Map<String, String>> consumer) {
+        this.scriptTableSupplier = supplier;
+        this.scriptTableConsumer = consumer;
+    }
+
+    /** P1-4a：安装完成后还原脚本表（无表/无消费者时跳过）。 */
+    private void applyScriptTable(java.util.Map<String, String> table) {
+        if (table == null || scriptTableConsumer == null) {
+            return;
+        }
+        try {
+            scriptTableConsumer.accept(table);
+            logger.info("快照脚本表已还原: {} 条", table.size());
+        } catch (Exception e) {
+            logger.error("快照脚本表还原失败（不影响快照安装）", e);
+        }
+    }
+
+    /**
      * dump.rdb 索引写入 hook（阶段 11）：把 {@code lastIncludedIndex} 落盘到 {@code dump.rdb.index}
      * （含 fsync + ATOMIC_MOVE）。<b>必须在 dump.rdb 写入之前调用</b>（fix：index 先于 rdb，
      * 见 {@link #takePeriodicSnapshotIfNeeded}）。{@code null} 时跳过（阶段 10 之前的测试兼容）。
@@ -241,6 +271,9 @@ public class SnapshotManager {
         long offset = 0;
         try {
             byte[] readBuf = new byte[chunkSizeBytes];
+            // P1-4a：发送前取一次脚本表（随首 chunk 携带）
+            java.util.Map<String, String> table = scriptTableSupplier != null
+                    ? scriptTableSupplier.get() : null;
             try (java.io.FileInputStream fis = new java.io.FileInputStream(rdbFile);
                  java.io.BufferedInputStream bis = new java.io.BufferedInputStream(fis)) {
                 int bytesRead;
@@ -250,7 +283,7 @@ public class SnapshotManager {
 
                     InstallSnapshotMessage msg = new InstallSnapshotMessage(
                             term, nodeId, lastIncludedTerm, lastIncludedIndex,
-                            offset, chunk, last);
+                            offset, chunk, last, offset == 0 ? table : null);
                     MeshFrame frame = new MeshFrame(nodeId, MessageType.INSTALL_SNAPSHOT.getCode(), msg.encode());
                     busClient.send(targetNodeId, frame);
 
@@ -262,7 +295,7 @@ public class SnapshotManager {
             if (offset == 0) {
                 InstallSnapshotMessage msg = new InstallSnapshotMessage(
                         term, nodeId, lastIncludedTerm, lastIncludedIndex,
-                        0L, new byte[0], true);
+                        0L, new byte[0], true, table);
                 MeshFrame frame = new MeshFrame(nodeId, MessageType.INSTALL_SNAPSHOT.getCode(), msg.encode());
                 busClient.send(targetNodeId, frame);
             }
@@ -473,7 +506,8 @@ public class SnapshotManager {
             }
             receivedBytes = 0;
             incoming = new IncomingSnapshot(sessionId, tempFile,
-                    msg.getLastIncludedIndex(), msg.getLastIncludedTerm(), msg.getLeaderId());
+                    msg.getLastIncludedIndex(), msg.getLastIncludedTerm(), msg.getLeaderId(),
+                    msg.getScriptTable());
             logger.info("handleInstallSnapshot: 开启新会话 {}, tempFile={}",
                     sessionId, tempFile.getAbsolutePath());
         }
@@ -537,6 +571,9 @@ public class SnapshotManager {
                     sendSnapshotAck(fromNodeId, state.currentTerm, false, state.lastApplied);
                     return;
                 }
+
+                // 4a.4 P1-4a：还原 Leader 侧脚本表（快照截断窗口内 EVALSHA 不再 miss 分歧）
+                applyScriptTable(done.scriptTable);
 
                 // 4b. 截断 log + 更新 commitIndex/lastApplied/lastIncluded*
                 applySnapshotToState(done.lastIncludedIndex, done.lastIncludedTerm);
@@ -744,14 +781,18 @@ public class SnapshotManager {
         final long lastIncludedIndex;
         final long lastIncludedTerm;
         final String leaderId;
+        /** P1-4a：首 chunk 携带的脚本表（null = 旧版本 Leader 无表）。 */
+        final java.util.Map<String, String> scriptTable;
 
         IncomingSnapshot(String sessionId, File tempFile,
-                         long lastIncludedIndex, long lastIncludedTerm, String leaderId) {
+                         long lastIncludedIndex, long lastIncludedTerm, String leaderId,
+                         java.util.Map<String, String> scriptTable) {
             this.sessionId = sessionId;
             this.tempFile = tempFile;
             this.lastIncludedIndex = lastIncludedIndex;
             this.lastIncludedTerm = lastIncludedTerm;
             this.leaderId = leaderId;
+            this.scriptTable = scriptTable;
         }
     }
 }

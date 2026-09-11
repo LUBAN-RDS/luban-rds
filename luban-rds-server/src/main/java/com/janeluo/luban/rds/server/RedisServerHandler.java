@@ -583,6 +583,22 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                 return;
             }
 
+            // Q12（2026-09-11 mesh 审计 P3）：mesh 下 ACL 状态各节点独立，SETUSER 需
+            // Raft 化才能一致——显式拒绝优于 Raft 空转 ERR。
+            if (meshEnabled && "ACL".equals(commandName)) {
+                writeSimpleError(ctx, "-ERR ACL is not supported in mesh mode\r\n");
+                return;
+            }
+
+            // P1-11（2026-09-11 mesh 审计）：认证检查前移——原检查位于事务分支之后，
+            // 未认证客户端可入队事务（follower 上还会本地落地）并获取集群拓扑。
+            // 白名单对齐 Redis：仅连接管理命令可在认证前执行。
+            if (commandHandler.isAuthRequired() && !clientInfo.isAuthenticated()
+                    && !isPreAuthAllowed(commandName)) {
+                writeSimpleError(ctx, "-NOAUTH Authentication required.\r\n");
+                return;
+            }
+
             if ("WATCH".equals(commandName)) {
                 logger.debug("Handling WATCH command");
                 handleWatchCommand(ctx, clientInfo, currentDatabase, args);
@@ -859,7 +875,9 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             } else if ("SUNSUBSCRIBE".equals(commandName)) {
                 handleSunsubscribe(ctx, args);
                 return;
-            } else if ("PUBLISH".equals(commandName)) {
+            } else if ("PUBLISH".equals(commandName) && !meshEnabled) {
+                // P1-10（2026-09-11 mesh 审计）：mesh 下 PUBLISH 不本地截走——经 gate 写路径
+                // propose 成 Raft 条目，apply 时各节点向本地订阅者投递（三节点订阅者一致可见）。
                 handlePublish(ctx, args);
                 return;
             }
@@ -902,12 +920,20 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     ctx.writeAndFlush(Unpooled.wrappedBuffer(err));
                     return;
                 }
+                // Q4（2026-09-11 审计 P2）：XREADGROUP 显式不支持——PEL 未 Raft 化，
+                // 判写会单节点改 PEL，判读语义错误。
+                if ("XREADGROUP".equals(commandName)) {
+                    writeSimpleError(ctx, "-ERR XREADGROUP is not supported in mesh mode\r\n");
+                    return;
+                }
                 if (MeshWriteGate.isWriteCommand(commandName)) {
                     // 路线图#12（2026-09-11 mesh 审计）：只读 EVAL/EVALSHA 本地读。
                     // 生产写放大源头——门户每请求 2 条 EVAL（1 条纯读 PTTL）恒判写全进 Raft。
                     // 判定复用 cluster 从节点先例（resolveScriptBody + LuaScriptAnalyzer，
                     // 取不到脚本保守判写）；follower 上只读脚本仍走 read() 抛 MOVED（P1-7 不动）。
-                    if (isReadOnlyEvalCommand(commandName, args)) {
+                    // Q4：SCRIPT EXISTS 子命令是纯读，不进 Raft。
+                    if (isReadOnlyEvalCommand(commandName, args)
+                            || isScriptExistsRead(commandName, args)) {
                         byte[] resp = meshWriteGate.read(currentDatabase, args);
                         ctx.writeAndFlush(Unpooled.wrappedBuffer(resp));
                         return;
@@ -915,7 +941,9 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
                     // 写命令：走 Raft propose（阻塞至 commit+apply），返回 apply 产生的响应字节。
                     // 事务 EXEC 已在前置分支处理；此处 rawRespFrame 为单条写命令帧。
                     // gate.write 内部抛 MovedToLeaderException → 下方专用 catch 生成 MOVED/MESHDOWN。
-                    byte[] resp = meshWriteGate.write(rawRespFrame, currentDatabase, null);
+                    // P1-9：传 channelId——超时未决 proposal 的同连接同帧重试挂接原 future。
+                    byte[] resp = meshWriteGate.write(
+                            ctx.channel().id().asLongText(), rawRespFrame, currentDatabase, null);
                     ctx.writeAndFlush(Unpooled.wrappedBuffer(resp));
                 } else {
                     // 读命令：走 gate.read（租约校验 + 本地读），返回序列化响应字节。
@@ -1010,6 +1038,24 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             } else if (errorBuffer != null) {
                 errorBuffer.release();
             }
+        } catch (com.janeluo.luban.rds.mesh.gateway.RequestTooLargeException e) {
+            // Q7（2026-09-11 审计 P2）：超大条目 fail-fast，明确报错而非悬挂/TRYAGAIN
+            Object errorResponse = "ERR " + e.getMessage();
+            ByteBuf errorBuffer = protocolParser.serialize(errorResponse);
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
+            }
+        } catch (com.janeluo.luban.rds.mesh.gateway.UnknownCommandException e) {
+            // Q4（2026-09-11 审计 P2）：未知命令不进 Raft，对齐 Redis 错误串
+            Object errorResponse = "ERR " + e.getMessage();
+            ByteBuf errorBuffer = protocolParser.serialize(errorResponse);
+            if (errorBuffer != null && errorBuffer.isReadable()) {
+                ctx.writeAndFlush(errorBuffer);
+            } else if (errorBuffer != null) {
+                errorBuffer.release();
+            }
         } catch (RetryableMeshException e) {
             // mesh 瞬时不可用（Leader 刚降级新 Leader 未知 / propose 超时）→ -TRYAGAIN
             // 集群感知客户端（Redisson/Jedis）自动退避重试
@@ -1049,6 +1095,25 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
     // ==================== 阶段 12：mesh 辅助方法 ====================
 
     /** mesh 模式禁用的事务命令判定（P0-1，2026-09-11 mesh 审计）。 */
+    /**
+     * 认证前白名单（P1-11，2026-09-11 mesh 审计）：对齐 Redis 仅放行连接管理命令。
+     * 大小写不敏感。MULTI/EXEC/WATCH/CLUSTER 等一律要求先认证。
+     */
+    public static boolean isPreAuthAllowed(String commandName) {
+        if (commandName == null || commandName.isEmpty()) {
+            return false;
+        }
+        switch (commandName.toUpperCase()) {
+            case "AUTH":
+            case "QUIT":
+            case "HELLO":
+            case "RESET":
+                return true;
+            default:
+                return false;
+        }
+    }
+
     private static boolean isMeshDisabledTransactionCommand(String commandName) {        if (commandName == null || commandName.isEmpty()) {
             return false;
         }
@@ -1081,6 +1146,15 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
      * 与 {@link #isWriteCommandOnSlave} 的保守取向一致）。
      * </p>
      */
+    /**
+     * Q4（2026-09-11 审计 P2）：SCRIPT EXISTS 子命令是纯读（查脚本缓存存在性，不 mutating）。
+     * gate 层 SCRIPT 整体判写（LOAD 改缓存），EXISTS 子命令在 handler 层特判走读路径。
+     */
+    private static boolean isScriptExistsRead(String commandName, String[] args) {
+        return "SCRIPT".equals(commandName) && args != null && args.length >= 2
+                && "EXISTS".equalsIgnoreCase(args[1]);
+    }
+
     private boolean isReadOnlyEvalCommand(String commandName, String[] args) {
         String cmdUpper = commandName != null ? commandName.toUpperCase() : "";
         if (!"EVAL".equals(cmdUpper) && !"EVALSHA".equals(cmdUpper)) {
@@ -1102,7 +1176,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
      * @param commandName 命令名
      * @return true=走 mesh gate；false=本地处理（不经 gate）
      */
-    private boolean shouldUseMeshGate(String commandName) {
+    static boolean shouldUseMeshGate(String commandName) {
         if (commandName == null || commandName.isEmpty()) {
             return true; // 未知命令默认走 gate（保守，与 isWriteCommand 一致）
         }
@@ -1125,9 +1199,12 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             case "ROLE":
             case "LASTSAVE":
             case "SLOWLOG":
-            case "MEMORY":
             case "WAIT":
-            case "acl":
+            // P1-19（2026-09-11 审计）：MEMORY 不在本地白名单——MEMORY USAGE 是数据依赖读，
+            // follower 本地执行会返回陈旧数据，须走 gate 租约读（Leader 执行 / follower MOVED）。
+            // 其余（INFO/CONFIG/TIME/SLOWLOG/CLIENT/ROLE/LASTSAVE/WAIT/COMMAND）为节点本地
+            // 运维语义，无数据陈旧问题，保持本地。
+            case "ACL":
                 // mesh 模式禁用 server 复制/迁移命令（PSYNC/SYNC/REPLCONF/REPLICAOF/SLAVEOF），
                 // 由 mesh Raft 复制接管；放本地路径返回错误，避免经 gate。
             case "PSYNC":

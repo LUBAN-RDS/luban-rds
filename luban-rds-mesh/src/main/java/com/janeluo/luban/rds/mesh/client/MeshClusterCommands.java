@@ -159,8 +159,9 @@ public class MeshClusterCommands {
     public byte[] clusterSlots() {
         Endpoint leader = resolveLeader();
         if (leader == null) {
-            // 无 Leader：返回空数组（对齐 Redis clusterSlotsCommand 在无槽位时的 *0\r\n）
-            return "*0\r\n".getBytes(StandardCharsets.ISO_8859_1);
+            // Q5（2026-09-11 审计 P2）：无 Leader 返回标准 -CLUSTERDOWN 而非空数组 *0——
+            // 空槽映射令严格集群客户端初始化挂死（813 事故），CLUSTERDOWN 使其退避重试
+            return "-CLUSTERDOWN The cluster is down\r\n".getBytes(StandardCharsets.ISO_8859_1);
         }
 
         StringBuilder sb = new StringBuilder();

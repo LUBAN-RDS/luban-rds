@@ -56,6 +56,27 @@ public class LogApplier {
 
     /** apply 只用这个 handler（直接路由到各命令处理器，不经过拦截层）。 */
     private final DefaultCommandHandler handler;
+
+    /** P1-4：apply 侧 EVALSHA 脚本缓存未命中计数（可观测）。 */
+    private final java.util.concurrent.atomic.AtomicLong applyScriptMissCount =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** P1-4：applyScriptMissCount 访问器（观测/测试）。 */
+    public long getApplyScriptMissCount() {
+        return applyScriptMissCount.get();
+    }
+
+    /**
+     * P1-10（2026-09-11 审计）：apply 侧 PUBLISH 投递回调（channel, message) → 本地接收者数。
+     * 由 server 层装配（PubSubManager 在 server 模块，core/mesh 不可依赖）。
+     * null 时 PUBLISH 交由命令注册表（未注册 → unknown command 响应，历史行为）。
+     */
+    private volatile java.util.function.ToIntBiFunction<String, String> publishHandler;
+
+    /** P1-10：设置 apply 侧 PUBLISH 投递回调。 */
+    public void setPublishHandler(java.util.function.ToIntBiFunction<String, String> handler) {
+        this.publishHandler = handler;
+    }
     /** apply 唯一目标：真实 raw MemoryStore（DefaultMemoryStore）。 */
     private final MemoryStore rawStore;
     /** RESP 解析器（复用 protocol 模块）。 */
@@ -156,17 +177,42 @@ public class LogApplier {
         // handle 入参的 commandName 约定为大写（与 RedisServerHandler.processCommand 一致）
         String upperName = commandName.trim().toUpperCase();
 
+        // P1-10：PUBLISH 经 Raft 复制后，apply 时向本节点订阅者投递（三节点订阅者一致可见）。
+        // 响应 = 本节点接收者数（leader 的 propose 响应即发布节点接收者数，与 Redis 语义一致）。
+        if ("PUBLISH".equals(upperName) && publishHandler != null) {
+            if (args == null || args.length < 3) {
+                return "-ERR wrong number of arguments for 'publish' command\r\n";
+            }
+            int receivers = publishHandler.applyAsInt(args[1], args[2]);
+            return ":" + receivers + "\r\n";
+        }
+
         // apply 只用 raw store + handle，绝不经过拦截层；不写 AOF
+        // P1-5（2026-09-11 审计）：执行异常不再转 -ERR 字符串吞掉——节点本地异常
+        //（OOM/Lua 引擎故障）意味着 apply 未确定性执行，吞掉会让三节点分叉不可见。
+        // 抛出 ApplyFailureException 由 apply 循环 fail-stop（命令级 Redis 错误
+        // 仍由 handler 以 -ERR 字符串返回，不受影响）。
         try {
             Object response = handler.handle(upperName, entry.getDbIndex(), args, rawStore);
+            // P1-4（2026-09-11 审计）：apply 侧 EVALSHA miss 显式可观测——条目本身合法
+            //（跳过≠毒条目，lastApplied 照常推进），但 miss 意味着脚本缓存与复制状态出现
+            // 窗口（快照截断/重启），需指标暴露。客户端可见面不变：leader gate 回 -NOSCRIPT
+            // 由客户端按 Redis 标准重发 EVAL。
+            if (response instanceof String && ((String) response).startsWith("-NOSCRIPT")) {
+                long misses = applyScriptMissCount.incrementAndGet();
+                if (misses % 100 == 1) {
+                    logger.warn("apply EVALSHA 脚本缓存未命中（快照截断/重启窗口）: index={}, sha={}, 累计={}",
+                            entry.getIndex(), args != null && args.length > 1 ? args[1] : "?", misses);
+                }
+            }
             // handle 返回值即客户端响应对象（+OK\r\n / :1\r\n / 数组…），零转换
             if (response == null) {
                 return "$-1\r\n";
             }
             return response;
         } catch (Exception e) {
-            logger.error("apply: 命令执行异常, cmd={}, index={}", upperName, entry.getIndex(), e);
-            return "-ERR apply command error: " + e.getMessage() + "\r\n";
+            throw new ApplyFailureException(
+                    "apply: 命令执行异常, cmd=" + upperName + ", index=" + entry.getIndex(), e);
         }
     }
 

@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <ul>
  *   <li>已知 Leader：formatResponse 返回 {@code "-MOVED <真实CRC16 slot> <ip:port>\r\n"}，
  *       slot 与 {@link SlotUtils#getSlot} 一致（真实 CRC16，非占位）；</li>
- *   <li>无 Leader（serviceAddr 为 null/空）：返回 {@code "-MESHDOWN ...\r\n"}；</li>
+ *   <li>无 Leader（serviceAddr 为 null/空）：返回 {@code "-CLUSTERDOWN ...\r\n"}；</li>
  *   <li>异常只带 leaderNodeId 时，经 {@code nodeIdToServiceAddr} 映射补全地址；</li>
  *   <li>key 为 null 时 slot=0；</li>
  *   <li>便捷重载 {@link #formatResponse(String, String)} 与主方法一致。</li>
@@ -93,15 +93,15 @@ class MeshClientRedirectorTest {
 
         String resp = r.formatResponse(e);
 
-        assertEquals("-MESHDOWN The mesh cluster has no leader\r\n", resp,
-                "无 Leader 应返回 -MESHDOWN");
+        assertEquals("-CLUSTERDOWN The cluster is down\r\n", resp,
+                "无 Leader 应返回 -CLUSTERDOWN");
     }
 
     @Test
     void formatResponse_emptyLeaderServiceAddr_returnsMeshdown() {
         MeshClientRedirector r = new MeshClientRedirector();
         MovedToLeaderException e = new MovedToLeaderException(null, "", "foo");
-        assertEquals("-MESHDOWN The mesh cluster has no leader\r\n", r.formatResponse(e));
+        assertEquals("-CLUSTERDOWN The cluster is down\r\n", r.formatResponse(e));
     }
 
     @Test
@@ -127,7 +127,7 @@ class MeshClientRedirectorTest {
         MeshClientRedirector r = new MeshClientRedirector(map);
 
         MovedToLeaderException e = new MovedToLeaderException("unknown-node", null, "foo");
-        assertEquals("-MESHDOWN The mesh cluster has no leader\r\n", r.formatResponse(e));
+        assertEquals("-CLUSTERDOWN The cluster is down\r\n", r.formatResponse(e));
     }
 
     @Test
@@ -166,13 +166,13 @@ class MeshClientRedirectorTest {
     @Test
     void formatResponse_overloadNullAddr_meshdown() {
         MeshClientRedirector r = new MeshClientRedirector();
-        assertEquals("-MESHDOWN The mesh cluster has no leader\r\n",
+        assertEquals("-CLUSTERDOWN The cluster is down\r\n",
                 r.formatResponse(null, "foo"));
     }
 
     @Test
     void mesgdownConstantIsCorrect() {
-        assertEquals("-MESHDOWN The mesh cluster has no leader\r\n",
+        assertEquals("-CLUSTERDOWN The cluster is down\r\n",
                 MeshClientRedirector.MESHDOWN_RESPONSE);
     }
 
@@ -214,7 +214,7 @@ class MeshClientRedirectorTest {
 
         assertEquals(MeshClientRedirector.MESHDOWN_SELF_REDIRECT_RESPONSE, resp,
                 "Leader 地址等于自身时应返回自重定向 MESHDOWN，而非 MOVED 到自己");
-        assertTrue(resp.startsWith("-MESHDOWN"), "应是 MESHDOWN 响应: " + resp);
+        assertTrue(resp.startsWith("-CLUSTERDOWN"), "应是 CLUSTERDOWN 响应: " + resp);
     }
 
     /**
@@ -265,7 +265,7 @@ class MeshClientRedirectorTest {
 
     @Test
     void selfRedirectMeshdownConstantIsCorrect() {
-        assertEquals("-MESHDOWN redirect target is self; cluster topology unstable\r\n",
+        assertEquals("-CLUSTERDOWN redirect target is self; cluster topology unstable\r\n",
                 MeshClientRedirector.MESHDOWN_SELF_REDIRECT_RESPONSE);
     }
 
@@ -343,7 +343,7 @@ class MeshClientRedirectorTest {
 
     @Test
     void leaderUnreachableMeshdownConstantIsCorrect() {
-        assertEquals("-MESHDOWN redirect target unreachable; cluster topology unstable\r\n",
+        assertEquals("-CLUSTERDOWN redirect target unreachable; cluster topology unstable\r\n",
                 MeshClientRedirector.MESHDOWN_LEADER_UNREACHABLE_RESPONSE);
     }
 }
