@@ -230,18 +230,10 @@ public class MeshConfigPersister {
         if (state == null) {
             throw new IllegalArgumentException("state 不能为 null");
         }
-        // readLock 内拷贝 log 切片（防遍历期间并发 append/truncate）；头部字段为 volatile 标量，锁外读无撕裂
         long term = state.currentTerm;
         String votedFor = state.votedFor;
         long lastIncludedIndex = state.lastIncludedIndex;
         long lastIncludedTerm = state.lastIncludedTerm;
-        List<LogEntry> log;
-        state.readLock().lock();
-        try {
-            log = new ArrayList<>(state.log);
-        } finally {
-            state.readLock().unlock();
-        }
 
         synchronized (persistLock) {
             if (lastPersistedIndex < 0) {
@@ -259,26 +251,70 @@ public class MeshConfigPersister {
                 writeHeaderFile(term, votedFor, lastIncludedIndex, lastIncludedTerm, nodeId);
             }
 
-            // 分支判定（prev==null 首次保存时跳过分支 1：无历史边界可比）
-            if (prev != null && lastIncludedIndex != prev.lastIncludedIndex) {
-                rewriteWal(log, lastIncludedIndex);                       // 分支 1：快照截断
-            } else if (log.isEmpty()) {
-                rewriteWal(log, lastIncludedIndex);                       // 分支 2：清空
-            } else if (log.get(log.size() - 1).getIndex() < lastPersistedIndex) {
-                rewriteWal(log, lastIncludedIndex);                       // 分支 3：纯截断
-            } else if (log.get(0).getIndex() > lastPersistedIndex + 1) {
-                rewriteWal(log, lastIncludedIndex);                       // 分支 4：间隙（防御）
-            } else if (lastPersistedTerm >= 0
-                    && lastPersistedIndex > lastIncludedIndex
-                    && log.get((int) (lastPersistedIndex - lastIncludedIndex - 1)).getTerm() != lastPersistedTerm) {
-                rewriteWal(log, lastIncludedIndex);                       // 分支 5'：截断+重追加（frontier 任期发散）
-            } else {
-                appendWalEntries(log, lastPersistedIndex);                // 分支 6：常态 O(1)
+            // P0-8（2026-09-11 mesh 审计）：锁内 O(1) 读边界选分支；常态分支只拷贝增量——
+            // 此前每次 save 全量拷贝 log（new ArrayList<>(state.log)），写路径成本随运行时长
+            // 线性上升（"越跑越慢"的组成部分）。重写分支（快照截断/冲突截断/防御）才全量拷贝。
+            long lastIdx;
+            long firstIdx;
+            int logSize;
+            state.readLock().lock();
+            try {
+                logSize = state.log.size();
+                lastIdx = logSize == 0 ? lastIncludedIndex : state.log.get(logSize - 1).getIndex();
+                firstIdx = logSize == 0 ? lastIncludedIndex + 1 : state.log.get(0).getIndex();
+            } finally {
+                state.readLock().unlock();
             }
 
-            lastPersistedIndex = log.isEmpty() ? lastIncludedIndex : log.get(log.size() - 1).getIndex();
-            lastPersistedTerm = log.isEmpty() ? lastIncludedTerm : log.get(log.size() - 1).getTerm();
+            if (prev != null && lastIncludedIndex != prev.lastIncludedIndex) {
+                rewriteWal(copyLogSnapshot(state), lastIncludedIndex);       // 分支 1：快照截断
+            } else if (logSize == 0) {
+                rewriteWal(copyLogSnapshot(state), lastIncludedIndex);       // 分支 2：清空
+            } else if (lastIdx < lastPersistedIndex) {
+                rewriteWal(copyLogSnapshot(state), lastIncludedIndex);       // 分支 3：纯截断
+            } else if (firstIdx > lastPersistedIndex + 1) {
+                rewriteWal(copyLogSnapshot(state), lastIncludedIndex);       // 分支 4：间隙（防御）
+            } else if (lastPersistedTerm >= 0
+                    && lastPersistedIndex > lastIncludedIndex
+                    && state.getLogTerm(lastPersistedIndex) != lastPersistedTerm) {
+                rewriteWal(copyLogSnapshot(state), lastIncludedIndex);       // 分支 5'：截断+重追加（frontier 任期发散）
+            } else if (lastIdx > lastPersistedIndex) {
+                appendWalEntries(copyLogTail(state, lastPersistedIndex), lastPersistedIndex);    // 分支 6：常态 O(delta) 增量追加（内部再过滤幂等）
+            }
+
+            lastPersistedIndex = lastIdx;
+            lastPersistedTerm = logSize == 0 ? lastIncludedTerm : state.getLogTerm(lastIdx);
             lastHeader = new HeaderSnapshot(term, votedFor, lastIncludedIndex, lastIncludedTerm);
+        }
+    }
+
+    /** 最近一次 save 实际拷贝的条目数（P0-8 测试观测用：常态分支应只与新条目数相关）。 */
+    volatile int copiedEntriesLastSave;
+
+    /** 全量拷贝 log 快照（仅重写分支使用，罕见路径）。 */
+    private List<LogEntry> copyLogSnapshot(MeshState state) {
+        state.readLock().lock();
+        try {
+            List<LogEntry> copy = new ArrayList<>(state.log);
+            copiedEntriesLastSave = copy.size();
+            return copy;
+        } finally {
+            state.readLock().unlock();
+        }
+    }
+
+    /** 只拷贝 index &gt; fromIndex 的增量切片（常态追加分支，O(delta)）。 */
+    private List<LogEntry> copyLogTail(MeshState state, long fromIndex) {
+        state.readLock().lock();
+        try {
+            int size = state.log.size();
+            long first = size == 0 ? 0 : state.log.get(0).getIndex();
+            int fromPos = (int) Math.max(Math.min(fromIndex + 1 - first, size), 0);
+            List<LogEntry> copy = new ArrayList<>(state.log.subList(fromPos, size));
+            copiedEntriesLastSave = copy.size();
+            return copy;
+        } finally {
+            state.readLock().unlock();
         }
     }
 

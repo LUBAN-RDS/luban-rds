@@ -135,6 +135,16 @@ public class MeshNode {
      */
     private volatile SnapshotManager snapshotManager;
 
+    /**
+     * P0-8（2026-09-11 mesh 审计）：周期快照检查间隔（ms）。
+     * takePeriodicSnapshotIfNeeded 此前零生产调用 → WAL/内存 log 无界增长、写路径成本随
+     * 运行时长线性上升。timer 线程只投递，快照本体在 raft 线程执行（与 apply 串行保证
+     * dump 一致性，P0-6 后心跳独立不受快照停顿影响）。
+     */
+    static final long SNAPSHOT_CHECK_INTERVAL_MS = 30_000L;
+    /** 周期快照检查任务；setSnapshotManager 晚于 start 时由兜底注册（幂等）。 */
+    private volatile ScheduledFuture<?> snapshotCheckTask;
+
     /** 一条在途 propose：完成句柄 + 请求 key（领导丢失时生成 MOVED 用）。 */
     private static final class PendingProposal {
         final CompletableFuture<byte[]> future;
@@ -249,6 +259,7 @@ public class MeshNode {
         started = true;
         logger.info("MeshNode 启动: nodeId={}, term={}, role={}", abbrev(nodeId), state.currentTerm, state.role);
         electionTimer.start();
+        startSnapshotCheck();
     }
 
     public synchronized void stop() {
@@ -258,6 +269,11 @@ public class MeshNode {
         stopped = true;
         electionTimer.stop();
         stopHeartbeat();
+        ScheduledFuture<?> sc = snapshotCheckTask;
+        if (sc != null) {
+            sc.cancel(false);
+            snapshotCheckTask = null;
+        }
         lease.invalidate();
         raftExecutor.shutdownNow();
         timerExecutor.shutdownNow();
@@ -378,6 +394,40 @@ public class MeshNode {
         if (replicator != null) {
             replicator.setSnapshotManager(snapshotManager);
         }
+        // P0-8：注入晚于 start 时兜底注册周期快照检查（幂等）
+        if (started) {
+            startSnapshotCheck();
+        }
+    }
+
+    /**
+     * P0-8：注册周期快照检查（timer 线程投递 → raft 线程执行快照本体）。
+     * 幂等：已注册或未注入 SnapshotManager 时跳过。
+     */
+    private void startSnapshotCheck() {
+        if (snapshotCheckTask != null || snapshotManager == null) {
+            return;
+        }
+        snapshotCheckTask = timerExecutor.scheduleAtFixedRate(() -> {
+            if (stopped || snapshotManager == null) {
+                return;
+            }
+            runSnapshotCheckOnce();
+        }, SNAPSHOT_CHECK_INTERVAL_MS, SNAPSHOT_CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * P0-8：执行一次周期快照检查——把 takePeriodicSnapshotIfNeeded 投递到 raft 线程
+     * （快照创建必须与 apply 串行保证 dump 一致性）。包级可见供测试直驱。
+     */
+    void runSnapshotCheckOnce() {
+        submitToRaft(() -> {
+            try {
+                snapshotManager.takePeriodicSnapshotIfNeeded();
+            } catch (Exception e) {
+                logger.error("周期快照执行异常", e);
+            }
+        });
     }
 
     /** 取快照管理器（测试用，可能为 null）。 */
