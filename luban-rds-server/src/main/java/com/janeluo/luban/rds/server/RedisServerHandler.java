@@ -1163,7 +1163,7 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
      * @param commandName 命令名
      * @return true=走 mesh gate；false=本地处理（不经 gate）
      */
-    private boolean shouldUseMeshGate(String commandName) {
+    static boolean shouldUseMeshGate(String commandName) {
         if (commandName == null || commandName.isEmpty()) {
             return true; // 未知命令默认走 gate（保守，与 isWriteCommand 一致）
         }
@@ -1186,8 +1186,11 @@ private void processCommand(ChannelHandlerContext ctx, ClientInfo clientInfo, Co
             case "ROLE":
             case "LASTSAVE":
             case "SLOWLOG":
-            case "MEMORY":
             case "WAIT":
+            // P1-19（2026-09-11 审计）：MEMORY 不在本地白名单——MEMORY USAGE 是数据依赖读，
+            // follower 本地执行会返回陈旧数据，须走 gate 租约读（Leader 执行 / follower MOVED）。
+            // 其余（INFO/CONFIG/TIME/SLOWLOG/CLIENT/ROLE/LASTSAVE/WAIT/COMMAND）为节点本地
+            // 运维语义，无数据陈旧问题，保持本地。
             case "ACL":
                 // mesh 模式禁用 server 复制/迁移命令（PSYNC/SYNC/REPLCONF/REPLICAOF/SLAVEOF），
                 // 由 mesh Raft 复制接管；放本地路径返回错误，避免经 gate。
