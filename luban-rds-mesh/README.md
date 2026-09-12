@@ -269,7 +269,7 @@ redis-cli -p 6379 CLUSTER INFO
 
 ## 测试
 
-模块当前 **499 个测试全过**（`mvn -pl luban-rds-mesh test`，v1.0.26 口径，Skipped=0）。
+模块当前 **504 个测试全过**（`mvn -pl luban-rds-mesh test`，v1.0.26 口径，Skipped=0）。
 下表为阶段 13 时点的历史快照（当时 291 个），新增用例见各特性对应章节：
 
 | 阶段 | 测试内容 | 测试数（累计） |
