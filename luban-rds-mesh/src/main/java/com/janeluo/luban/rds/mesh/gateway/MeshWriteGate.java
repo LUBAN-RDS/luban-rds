@@ -85,6 +85,10 @@ public class MeshWriteGate {
      * 故设较短 timeout；超时说明当前心跳 RTT 内多数派未 ACK，退化为抛异常让客户端重试。</p>
      */
     private static final long DEFAULT_READ_INDEX_WAIT_MS = 300L;
+    /** follower 读总预算无 config 注入时的默认值（ms）。 */
+    private static final long DEFAULT_FOLLOWER_READ_MAX_WAIT_MS = 500L;
+    /** readIndex 短窗口缓存无 config 注入时的默认有效期（ms；<=0 = 关闭）。 */
+    private static final long DEFAULT_FOLLOWER_READ_CACHE_MS = 100L;
 
     /**
      * BLOCK 类命令禁用错误响应字节（DESIGN §9 风险表 / 决策 17 / 阶段 9）。
@@ -463,7 +467,9 @@ public class MeshWriteGate {
      * <p>
      * 阶段 7 完整读路径，按 {@link MeshConfig#getReadConsistency()} 切换：
      * <ol>
-     *   <li>非 Leader → 抛 {@link MovedToLeaderException}（上层生成 MOVED/MESHDOWN）。</li>
+     *   <li>非 Leader → 默认抛 {@link MovedToLeaderException}（上层生成 MOVED/MESHDOWN）；
+     *       配置 {@code mesh-read-from-follower=readindex} 时先尝试 follower 本地读
+     *       （readIndex + apply 屏障），任一失败仍收敛到同一 MOVED。</li>
      *   <li><b>lease 模式（默认）</b>：租约有效直接本地读；失效则
      *       {@code lease.awaitValid(config.getReadLeaseWaitMs())} 被动等下一轮心跳续租，
      *       仍失效抛 {@link LeaseInvalidException} 让客户端重试（<b>不再放行陈旧读</b>，
@@ -507,10 +513,20 @@ public class MeshWriteGate {
             return blockCommandError();
         }
 
-        // 1. 非 Leader → MOVED
+        // 1. 非 Leader：按配置决定"本地读（readindex）"还是"MOVED（off/现状）"
         if (!meshNode.isLeader()) {
-            // 只携带 leaderNodeId（serviceAddr 留空）+ 命令 key，由上层 redirector 经映射
-            // 解析真实 ip:port。此前单参构造器把 nodeId 塞进 serviceAddr → MOVED 无端口。
+            if (getEffectiveReadFromFollower() == MeshConfig.ReadFromFollower.READ_INDEX
+                    && !isScriptNotLocallyExecutable(args)) {
+                byte[] local = tryFollowerRead(dbIndex, args);
+                if (local != null) {
+                    return local;
+                }
+                // 本地读不可用（无读点/屏障超时/脚本未命中/执行异常）→ 回落 MOVED。
+                // 关键不变量：所有失败路径都收敛到下面的 MOVED，结构上不可能返回
+                // "未达 readIndex 的状态"。
+                meshNode.incFollowerReadFallback();
+                logger.debug("follower 读回落 MOVED: cmd={}", args[0]);
+            }
             String leaderId = meshNode.getLeaderId();
             String key = args.length >= 2 ? args[1] : null;
             throw new MovedToLeaderException(leaderId, null, key);
@@ -608,6 +624,85 @@ public class MeshWriteGate {
             return config.getHeartbeatIntervalMs() * 2 + 100L;
         }
         return DEFAULT_READ_INDEX_WAIT_MS;
+    }
+
+    // ==================== Follower 本地读（fix-mesh-follower-read） ====================
+
+    /** Follower 读模式：config 注入时取其值，否则默认 OFF（零回归）。 */
+    private MeshConfig.ReadFromFollower getEffectiveReadFromFollower() {
+        return config != null ? config.getReadFromFollower() : MeshConfig.ReadFromFollower.OFF;
+    }
+
+    /** follower 读总预算（ms）：config 注入时取其值，否则默认 500。 */
+    private long getFollowerReadMaxWaitMs() {
+        return config != null ? config.getFollowerReadMaxWaitMs() : DEFAULT_FOLLOWER_READ_MAX_WAIT_MS;
+    }
+
+    /** readIndex 缓存窗口（ms）：config 注入时取其值，否则默认 100。 */
+    private long getFollowerReadCacheMs() {
+        return config != null ? config.getFollowerReadCacheMs() : DEFAULT_FOLLOWER_READ_CACHE_MS;
+    }
+
+    /**
+     * 尝试在 Follower 本地读（readIndex + apply 屏障）。
+     * <p><b>任一步失败返回 {@code null}</b>，由调用方回落 MOVED——结构上不可能返回
+     * "未达 readIndex 的状态"。读点来自租约有效的 Leader，本地 apply 追平该读点后
+     * 本地状态至少包含该读点前的全部已提交写。</p>
+     * <p>本方法只读 raw store（{@code handler.handle} 读命令），不触碰写路径。</p>
+     */
+    private byte[] tryFollowerRead(int dbIndex, String[] args) {
+        long budget = getFollowerReadMaxWaitMs();
+        long start = System.currentTimeMillis();
+        // 1) 取读点（短窗口缓存 + single-flight；cacheMs<=0 时每次取新读点）。
+        //    预算对半：一半留给取点 RPC，剩余留给 apply 屏障。
+        long rpcTimeout = Math.max(50L, budget / 2);
+        ReadIndexCache.Entry entry;
+        try {
+            entry = meshNode.readIndexCache().get(getFollowerReadCacheMs(), rpcTimeout,
+                    () -> meshNode.fetchReadIndex(rpcTimeout), meshNode.currentTerm());
+        } catch (Exception e) {
+            logger.debug("follower 读取读点异常: cmd={}", args[0], e);
+            return null;
+        }
+        if (entry == null) {
+            return null;
+        }
+        // 2) apply 屏障：等本地 lastApplied 追平该读点
+        long remain = budget - (System.currentTimeMillis() - start);
+        if (remain <= 0) {
+            return null;
+        }
+        try {
+            if (!meshNode.applyBarrier().awaitApplied(entry.readIndex, remain)) {
+                return null;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+        // 3) 本地执行（只读）并序列化响应
+        String upperName = args[0].trim().toUpperCase();
+        Object response;
+        try {
+            response = handler.handle(upperName, dbIndex, args, rawStore);
+        } catch (Exception e) {
+            logger.error("follower 本地读异常 cmd={}", upperName, e);
+            return null;
+        }
+        meshNode.incFollowerReadLocal();
+        return serializeResponse(response);
+    }
+
+    /**
+     * EVALSHA 且本地脚本缓存未命中 → 不在 Follower 执行。
+     * <p>回落 MOVED 而不是返回 {@code -NOSCRIPT}：集群感知客户端应被重定向到 Leader 后
+     * 读到正确值，而不是因为 Follower 本地没这份脚本就报脚本缺失。</p>
+     */
+    private boolean isScriptNotLocallyExecutable(String[] args) {
+        if (args.length < 2 || !"EVALSHA".equalsIgnoreCase(args[0])) {
+            return false;
+        }
+        return handler.resolveScriptBody("EVALSHA", args) == null;
     }
 
     // ==================== MOVED / MESHDOWN 生成 ====================

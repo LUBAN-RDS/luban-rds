@@ -45,6 +45,18 @@ public class MeshConfig {
         READ_INDEX
     }
 
+    /**
+     * Follower 读模式（{@code mesh-read-from-follower}，fix-mesh-follower-read）。
+     * <p>决定非 Leader 节点收到读命令时：本地读（需 readIndex + apply 屏障，失败回落 MOVED）
+     * 还是直接 MOVED 给客户端。</p>
+     */
+    public enum ReadFromFollower {
+        /** 关闭：Follower 读一律 MOVED（默认，行为与本变更前一致）。 */
+        OFF,
+        /** 开启：Follower 取 readIndex + apply 屏障后本地读，任一失败回落 MOVED。 */
+        READ_INDEX
+    }
+
     private final String selfNodeId;
     private final Set<String> peerNodeIds;
     /** peer nodeId → "host:port" 总线地址（不含自身）。 */
@@ -59,6 +71,12 @@ public class MeshConfig {
     private final ReadConsistency readConsistency;
     /** lease 模式租约失效时的 awaitValid 等待上限（ms）。 */
     private final long readLeaseWaitMs;
+    /** Follower 读模式（fix-mesh-follower-read），默认 OFF。 */
+    private final ReadFromFollower readFromFollower;
+    /** follower 读取读点 + 等 apply 的总预算（ms）。 */
+    private final long followerReadMaxWaitMs;
+    /** readIndex 短窗口缓存有效期（ms；&lt;=0 = 关闭缓存）。 */
+    private final long followerReadCacheMs;
 
     private MeshConfig(Builder b) {
         this.selfNodeId = b.selfNodeId;
@@ -73,6 +91,9 @@ public class MeshConfig {
         this.leaseDurationMs = b.leaseDurationMs;
         this.readConsistency = b.readConsistency;
         this.readLeaseWaitMs = b.readLeaseWaitMs;
+        this.readFromFollower = b.readFromFollower;
+        this.followerReadMaxWaitMs = b.followerReadMaxWaitMs;
+        this.followerReadCacheMs = b.followerReadCacheMs;
     }
 
     public String getSelfNodeId() {
@@ -126,6 +147,21 @@ public class MeshConfig {
         return readLeaseWaitMs;
     }
 
+    /** Follower 读模式，默认 {@link ReadFromFollower#OFF}（零回归）。 */
+    public ReadFromFollower getReadFromFollower() {
+        return readFromFollower;
+    }
+
+    /** follower 读取读点 + 等 apply 的总预算（默认 500ms）。 */
+    public long getFollowerReadMaxWaitMs() {
+        return followerReadMaxWaitMs;
+    }
+
+    /** readIndex 短窗口缓存有效期（默认 100ms；&lt;=0 = 关闭缓存）。 */
+    public long getFollowerReadCacheMs() {
+        return followerReadCacheMs;
+    }
+
     /** 多数派票数 = totalNodes / 2 + 1。 */
     public int majority() {
         return totalNodes / 2 + 1;
@@ -149,6 +185,12 @@ public class MeshConfig {
         private ReadConsistency readConsistency = ReadConsistency.LEASE;
         /** lease 模式租约失效时的 awaitValid 等待上限（ms），默认 1000。 */
         private long readLeaseWaitMs = 1_000L;
+        /** Follower 读模式（fix-mesh-follower-read），默认 OFF（零回归）。 */
+        private ReadFromFollower readFromFollower = ReadFromFollower.OFF;
+        /** follower 读总预算（ms），默认 500。 */
+        private long followerReadMaxWaitMs = 500L;
+        /** readIndex 短窗口缓存有效期（ms），默认 100；&lt;=0 关闭缓存。 */
+        private long followerReadCacheMs = 100L;
 
         public Builder(String selfNodeId) {
             if (selfNodeId == null) {
@@ -215,6 +257,33 @@ public class MeshConfig {
                 throw new IllegalArgumentException("readLeaseWaitMs 不能为负: " + ms);
             }
             this.readLeaseWaitMs = ms;
+            return this;
+        }
+
+        /**
+         * Follower 读模式（{@code mesh-read-from-follower}）：{@code OFF}（默认，一律 MOVED）
+         * 或 {@code READ_INDEX}（readIndex + apply 屏障后本地读，失败回落 MOVED）。
+         * null 时保持默认 {@link ReadFromFollower#OFF}。
+         */
+        public Builder readFromFollower(ReadFromFollower mode) {
+            if (mode != null) {
+                this.readFromFollower = mode;
+            }
+            return this;
+        }
+
+        /** follower 读取读点 + 等 apply 的总预算（ms），默认 500。 */
+        public Builder followerReadMaxWaitMs(long ms) {
+            if (ms < 0) {
+                throw new IllegalArgumentException("followerReadMaxWaitMs 不能为负: " + ms);
+            }
+            this.followerReadMaxWaitMs = ms;
+            return this;
+        }
+
+        /** readIndex 短窗口缓存有效期（ms），默认 100；&lt;=0 = 关闭缓存（每次取新读点）。 */
+        public Builder followerReadCacheMs(long ms) {
+            this.followerReadCacheMs = ms;
             return this;
         }
 
