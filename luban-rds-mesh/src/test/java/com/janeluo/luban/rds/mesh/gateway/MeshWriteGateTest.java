@@ -63,6 +63,7 @@ class MeshWriteGateTest {
     @Test
     void write_proposesAndReturnsAppliedResponseBytes() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.propose(eq(OK), eq(0), any())).thenReturn(CompletableFuture.completedFuture(OK));
 
         DefaultMemoryStore rawStore = new DefaultMemoryStore();
@@ -75,8 +76,25 @@ class MeshWriteGateTest {
     }
 
     @Test
+    void write_notReadyAndApplyHalted_stillProposes() {
+        MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(false);
+        when(node.isApplyHalted()).thenReturn(true);
+        when(node.propose(eq(OK), eq(0), any())).thenReturn(CompletableFuture.completedFuture(OK));
+
+        MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler());
+
+        byte[] resp = gate.write(OK, 0, null);
+
+        // 就绪门/apply-halt 只拦读：写入口不被拦（apply 停摆时 propose 自会超时失败）
+        assertArrayEquals(OK, resp);
+        verify(node, times(1)).propose(OK, 0, null);
+    }
+
+    @Test
     void write_nonLeaderThrowsMovedToLeaderException() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         CompletableFuture<byte[]> failed = new CompletableFuture<>();
         failed.completeExceptionally(new MovedToLeaderException("leader-host:6379"));
         when(node.propose(any(), anyInt(), any())).thenReturn(failed);
@@ -91,6 +109,7 @@ class MeshWriteGateTest {
     @Test
     void write_transactionExtraPassedToPropose() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         byte[] extra = "watch-snapshot".getBytes(StandardCharsets.ISO_8859_1);
         when(node.propose(eq(OK), eq(1), eq(extra)))
                 .thenReturn(CompletableFuture.completedFuture(OK));
@@ -108,6 +127,7 @@ class MeshWriteGateTest {
     @Test
     void write_proposeTimeoutThrowsRetryableException() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         CompletableFuture<byte[]> neverComplete = new CompletableFuture<>();
         when(node.propose(any(), anyInt(), any())).thenReturn(neverComplete);
 
@@ -128,6 +148,7 @@ class MeshWriteGateTest {
         rawStore.set(0, "foo", "bar");
 
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(freshValidLease());
 
@@ -147,6 +168,7 @@ class MeshWriteGateTest {
         rawStore.hset(0, "myhash", "field1", "value1");
 
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(freshValidLease());
 
@@ -161,6 +183,7 @@ class MeshWriteGateTest {
     @Test
     void read_nonLeaderThrowsMovedToLeaderException() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(false);
         when(node.getLeaderId()).thenReturn("leaderNode");
 
@@ -184,6 +207,7 @@ class MeshWriteGateTest {
         rawStore.hset(0, "h", "f", "1");
 
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(freshValidLease());
 
@@ -206,6 +230,7 @@ class MeshWriteGateTest {
         // 未续租的 LeaseManager → 失效；awaitValid 在短超时内返回 false
         LeaseManager expired = new LeaseManager();
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(expired);
 
@@ -227,6 +252,7 @@ class MeshWriteGateTest {
     @Test
     void redirectResponse_knownLeader_emitsMovedWithRealSlot() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.getLeaderId()).thenReturn("leaderNode");
 
         // 注入 nodeId→serviceAddr 映射：redirectResponse 据此把 nodeId 解析成 ip:port
@@ -244,6 +270,7 @@ class MeshWriteGateTest {
     @Test
     void redirectResponse_noLeader_emitsMeshdown() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.getLeaderId()).thenReturn(null);
 
         MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler());
@@ -256,6 +283,7 @@ class MeshWriteGateTest {
     @Test
     void redirectResponse_nullKeySlotIsZero() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.getLeaderId()).thenReturn("leaderNode");
 
         java.util.Map<String, String> map = java.util.Collections.singletonMap("leaderNode", "10.0.0.1:6379");
@@ -272,6 +300,7 @@ class MeshWriteGateTest {
     @Test
     void redirectResponse_leaderAddrEqualsSelf_returnsMeshdownNotMoved() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.getLeaderId()).thenReturn("leaderNode");
 
         // 映射把 leaderNode 解析到 10.0.0.1:6379；自身地址也是 10.0.0.1:6379（塌缩）
@@ -290,6 +319,7 @@ class MeshWriteGateTest {
     @Test
     void redirectResponse_leaderAddrDifferentFromSelf_normalMoved() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.getLeaderId()).thenReturn("leaderNode");
 
         java.util.Map<String, String> map = java.util.Collections.singletonMap("leaderNode", "10.0.0.2:6380");
@@ -311,6 +341,7 @@ class MeshWriteGateTest {
     @Test
     void redirectResponse_leaderAddrNotInPeersMap_returnsMeshdownUnreachable() {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.getLeaderId()).thenReturn("deadNode");
 
         // 映射只含 node-a / node-b，deadNode 不在里面 → leaderAddr 解析不到
@@ -515,6 +546,9 @@ class MeshWriteGateTest {
         node.start();
         try {
             invokePrivate(node, "onWinElection");
+            // 就绪门（fix-mesh-follower-read A2）：真实 MeshNode 装配后默认未就绪，
+            // 单机端到端读需显式置位（生产由启动加载/快照安装回调置位）
+            node.markReady();
             // 续租一次让租约有效，避免读路径 awaitValid 等待
             node.lease().refreshOnMajorityAck(System.currentTimeMillis());
 

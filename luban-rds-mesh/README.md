@@ -79,6 +79,9 @@ mesh-self-node-id a1b2...
 # mesh-lease-duration-ms 1200           # 读租约时长（= 2 × electionTimeout）
 # mesh-read-consistency LEASE           # 读模式：LEASE（默认）/ READ_INDEX
 # mesh-read-lease-wait-ms 1000          # 租约失效时等待续租的上限
+# mesh-read-from-follower off           # v1.0.26+ Follower 读：off（默认，全 MOVED）/ readindex（本地读）
+# mesh-follower-read-max-wait-ms 500    # v1.0.26+ readindex 模式总预算：取读点 + apply 屏障
+# mesh-follower-read-cache-ms 100       # v1.0.26+ readindex 模式读点缓存窗口（0 = 严格线性一致）
 # mesh-snapshot-log-threshold 100000    # 每 N 条日志触发周期快照
 # mesh-bus-port 0                       # 0 = 按 peers 条目取
 # mesh-service-port 0                   # 0 = 用全局 port
@@ -208,6 +211,39 @@ redis-cli -p 6379 CLUSTER INFO
 
 ---
 
+## Follower 读（v1.0.26+）
+
+默认 `off`——上面「MOVED 说明」的现状行为不变。置 `mesh-read-from-follower readindex` 后，
+写打到 Follower 仍返回 MOVED，但**读**可在 Follower 本地服务：Follower 向 Leader 要一个经租约背书的
+读点（`READ_INDEX_REQ/RESP`），等本地 apply 追平该读点（apply 屏障）后由业务线程本地执行读 handler。
+取读点、apply 屏障、本地执行任一失败/超时，**一律回落既有 MOVED**，不会返回未达读点的状态。
+
+| 配置 | 默认值 | 语义 |
+|------|--------|------|
+| `mesh-read-from-follower` | `off` | `off` = 现状：每个读都 MOVED 到 Leader；`readindex` = 读可在 Follower 本地服务 |
+| `mesh-follower-read-max-wait-ms` | `500` | `readindex` 模式总预算（取读点 + apply 屏障），超时回落 MOVED |
+| `mesh-follower-read-cache-ms` | `100` | `readindex` 模式读点缓存窗口；`0` = 关闭缓存（严格线性一致档） |
+
+**一致性契约（务必按业务选型）：**
+
+- **`off`（默认）**：现状行为，每个读 MOVED 到 Leader，读到的一定是 Leader 已提交的最新值。
+- **`readindex` + `cache-ms=0`**：**严格线性一致**的 Follower 读。每次读都取新读点并等本地 apply 追平，
+  读得到此前任何已返回 `+OK` 的写。代价是每次读一次取读点往返（性能档位见下方性能小节）。
+- **`readindex` + `cache-ms=N`（默认 100）**：**有界陈旧读**，陈旧上界 = **N + 网络往返**。
+  窗口内复用同一读点，因此**可能读不到一个在窗口内已返回 `+OK` 的写**（写已成功、Follower 尚未纳入该读点，
+  或读点复用导致本地不等待该写）。读-改-写同一 key（如会话键、计数器）时请设 `cache-ms=0`；
+  只要业务能容忍「最多 N + RTT 的读滞后」，`cache-ms=N` 可获得接近本地读的吞吐。
+
+**已知差异：**
+
+- Follower 本地执行读会在**本地**产生访问时间更新 / 懒删除等价效应（不经 Raft 复制），
+  仅当 `maxmemory > 0`（默认 `0`）时对淘汰判定有影响；默认不触发。
+- `readindex` 当前建立在 **Leader 租约时钟假设**上（读点由租约有效性背书）；时钟无关版为后续可选阶段。
+- 就绪门：节点启动加载未完成或快照安装未完成时 `isReady()` 为 false，读一律 `-TRYAGAIN` 由客户端退避重试；
+  apply fail-stop（毒条目）后读同样短路 `-TRYAGAIN`。
+
+---
+
 ## 关键约束
 
 | 约束 | 说明 |
@@ -233,7 +269,12 @@ redis-cli -p 6379 CLUSTER INFO
 
 ## 测试
 
-模块当前 **291 个测试全过**（`mvn -pl luban-rds-mesh test`），覆盖：
+模块当前 **504 个测试**（`mvn -pl luban-rds-mesh test`，v1.0.26 口径，Skipped=0）。
+其中 `SlowPersistElectionStabilityTest.slowPersist_writePeak_leaderNotOverthrown_allWritesComplete`
+为**既有偶发失败项**：该用例在慢盘 250ms 故障注入下验证写高峰期间 Leader 不被选举推翻，
+受 Windows 定时器粒度与慢盘注入叠加影响偶发选举风暴（v1.0.25 基线同样复现，与本分支改动无关）；
+单次批量验证若命中该用例，需重跑确认。
+下表为阶段 13 时点的历史快照（当时 291 个），新增用例见各特性对应章节：
 
 | 阶段 | 测试内容 | 测试数（累计） |
 |------|----------|--------|
@@ -254,6 +295,51 @@ redis-cli -p 6379 CLUSTER INFO
 阶段 13 的 [ThreeNodeIntegrationTest](src/test/java/com/janeluo/luban/rds/mesh/integration/ThreeNodeIntegrationTest.java) 用内存路由总线连接 3 个真实 `MeshNode`，验证：选举出唯一 Leader → Leader 写 SET 经多数派确认 → 3 节点最终一致。
 
 > **3 进程集成测试 / 故障注入**（kill leader、网络分区、时钟偏移）需真实多进程环境，留作手动验证（见 DESIGN §十「测试策略」）。单元 + 内存集成测试已覆盖协议正确性主线。
+
+---
+
+## 性能：Follower 读三组配置基线（v1.0.26）
+
+探针：[`perf/FollowerReadPerfProbe`](src/test/java/com/janeluo/luban/rds/mesh/perf/FollowerReadPerfProbe.java)。
+类名不含 `*Test`（surefire 默认不拾取，零 CI 影响），需显式运行：
+
+```bash
+mvn -pl luban-rds-mesh -am test-compile
+mvn -pl luban-rds-mesh test -Dtest=FollowerReadPerfProbe
+# 可调：-Dmesh.perf.ops=20000 -Dmesh.perf.threads=8 -Dmesh.perf.basePort=15100
+```
+
+工况：3 节点真实 `MeshPerfCluster`（netty 总线 = 回环 TCP），8 线程共 20000 次「客户端读」——
+先问 Follower，被 MOVED 则跟随到 Leader；每轮先预热 2000 次不计量。取三连跑的代表值：
+
+| 配置 | ops/s | p50(μs) | p95(μs) | p99(μs) |
+|------|-------|---------|---------|---------|
+| `mesh-read-from-follower off`（基线，全部 MOVED 到 Leader） | 444,444（三跑 351k–444k） | 14 | 30 | 53 |
+| `readindex` + `cache-ms=0`（严格线性一致） | 34,130（三跑 29.8k–34.1k） | 200 | 371 | 477 |
+| `readindex` + `cache-ms=100`（有界陈旧读） | 1,111,111（三跑 1.05M–1.11M） | 5 | 8 | 17 |
+| Leader 本地读（同集群标尺，非配置项） | 1,176,471 | 6 | 9 | 16 |
+
+计数证据（`CLUSTER INFO` 口径，含 2000 次预热，err 全 0、term 全程稳定）：
+
+| 配置 | fetch | cacheHit | local | fallback |
+|------|-------|----------|-------|----------|
+| off | 0 | 0 | 0 | 0（Follower 一律 MOVED，读全在 Leader） |
+| cache-ms=0 | 22000 | 0 | 22000 | 0 |
+| cache-ms=100 | **1** | 21999 | 22000 | 0 |
+
+**这些数字能说明什么、不能说明什么（务必读完再引用）：**
+
+- **能说明**：`cache-ms=100` 的 follower 读在进程内开销上已与 Leader 本地读同级（p99 17μs vs 16μs，
+  整轮仅 1 次取读点 RPC，其余 21999 次命中窗口）；`cache-ms=0` 每次读都要一次取读点总线往返，
+  因此在本夹具中吞吐约为 `cache-ms=100` 的 **1/32**——**`cache-ms=0` 是严格一致性档，不是性能档**。
+- **不能说明**：本探针直接调用 `MeshWriteGate.read`，**完全绕开客户端 ↔ 服务端的网络层**。
+  真实部署中 off 基线的「MOVED 双跳」各含一次客户端网络往返，而 follower 读只需一次，
+  网络 RTT 才是生产差异主因；本夹具里的两跳是进程内方法调用，
+  故 **off 基线被显著低估、上表的倍率（约 2.5–3×）不可当作生产加速比**。
+  夹具可信的部分是取读点路径（cache=0 时确实走真实 netty 回环总线 RTT）与
+  gate/handler/apply 屏障的进程内开销对比。
+- **Windows 定时器工件**：`cache-ms=0` 的 max 出现 12–16ms 尖峰（约 15.6ms = Windows 定时器粒度），
+  是有既有结论的环境工件，非代码回归；p50/p95/p99 不受影响。
 
 ---
 

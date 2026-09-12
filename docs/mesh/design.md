@@ -134,6 +134,15 @@ version: 1.0.17
 - **READ_INDEX**：发送心跳确认仍是当前多数派的最新 Leader 后再读（牺牲延迟换取强一致）
 - 配置项：`mesh-read-consistency LEASE | READ_INDEX`
 
+### 6.4 Follower 读（v1.0.26+，默认关闭）
+
+- **开关**：`mesh-read-from-follower off | readindex`（默认 `off` = 每个读 MOVED 到 Leader，现状不变）
+- **读点获取**：Follower 向 Leader 发 `READ_INDEX_REQ`，Leader 以租约有效性背书返回 `READ_INDEX_RESP`（readIndex + term）
+- **apply 屏障**：Follower 等本地 `lastApplied >= readIndex`（业务线程等待，信号由 apply/快照/角色切换触发）后本地执行读 handler
+- **回落**：取读点 / 屏障 / 本地执行任一失败或超时（`mesh-follower-read-max-wait-ms`，默认 500ms）一律抛 MOVED，结构上不返回未达读点的状态
+- **缓存与陈旧上界**：`mesh-follower-read-cache-ms`（默认 100，`0` = 关闭缓存）窗口内复用读点 + single-flight 合并，**陈旧上界 = 窗口 N + 网络往返**；窗口内可能读不到已返回 `+OK` 的写。严格线性一致（读-改-写）须设 `0`
+- **已知差异**：Follower 本地读的访问时间/懒删除等价效应不经 Raft 复制（`maxmemory > 0` 时才有影响，默认 0）；readindex 仍基于 Leader 租约时钟假设
+
 ## 7. MOVED / MESHDOWN 语义
 
 | 场景 | 响应 |

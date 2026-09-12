@@ -5,6 +5,7 @@ import com.janeluo.luban.rds.mesh.bus.MeshFrame;
 import com.janeluo.luban.rds.mesh.bus.MessageType;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
 import com.janeluo.luban.rds.mesh.client.RetryableMeshException;
+import com.janeluo.luban.rds.mesh.core.ApplyBarrier;
 import com.janeluo.luban.rds.mesh.core.LogEntry;
 import com.janeluo.luban.rds.mesh.core.MeshRole;
 import com.janeluo.luban.rds.mesh.core.MeshState;
@@ -15,6 +16,7 @@ import com.janeluo.luban.rds.mesh.core.RaftStateMachine.VoteDecision;
 import com.janeluo.luban.rds.mesh.election.ElectionTimer;
 import com.janeluo.luban.rds.mesh.election.LeaseManager;
 import com.janeluo.luban.rds.mesh.election.VoteCollector;
+import com.janeluo.luban.rds.mesh.gateway.ReadIndexCache;
 import com.janeluo.luban.rds.mesh.replication.LogApplier;
 import com.janeluo.luban.rds.mesh.replication.LogReplicator;
 import com.janeluo.luban.rds.mesh.replication.SnapshotManager;
@@ -22,6 +24,8 @@ import com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesResponse;
 import com.janeluo.luban.rds.mesh.rpc.InstallSnapshotMessage;
 import com.janeluo.luban.rds.mesh.rpc.MeshRpcMessage;
+import com.janeluo.luban.rds.mesh.rpc.ReadIndexRequestMessage;
+import com.janeluo.luban.rds.mesh.rpc.ReadIndexResponseMessage;
 import com.janeluo.luban.rds.mesh.rpc.RequestVoteMessage;
 import com.janeluo.luban.rds.mesh.rpc.RequestVoteResponse;
 import org.slf4j.Logger;
@@ -41,7 +45,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Mesh 节点主体（DESIGN.md §7.1）。
@@ -167,6 +174,43 @@ public class MeshNode {
     /** apply 到 raw store 的应用器（仅用 raw store + handle，不写 AOF）。 */
     private final LogApplier applier;
 
+    /** apply 屏障（follower 读路径用）；readIndex 取用与缓存见 gateway 层。 */
+    private final ApplyBarrier applyBarrier;
+
+    // ==================== follower 读：readIndex 收发（fix-mesh-follower-read）====================
+
+    /** readIndex 请求序号（单调递增，请求-响应关联用）。 */
+    private final AtomicLong readIndexSeq = new AtomicLong();
+
+    /** 在途 readIndex 请求：requestId → future（响应在 raftExecutor 上落定）。 */
+    private final Map<Long, CompletableFuture<ReadIndexResponseMessage>> pendingReadIndex =
+            new ConcurrentHashMap<>();
+
+    /** 在途 readIndex 请求上限（超限不排队，直接回落 MOVED：只降活性不破正确性）。 */
+    static final int MAX_INFLIGHT_READ_INDEX = 256;
+    private final Semaphore readIndexPermits = new Semaphore(MAX_INFLIGHT_READ_INDEX);
+
+    /** 取读点总次数（每次进入 fetchReadIndex 即计，含成功与失败；INFO 用）。 */
+    private final AtomicLong followerReadFetchTotal = new AtomicLong();
+    /** 回落 MOVED 次数（fetch 失败，以及 gate 的回落分支）。 */
+    private final AtomicLong followerReadFallback = new AtomicLong();
+    /** 在途上限拒绝次数。 */
+    private final AtomicLong followerReadRejected = new AtomicLong();
+    /** follower 本地读成功次数（由 gate 递增）。 */
+    private final AtomicLong followerReadLocal = new AtomicLong();
+    /** 未就绪拒绝次数（gate 读入口因 {@code !isReady()} 拒绝时递增）。 */
+    private final AtomicLong followerReadNotReadyRejected = new AtomicLong();
+
+    /**
+     * readIndex 短窗口缓存 + single-flight（fix-mesh-follower-read）。
+     * <p>缓存窗口与 RPC 超时由 gate 按配置传入（{@code ReadIndexCache.get} 参数化），
+     * 故本节点不持有配置字段；term/Leader 变更/apply halt 时由 gate 调 {@code invalidate()}。</p>
+     */
+    private final ReadIndexCache readIndexCache = new ReadIndexCache();
+
+    /** 是否已就绪（启动加载完成且本地状态可信，或快照安装追平）；单向置位。 */
+    private volatile boolean ready;
+
     /**
      * 阶段 10：快照管理器（chunked INSTALL_SNAPSHOT + 周期快照）。
      * 可为 null（未注入时收到 INSTALL_SNAPSHOT 静默忽略，保持向后兼容）。
@@ -277,6 +321,8 @@ public class MeshNode {
                 this.scheduler);
 
         this.applier = applier;
+        // apply 屏障：follower 读路径按绝对索引等待本地 lastApplied 追平（fix-mesh-follower-read）
+        this.applyBarrier = new ApplyBarrier(state);
         if (applier != null) {
             this.replicator = new LogReplicator(nodeId, config, state, busClient, applier);
             // 自身 match 以已落盘 index 为上限（未落盘不 commit，持久性语义）
@@ -286,6 +332,11 @@ public class MeshNode {
                     durableGatingActive ? durableIndex : state.getLastLogIndex());
             // apply 完成回调：complete 对应 pendingProposals future（携带 apply 响应对象；序列化为字节）
             this.replicator.setAppliedNotifier(this::onEntryApplied);
+            // apply 每推进一条 → 唤醒屏障等待者（follower 读路径）
+            this.replicator.setAppliedSignal(applyBarrier::signalApplied);
+            // apply 进入 fail-stop → 立即失效读点缓存（delta spec「缓存失效」四类触发之一：
+            // Leader term 变化 / 更高 term 帧 / Leader 变更 / apply halt）
+            this.replicator.setApplyHaltedHook(this::invalidateReadIndexCache);
             // 多数派 ACK 续租回调（Leader Lease，DESIGN §5.7）
             this.replicator.setLeaseRefresher(() ->
                     lease.refreshOnMajorityAck(System.currentTimeMillis()));
@@ -367,6 +418,35 @@ public class MeshNode {
 
     public MeshState getState() {
         return state;
+    }
+
+    /** apply 屏障（follower 读路径按绝对索引等待 lastApplied 追平）。 */
+    public ApplyBarrier applyBarrier() {
+        return applyBarrier;
+    }
+
+    /** 启动加载完成且本地状态可信，或快照安装追平。 */
+    public boolean isReady() {
+        return ready;
+    }
+
+    /** 单向置位就绪（幂等）。 */
+    public void markReady() {
+        if (!ready) {
+            ready = true;
+            logger.info("mesh 节点就绪：本地状态可信，开始服务读");
+        }
+    }
+
+    /** 快照安装完成：唤醒屏障等待者 + 置位就绪。 */
+    public void onSnapshotInstalled() {
+        applyBarrier.signalApplied();
+        markReady();
+    }
+
+    /** apply 是否已 fail-stop（gate 读入口据此短路 -TRYAGAIN）。 */
+    public boolean isApplyHalted() {
+        return replicator != null && replicator.isApplyHalted();
     }
 
     /** P1-12b：非成员来源帧丢弃计数（观测/测试）。 */
@@ -965,6 +1045,18 @@ public class MeshNode {
         electionTimer.onElectionSucceeded();
         // 阶段 12：通知角色监听器（Leader 变更）
         notifyRoleListener();
+        // 成为 Leader 后读路径不再需要 follower 读屏障：唤醒等待者使其立即按新角色重判定
+        applyBarrier.signalApplied();
+
+        // 未就绪当选 Leader：Leader 只会向外发 INSTALL_SNAPSHOT，不会接收快照，
+        // 故没有 peer 能替本节点补齐状态；就绪门会持续拒绝集群读，需运维介入。
+        // 仅在角色切换时触发（罕见），无需限流。
+        if (!isReady()) {
+            logger.error("未就绪（本地状态不可信 / store 未追平）节点当选 LEADER：没有 peer 会向 "
+                    + "Leader 发 INSTALL_SNAPSHOT，读请求将被就绪门持续拒绝（-TRYAGAIN）。"
+                    + "运维处置：恢复与 lastIncludedIndex 匹配的 dump.rdb 后重启，"
+                    + "或删除 raft-nodes.conf 强制以可信空状态重启（接受数据丢失）。nodeId={}", nodeId);
+        }
     }
 
     /**
@@ -1186,6 +1278,12 @@ public class MeshNode {
                     logger.debug("INSTALL_SNAPSHOT 收到但 SnapshotManager 未注入，暂忽略");
                 }
                 break;
+            case READ_INDEX_REQ:
+                handleReadIndexRequest(fromNodeId, (ReadIndexRequestMessage) msg);
+                break;
+            case READ_INDEX_RESP:
+                handleReadIndexResponse((ReadIndexResponseMessage) msg);
+                break;
             default:
                 logger.warn("未处理的消息类型: {}", type);
         }
@@ -1282,6 +1380,8 @@ public class MeshNode {
         long appliedBefore = state.lastApplied;
         AppendDecision decision = stateMachine.decideAppendEntries(state, msg);
         if (decision.transition.kind == Transition.Kind.TO_FOLLOWER) {
+            // applyFollowerSideEffects 内部已失效读点缓存（角色/Leader 变更），此处不再重复调用，
+            // 否则 readIndexCacheInvalidationCount 每次转移 +2（INFO 指标虚高）。
             applyFollowerSideEffects(decision.transition);
             // 阶段 11：若 term 自增导致降级 → 持久化（追加的 fsync 已由 decideAppendEntries 内
             // persistHook 完成；此处覆盖 term 变化场景）
@@ -1402,6 +1502,198 @@ public class MeshNode {
         }
     }
 
+    // ==================== readIndex：Leader 应答 / Follower 取读点（fix-mesh-follower-read）====================
+
+    /**
+     * Leader 侧 readIndex 处理。
+     * <p>只有"自己是 Leader 且租约有效"才给出读点——与 DESIGN §5.7 现行 Leader 读同一假设，
+     * 不新增时钟假设。非 Leader / 租约失效一律 {@code success=false}，让发起方立刻回落 MOVED
+     * 而不是白等一个 RPC 超时。</p>
+     * <p><b>故意不在 {@code req.getTerm() > currentTerm} 时自降级/抬 term</b>：readIndex 请求不是
+     * 选举，term 收敛由既有 AppendEntries / RequestVote 路径负责；在此引入 term 变更会绕过
+     * 那些路径的副作用（停心跳/失效租约/落盘），得不偿失。发起方按应答 term 自行裁决。</p>
+     * <p>在 raftExecutor 单线程上执行（dispatch 保证），故直接读 {@link MeshState} 安全。</p>
+     */
+    void handleReadIndexRequest(String fromNodeId, ReadIndexRequestMessage req) {
+        boolean leaderWithLease = isLeader() && lease.isValid(System.currentTimeMillis());
+        long readIndex = leaderWithLease ? state.commitIndex : 0L;
+        // leaderNodeId：成功时填自己（信息性）；自己是 Leader 但租约失效时填 null——绝不能把
+        // 自己指为 Leader，否则 gate 会把 success=false 变成指向自身的 MOVED 重试自环，
+        // 让发起方走自身已知 Leader / CLUSTERDOWN 回落；非 Leader 时给出已知 Leader。
+        String leaderNodeId = leaderWithLease ? nodeId : (isLeader() ? null : state.leaderId);
+        ReadIndexResponseMessage resp = new ReadIndexResponseMessage(
+                state.currentTerm, req.getRequestId(), readIndex, leaderWithLease, leaderNodeId);
+        sendResponse(fromNodeId, MessageType.READ_INDEX_RESP, resp);
+        logger.trace("回复 READ_INDEX: from={}, success={}, readIndex={}",
+                abbrev(fromNodeId), leaderWithLease, readIndex);
+    }
+
+    /** 入站 readIndex 应答：在 raftExecutor 单线程上落定在途 future。 */
+    void handleReadIndexResponse(ReadIndexResponseMessage resp) {
+        completePendingReadIndex(resp);
+    }
+
+    /**
+     * 向 Leader 取读点。
+     * <p>同步阻塞调用线程（业务线程）至响应到达或超时。<b>只允许在非 Leader 上调用。</b></p>
+     *
+     * @param timeoutMs 总等待上限
+     * @return 读点索引；无 Leader / 无许可 / 应答失败 / 超时 / term 不匹配一律返回 {@code null}
+     */
+    public Long fetchReadIndex(long timeoutMs) {
+        followerReadFetchTotal.incrementAndGet();    // 取读点总次数（含失败）
+        String leaderId = state.leaderId;
+        if (leaderId == null || leaderId.isEmpty() || leaderId.equals(nodeId)) {
+            followerReadFallback.incrementAndGet();
+            return null;
+        }
+        if (!readIndexPermits.tryAcquire()) {
+            // 在途请求已达上限：不排队，直接回落（只降活性不破正确性）
+            followerReadRejected.incrementAndGet();
+            followerReadFallback.incrementAndGet();
+            return null;
+        }
+        long requestId = readIndexSeq.incrementAndGet();
+        CompletableFuture<ReadIndexResponseMessage> future = new CompletableFuture<>();
+        pendingReadIndex.put(requestId, future);
+        try {
+            ReadIndexRequestMessage req = new ReadIndexRequestMessage(state.currentTerm, requestId);
+            busClient.send(leaderId, new MeshFrame(nodeId, MessageType.READ_INDEX_REQ.getCode(), req.encode()));
+            ReadIndexResponseMessage resp = future.get(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
+            if (!resp.isSuccess()) {
+                followerReadFallback.incrementAndGet();
+                return null;
+            }
+            return resp.getReadIndex();
+        } catch (TimeoutException e) {
+            followerReadFallback.incrementAndGet();
+            return null;
+        } catch (Exception e) {
+            logger.debug("fetchReadIndex 失败: leader={}, requestId={}", abbrev(leaderId), requestId, e);
+            followerReadFallback.incrementAndGet();
+            return null;
+        } finally {
+            pendingReadIndex.remove(requestId);
+            readIndexPermits.release();
+        }
+    }
+
+    /**
+     * 在途 readIndex 应答落定（raftExecutor 上调用；{@link MeshState} 只在此线程改）。
+     * <p>term 裁决：更高 term → 按 Raft 规则收敛（降级为 FOLLOWER + 落盘 + 复位定时器），
+     * 但该读点不可采信；低于本节点 term → 过期响应丢弃；相等且成功 → 读点可用。</p>
+     */
+    void completePendingReadIndex(ReadIndexResponseMessage resp) {
+        if (resp.getTerm() > state.currentTerm) {
+            Transition t = stateMachine.becomeFollower(state, resp.getTerm(), null);
+            // 失效读点缓存由 applyFollowerSideEffects 统一完成（见其收尾调用），此处不重复。
+            applyFollowerSideEffects(t);
+            persistStateSafe("readIndexResponse-term-up");
+            electionTimer.reset();
+            failPending(resp.getRequestId(), "higher term");
+            return;
+        }
+        if (resp.getTerm() < state.currentTerm) {
+            // 过期响应：丢弃（迟到/伪造都不采信）
+            failPending(resp.getRequestId(), "stale term");
+            return;
+        }
+        CompletableFuture<ReadIndexResponseMessage> f = pendingReadIndex.get(resp.getRequestId());
+        if (f == null) {
+            return;                                  // 已超时移除
+        }
+        f.complete(resp);
+    }
+
+    /** 以异常落定在途 future（响应不可采信时），使阻塞中的 fetchReadIndex 立即回落。 */
+    private void failPending(long requestId, String reason) {
+        CompletableFuture<ReadIndexResponseMessage> f = pendingReadIndex.get(requestId);
+        if (f != null) {
+            logger.debug("丢弃 readIndex 响应: requestId={}, reason={}", requestId, reason);
+            f.completeExceptionally(new IllegalStateException("readIndex discarded: " + reason));
+        }
+    }
+
+    /** 取读点总次数（每次进入 fetchReadIndex 即计，含成功与失败；INFO 用）。 */
+    public long readIndexFetchCount() {
+        return followerReadFetchTotal.get();
+    }
+
+    /** 回落 MOVED 次数（fetch 失败 + gate 回落分支；INFO 用）。 */
+    public long followerReadFallbackCount() {
+        return followerReadFallback.get();
+    }
+
+    /** 在途上限拒绝次数（INFO 用）。 */
+    public long followerReadRejectedCount() {
+        return followerReadRejected.get();
+    }
+
+    /** follower 本地读成功次数（INFO 用）。 */
+    public long followerReadLocalCount() {
+        return followerReadLocal.get();
+    }
+
+    /** follower 本地读成功计数 +1（gate 走本地读成功后调用）。 */
+    public void incFollowerReadLocal() {
+        followerReadLocal.incrementAndGet();
+    }
+
+    /** 未就绪拒绝计数 +1（gate 读入口因 {@code !isReady()} 拒绝时调用）。 */
+    public void incFollowerReadNotReadyRejected() {
+        followerReadNotReadyRejected.incrementAndGet();
+    }
+
+    /** 未就绪拒绝次数（INFO/CLUSTER INFO 用）。 */
+    public long followerReadNotReadyRejectedCount() {
+        return followerReadNotReadyRejected.get();
+    }
+
+    /** 回落 MOVED 计数 +1（gate 的回落分支调用）。 */
+    public void incFollowerReadFallback() {
+        followerReadFallback.incrementAndGet();
+    }
+
+    /** 本节点当前任期（读点缓存按 term 失效用）。 */
+    public long currentTerm() {
+        return state.currentTerm;
+    }
+
+    /** readIndex 缓存（gate 取读点与失效用）。 */
+    public ReadIndexCache readIndexCache() {
+        return readIndexCache;
+    }
+
+    /** readIndex 缓存命中次数（INFO 用）。 */
+    public long readIndexCacheHitCount() {
+        return readIndexCache.cacheHits();
+    }
+
+    /** readIndex 缓存失效次数（INFO 用）。 */
+    public long readIndexCacheInvalidationCount() {
+        return readIndexCache.invalidations();
+    }
+
+    /** readIndex 在途合并次数（INFO 用）。 */
+    public long readIndexCoalescedCount() {
+        return readIndexCache.coalesced();
+    }
+
+    /**
+     * 读点缓存失效：term 变化 / Leader 变更 / apply 进入 fail-stop 时调用。
+     * <p>调用点：{@code applyFollowerSideEffects}（所有抬 term/降级路径的收尾，保证每次转移
+     * 只失效一次、计数不虚高）+ {@link LogReplicator} 毒条目 fail-stop 的 halt hook（经
+     * {@code setApplyHaltedHook} 注入）。</p>
+     * <p>缓存里的读点只在"当时那个 term 的 Leader"下有效；角色/任期一变就必须立即失效，
+     * 否则新 Follower 可能拿旧读点去等一个已无意义的 apply 屏障（陈旧读或白等）。
+     * fail-stop 后同理：lastApplied 冻结，缓存读点若继续复用会误导 apply 屏障判定。</p>
+     * <p>gate 读入口仍会先查 {@link #isApplyHalted()} 短路，但那是"拒绝服务"，不替代这里的
+     * "清缓存"——两者职责不同，规格要求 fail-stop 必须作为失效触发之一。</p>
+     */
+    private void invalidateReadIndexCache() {
+        readIndexCache.invalidate();
+    }
+
     // ==================== 副作用（解析 Transition）====================
 
     /**
@@ -1423,6 +1715,11 @@ public class MeshNode {
         logger.info("转为 FOLLOWER: term={}, leader={}", t.newTerm, t.newLeaderId);
         // 阶段 12：通知角色监听器（失去 Leader / Leader 变更）
         notifyRoleListener();
+        // 降级为 Follower 后等待语义变化：唤醒等待者立即按新角色重判定（避免等满超时）
+        applyBarrier.signalApplied();
+        // fix-mesh-follower-read：角色/Leader 变更 → 旧读点立即失效（唯一调用点：
+        // 所有 term 抬升/降级路径都经此方法，避免在多处重复失效使计数虚高）
+        invalidateReadIndexCache();
     }
 
     /**

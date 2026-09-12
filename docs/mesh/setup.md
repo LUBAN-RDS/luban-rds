@@ -60,6 +60,9 @@ mesh-self-node-id a1b2c3d4e5f60718293a4b5c6d7e8f900a1b2c3d
 # mesh-lease-duration-ms 1200           # 读租约时长（= 2 × electionTimeout）
 # mesh-read-consistency LEASE           # 读模式：LEASE（默认）/ READ_INDEX
 # mesh-read-lease-wait-ms 1000          # 租约失效时等待续租的上限
+# mesh-read-from-follower off           # v1.0.26+ Follower 读：off（默认，读全 MOVED 到 Leader）/ readindex（Follower 本地读）
+# mesh-follower-read-max-wait-ms 500    # v1.0.26+ readindex 模式总预算：取读点 + apply 屏障，超时回落 MOVED
+# mesh-follower-read-cache-ms 100       # v1.0.26+ readindex 模式读点缓存窗口（0 = 关闭缓存 = 严格线性一致）
 # mesh-snapshot-log-threshold 100000    # 每 N 条日志触发周期快照（v1.0.24+ 已接入调度：每 30s 检查，根治 WAL/日志无界增长）
 # mesh-bus-port 0                       # 0 = 按 peers 条目取
 # mesh-service-port 0                   # 0 = 用全局 port（单机多实例必配为不同值）
@@ -91,6 +94,24 @@ mesh-self-node-id a1b2c3d4e5f60718293a4b5c6d7e8f900a1b2c3d
 > - **毒条目 fail-stop**：apply 异常时 lastApplied 冻结 + ERROR 告警（人工恢复语义：
 >   修复数据问题后重启节点；WAL 重放复现则需处置该条目，宁可停滞不可分叉）。
 > - **启动快速失败**：`start()` 失败（如总线端口占用）进程非零退出，不再出现僵尸进程。
+
+> **v1.0.26 Follower 读（默认关闭，可灰度）**：
+> 新增 `mesh-read-from-follower`（默认 `off`）、`mesh-follower-read-max-wait-ms`（默认 `500`）、
+> `mesh-follower-read-cache-ms`（默认 `100`）。`off` = 现状：每个读都返回 MOVED 到 Leader；
+> 置 `readindex` 后读可在 Follower 本地服务——Follower 向 Leader 取租约背书的读点，
+> 等本地 apply 追平该读点后本地执行读 handler，取点/屏障/执行任一失败一律回落既有 MOVED。
+>
+> **一致性契约（按业务选型）**：
+> - `off`（默认）= 现状，读到的一定是 Leader 已提交的最新值；
+> - `readindex` + `cache-ms=0` = **严格线性一致**的 Follower 读（每次取新读点，读得到此前已返回 `+OK` 的写）；
+> - `readindex` + `cache-ms=N` = **有界陈旧读**，陈旧上界 = **N + 网络往返**。窗口内复用读点，
+>   因此**可能读不到一个已返回 `+OK` 的写**。对会话键/计数器等做**读-改-写**时请设 `cache-ms=0`；
+>   能容忍「最多 N + RTT 读滞后」的场景可用默认 `N=100` 换取接近本地读的吞吐。
+>
+> **已知差异**：Follower 本地读产生的访问时间更新/懒删除等价效应不经 Raft 复制，
+> 仅当 `maxmemory > 0`（默认 `0`）时影响淘汰判定；`readindex` 仍建立在 Leader 租约时钟假设上
+> （节点间时钟漂移过大时仍应按第 1 节的 NTP 要求对齐；时钟无关版为后续可选阶段）。
+> 节点未就绪或 apply fail-stop 时读短路返回 `-TRYAGAIN`，由客户端退避重试。
 
 ## 3. 启动 3 节点
 

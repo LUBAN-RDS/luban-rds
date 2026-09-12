@@ -62,6 +62,7 @@ class MeshReadPathTest {
         lease.refreshOnMajorityAck(System.currentTimeMillis()); // 续租一次 → 有效
 
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(lease);
 
@@ -92,6 +93,7 @@ class MeshReadPathTest {
         LeaseManager lease = new LeaseManager();
 
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(lease);
 
@@ -142,6 +144,7 @@ class MeshReadPathTest {
 
         LeaseManager expired = new LeaseManager(); // 未续租 → 失效
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(expired);
 
@@ -177,6 +180,7 @@ class MeshReadPathTest {
         lease.refreshOnMajorityAck(System.currentTimeMillis());
 
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(lease);
 
@@ -204,6 +208,7 @@ class MeshReadPathTest {
         // 未续租的 lease → awaitValid 在 readindex 超时内返回 false
         LeaseManager lease = new LeaseManager();
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(lease);
 
@@ -228,6 +233,7 @@ class MeshReadPathTest {
 
         LeaseManager lease = new LeaseManager(); // 起初失效
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(lease);
 
@@ -277,6 +283,7 @@ class MeshReadPathTest {
     void nonLeader_readThrowsMovedToLeader() throws Exception {
         LeaseManager lease = spy(new LeaseManager());
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(false);
         when(node.getLeaderId()).thenReturn("leaderNode");
         when(node.lease()).thenReturn(lease);
@@ -312,6 +319,7 @@ class MeshReadPathTest {
         lease.invalidate(); // 模拟失去 Leader 身份/分区后租约永久失效
 
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true); // 节点自身仍认为自己是 Leader（未感知分区）
         when(node.lease()).thenReturn(lease);
 
@@ -337,6 +345,7 @@ class MeshReadPathTest {
         lease.invalidate();
 
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(lease);
 
@@ -374,6 +383,7 @@ class MeshReadPathTest {
         lease.refreshOnMajorityAck(System.currentTimeMillis());
 
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(lease);
 

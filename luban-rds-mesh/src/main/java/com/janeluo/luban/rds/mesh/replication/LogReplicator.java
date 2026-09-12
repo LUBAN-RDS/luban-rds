@@ -168,6 +168,16 @@ public class LogReplicator {
     /** 续租回调：matchIndex 多数派 ACK 后触发（Leader Lease，阶段 3 LeaseManager.refreshOnMajorityAck）。 */
     private volatile Runnable leaseRefresher;
 
+    /** apply 推进信号（follower 读屏障唤醒）；默认 no-op。 */
+    private volatile Runnable appliedSignal = () -> { };
+
+    /**
+     * apply 进入 fail-stop 时的通知 hook；默认 no-op。
+     * <p>MeshNode 注入此 hook 以在毒条目挂起 apply 时失效 readIndex 读点缓存
+     * （delta spec「readIndex 短窗口缓存与失效」四类触发之一）。</p>
+     */
+    private volatile Runnable applyHaltedHook = () -> { };
+
     /**
      * @param nodeId       本节点 nodeId
      * @param config       集群配置
@@ -194,6 +204,21 @@ public class LogReplicator {
     /** 注入续租回调（多数派 ACK 后触发）。 */
     public void setLeaseRefresher(Runnable refresher) {
         this.leaseRefresher = refresher;
+    }
+
+    /** 注入 apply 推进信号（每条成功 apply 后触发）。 */
+    public void setAppliedSignal(Runnable signal) {
+        this.appliedSignal = signal != null ? signal : () -> { };
+    }
+
+    /**
+     * 注入 apply 进入 fail-stop 的 hook（毒条目挂起 apply 循环时触发一次）。
+     * <p>hook 异常在调用处防御性捕获，绝不能被误判为毒条目路径（与 {@code appliedSignal} 同口径）。</p>
+     *
+     * @param hook fail-stop 通知；{@code null} 恢复 no-op
+     */
+    public void setApplyHaltedHook(Runnable hook) {
+        this.applyHaltedHook = hook != null ? hook : () -> { };
     }
 
     // ==================== nextIndex / matchIndex 管理 ====================
@@ -575,6 +600,13 @@ public class LogReplicator {
                 applied++;
                 // 更新 lastApplied（apply 成功后才推进）
                 state.lastApplied = next;
+                // follower 读屏障：唤醒等待 lastApplied 追平的读线程（业务线程）
+                // 屏障信号：与 appliedNotifier 同样防御——hook 异常绝不能被误判为毒条目触发 fail-stop
+                try {
+                    appliedSignal.run();
+                } catch (Exception e) {
+                    logger.warn("apply 屏障信号异常, index={}", next, e);
+                }
                 // 通知 pendingProposals：Leader 侧 complete 对应 future（携带 apply 响应对象）；
                 // Follower 侧无 future，回调内 no-op（响应对象丢弃，DESIGN §5.1 步骤5）。
                 if (appliedNotifier != null) {
@@ -595,6 +627,13 @@ public class LogReplicator {
                 logger.error("apply 异常 fail-stop：lastApplied 冻结在 {}，毒条目 index={} "
                         + "已挂起 apply 循环。人工修复数据问题后重启节点恢复"
                         + "（WAL 重放复现则需处置该条目）", state.lastApplied, next, e);
+                // 失效 readIndex 读点缓存（delta spec 的四类失效触发之一）。
+                // 防御性包裹：hook 异常绝不能被误判为毒条目路径（与 appliedSignal 同口径）。
+                try {
+                    applyHaltedHook.run();
+                } catch (Exception hookEx) {
+                    logger.warn("apply halt hook 异常", hookEx);
+                }
                 break;
             }
         }

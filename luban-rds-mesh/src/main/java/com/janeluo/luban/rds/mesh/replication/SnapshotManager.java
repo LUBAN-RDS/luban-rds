@@ -101,6 +101,14 @@ public class SnapshotManager {
     /** P1-4a：安装快照后还原脚本表；{@code null} = 忽略。装配 LuaCommandHandler::restoreScripts。 */
     private volatile java.util.function.Consumer<java.util.Map<String, String>> scriptTableConsumer;
 
+    /** 快照安装完成回调（follower 读屏障唤醒 + 就绪置位）；默认 no-op。 */
+    private volatile Runnable installCompleteHook = () -> { };
+
+    /** 注入快照安装完成回调（仅在 done 分支成功路径触发）。 */
+    public void setInstallCompleteHook(Runnable hook) {
+        this.installCompleteHook = hook != null ? hook : () -> { };
+    }
+
     /** P1-4a：设置脚本表导出/还原钩子（任一可为 null）。 */
     public void setScriptTableHooks(
             java.util.function.Supplier<java.util.Map<String, String>> supplier,
@@ -580,6 +588,15 @@ public class SnapshotManager {
 
                 // 4c. 持久化 MeshState（WAL 重写 + conf 新边界）
                 runPersistHook();
+
+                // follower 读：快照安装使 lastApplied 跳到 lastIncludedIndex → 唤醒屏障等待者；
+                // 状态已可信 → 就绪门置位
+                // 屏障/就绪信号：hook 异常不得影响快照成功 ACK（否则 Leader 重发整份快照）
+                try {
+                    installCompleteHook.run();
+                } catch (Exception e) {
+                    logger.warn("快照安装完成回调异常, lastIncluded={}", done.lastIncludedIndex, e);
+                }
 
                 logger.info("handleInstallSnapshot: 快照加载完成 lastIncluded={}/{}, bytes={}, 回 ACK 给 {}",
                         done.lastIncludedIndex, done.lastIncludedTerm, receivedBytes, fromNodeId);

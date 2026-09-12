@@ -349,6 +349,25 @@ public class RdsConfig {
      */
     private int meshMaxInflightWrites = 256;
 
+    /**
+     * follower 读模式（{@code mesh-read-from-follower}）：{@code off}（默认）| {@code readindex}。
+     * <p>{@code readindex} = Follower 取 readIndex + 等 apply 追平后本地读，失败回落 MOVED。
+     * 仅 mesh 模式生效；cluster / standalone 忽略。</p>
+     */
+    private String meshReadFromFollower = "off";
+
+    /**
+     * follower 读取读点 + 等 apply 的总预算（{@code mesh-follower-read-max-wait-ms}，默认 500）。
+     */
+    private long meshFollowerReadMaxWaitMs = 500;
+
+    /**
+     * readIndex 短窗口缓存有效期（{@code mesh-follower-read-cache-ms}，默认 100）。
+     * <p>{@code 0} = 关闭缓存（每次取新读点，恢复严格线性一致）。窗口内为<b>有界陈旧读</b>，
+     * 上界 = 窗口 + 网络往返。</p>
+     */
+    private long meshFollowerReadCacheMs = 100;
+
 
     /**
      * mesh 总线端口（节点间 Raft RPC）；未配置时按 peers 列表中本节点条目取。
@@ -987,6 +1006,30 @@ public class RdsConfig {
 
     public void setMeshMaxInflightWrites(int meshMaxInflightWrites) {
         this.meshMaxInflightWrites = meshMaxInflightWrites;
+    }
+
+    public String getMeshReadFromFollower() {
+        return meshReadFromFollower;
+    }
+
+    public void setMeshReadFromFollower(String meshReadFromFollower) {
+        this.meshReadFromFollower = meshReadFromFollower;
+    }
+
+    public long getMeshFollowerReadMaxWaitMs() {
+        return meshFollowerReadMaxWaitMs;
+    }
+
+    public void setMeshFollowerReadMaxWaitMs(long meshFollowerReadMaxWaitMs) {
+        this.meshFollowerReadMaxWaitMs = meshFollowerReadMaxWaitMs;
+    }
+
+    public long getMeshFollowerReadCacheMs() {
+        return meshFollowerReadCacheMs;
+    }
+
+    public void setMeshFollowerReadCacheMs(long meshFollowerReadCacheMs) {
+        this.meshFollowerReadCacheMs = meshFollowerReadCacheMs;
     }
 
     public int getMeshBusPort() {
