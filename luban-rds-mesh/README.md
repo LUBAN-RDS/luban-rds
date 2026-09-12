@@ -269,7 +269,11 @@ redis-cli -p 6379 CLUSTER INFO
 
 ## 测试
 
-模块当前 **504 个测试全过**（`mvn -pl luban-rds-mesh test`，v1.0.26 口径，Skipped=0）。
+模块当前 **504 个测试**（`mvn -pl luban-rds-mesh test`，v1.0.26 口径，Skipped=0）。
+其中 `SlowPersistElectionStabilityTest.slowPersist_writePeak_leaderNotOverthrown_allWritesComplete`
+为**既有偶发失败项**：该用例在慢盘 250ms 故障注入下验证写高峰期间 Leader 不被选举推翻，
+受 Windows 定时器粒度与慢盘注入叠加影响偶发选举风暴（v1.0.25 基线同样复现，与本分支改动无关）；
+单次批量验证若命中该用例，需重跑确认。
 下表为阶段 13 时点的历史快照（当时 291 个），新增用例见各特性对应章节：
 
 | 阶段 | 测试内容 | 测试数（累计） |
