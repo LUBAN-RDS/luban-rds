@@ -432,6 +432,35 @@ public class ConfigLoader {
                     case "mesh-max-inflight-writes":
                         config.setMeshMaxInflightWrites(Integer.parseInt(value));
                         break;
+                    case "mesh-read-from-follower": {
+                        // 非法值回退 off + WARN（不得静默当开启）：本变更引入的是有界陈旧读语义，
+                        // 静默开启会让运维以为仍是严格一致
+                        String mode = value.trim();
+                        if ("off".equalsIgnoreCase(mode)) {
+                            config.setMeshReadFromFollower("off");
+                        } else if ("readindex".equalsIgnoreCase(mode)) {
+                            config.setMeshReadFromFollower("readindex");
+                        } else {
+                            logger.warn("mesh-read-from-follower 取值非法（{}），回退 off", value);
+                            config.setMeshReadFromFollower("off");
+                        }
+                        break;
+                    }
+                    case "mesh-follower-read-max-wait-ms": {
+                        long wait = Long.parseLong(value);
+                        config.setMeshFollowerReadMaxWaitMs(wait > 0 ? wait : 500);
+                        break;
+                    }
+                    case "mesh-follower-read-cache-ms": {
+                        // 0 合法 = 关闭缓存（严格线性一致）；仅负数非法
+                        long cacheMs = Long.parseLong(value);
+                        if (cacheMs < 0) {
+                            logger.warn("mesh-follower-read-cache-ms 为负数（{}），回退默认 100", value);
+                            cacheMs = 100;
+                        }
+                        config.setMeshFollowerReadCacheMs(cacheMs);
+                        break;
+                    }
 
                     default:
                         logger.debug("未知配置项: {} = {}", key, value);

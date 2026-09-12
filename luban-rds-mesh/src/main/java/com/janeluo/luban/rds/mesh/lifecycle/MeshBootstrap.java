@@ -461,6 +461,14 @@ public class MeshBootstrap {
                 logger.warn("mesh-read-consistency 值非法（{}），保持默认 LEASE", mode);
             }
         }
+
+        // follower 读（Task 13 配置链）：仅 readindex 显式识别，其余（含非法）落回 OFF。
+        // 注意 ConfigLoader 已把非法值归一到 off，此处再兜一层防直接构造 RdsConfig 的场景。
+        b.readFromFollower("readindex".equalsIgnoreCase(config.getMeshReadFromFollower())
+                ? MeshConfig.ReadFromFollower.READ_INDEX
+                : MeshConfig.ReadFromFollower.OFF);
+        b.followerReadMaxWaitMs(config.getMeshFollowerReadMaxWaitMs());
+        b.followerReadCacheMs(config.getMeshFollowerReadCacheMs());
         return b.build();
     }
 
