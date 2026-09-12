@@ -76,6 +76,7 @@ version: 1.0.17
 | **cluster / mesh 互斥** | 同一进程只能启用其一（`mesh-enabled` 与 `cluster-enabled` 启动时校验） |
 | **AOF 退役** | mesh 模式不写 AOF——Raft log 即 WAL、dump.rdb 即快照 |
 | **dump.rdb 唯一写者** | mesh 模式禁用 server 原 RDB save（BGSAVE），dump.rdb 唯一写者 = SnapshotManager |
+| **Follower 读默认关闭** | `mesh-read-from-follower` 默认 `off`（读全 MOVED 到 Leader）；置 `readindex` 后 `cache-ms=N` 为**有界陈旧读**（上界 = N + 网络往返，窗口内可能读不到已返回 `+OK` 的写），读-改-写场景须设 `cache-ms=0`（严格线性一致），详见 [setup.md](setup.md) |
 
 ## 6. 文档索引
 

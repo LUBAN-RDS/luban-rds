@@ -79,6 +79,9 @@ mesh-self-node-id a1b2...
 # mesh-lease-duration-ms 1200           # 读租约时长（= 2 × electionTimeout）
 # mesh-read-consistency LEASE           # 读模式：LEASE（默认）/ READ_INDEX
 # mesh-read-lease-wait-ms 1000          # 租约失效时等待续租的上限
+# mesh-read-from-follower off           # v1.0.26+ Follower 读：off（默认，全 MOVED）/ readindex（本地读）
+# mesh-follower-read-max-wait-ms 500    # v1.0.26+ readindex 模式总预算：取读点 + apply 屏障
+# mesh-follower-read-cache-ms 100       # v1.0.26+ readindex 模式读点缓存窗口（0 = 严格线性一致）
 # mesh-snapshot-log-threshold 100000    # 每 N 条日志触发周期快照
 # mesh-bus-port 0                       # 0 = 按 peers 条目取
 # mesh-service-port 0                   # 0 = 用全局 port
@@ -205,6 +208,39 @@ redis-cli -p 6379 CLUSTER INFO
 | **未知 / 无 Leader**（选举中） | `-MESHDOWN The mesh cluster has no leader\r\n` | 客户端应退避重试 |
 
 > `MOVED` 中的 slot 用 key 的真实 CRC16（非占位值），部分客户端依赖它更新本地路由缓存。
+
+---
+
+## Follower 读（v1.0.26+）
+
+默认 `off`——上面「MOVED 说明」的现状行为不变。置 `mesh-read-from-follower readindex` 后，
+写打到 Follower 仍返回 MOVED，但**读**可在 Follower 本地服务：Follower 向 Leader 要一个经租约背书的
+读点（`READ_INDEX_REQ/RESP`），等本地 apply 追平该读点（apply 屏障）后由业务线程本地执行读 handler。
+取读点、apply 屏障、本地执行任一失败/超时，**一律回落既有 MOVED**，不会返回未达读点的状态。
+
+| 配置 | 默认值 | 语义 |
+|------|--------|------|
+| `mesh-read-from-follower` | `off` | `off` = 现状：每个读都 MOVED 到 Leader；`readindex` = 读可在 Follower 本地服务 |
+| `mesh-follower-read-max-wait-ms` | `500` | `readindex` 模式总预算（取读点 + apply 屏障），超时回落 MOVED |
+| `mesh-follower-read-cache-ms` | `100` | `readindex` 模式读点缓存窗口；`0` = 关闭缓存（严格线性一致档） |
+
+**一致性契约（务必按业务选型）：**
+
+- **`off`（默认）**：现状行为，每个读 MOVED 到 Leader，读到的一定是 Leader 已提交的最新值。
+- **`readindex` + `cache-ms=0`**：**严格线性一致**的 Follower 读。每次读都取新读点并等本地 apply 追平，
+  读得到此前任何已返回 `+OK` 的写。代价是每次读一次取读点往返（性能档位见下方性能小节）。
+- **`readindex` + `cache-ms=N`（默认 100）**：**有界陈旧读**，陈旧上界 = **N + 网络往返**。
+  窗口内复用同一读点，因此**可能读不到一个在窗口内已返回 `+OK` 的写**（写已成功、Follower 尚未纳入该读点，
+  或读点复用导致本地不等待该写）。读-改-写同一 key（如会话键、计数器）时请设 `cache-ms=0`；
+  只要业务能容忍「最多 N + RTT 的读滞后」，`cache-ms=N` 可获得接近本地读的吞吐。
+
+**已知差异：**
+
+- Follower 本地执行读会在**本地**产生访问时间更新 / 懒删除等价效应（不经 Raft 复制），
+  仅当 `maxmemory > 0`（默认 `0`）时对淘汰判定有影响；默认不触发。
+- `readindex` 当前建立在 **Leader 租约时钟假设**上（读点由租约有效性背书）；时钟无关版为后续可选阶段。
+- 就绪门：节点启动加载未完成或快照安装未完成时 `isReady()` 为 false，读一律 `-TRYAGAIN` 由客户端退避重试；
+  apply fail-stop（毒条目）后读同样短路 `-TRYAGAIN`。
 
 ---
 
