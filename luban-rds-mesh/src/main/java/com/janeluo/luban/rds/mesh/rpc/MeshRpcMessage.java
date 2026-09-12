@@ -91,6 +91,10 @@ public abstract class MeshRpcMessage {
                 return RequestVoteResponse.decode(body);
             case INSTALL_SNAPSHOT:
                 return InstallSnapshotMessage.decode(body);
+            case READ_INDEX_REQ:
+                return ReadIndexRequestMessage.decode(body);
+            case READ_INDEX_RESP:
+                return ReadIndexResponseMessage.decode(body);
             default:
                 throw new IllegalArgumentException("未知的 mesh RPC 消息类型: " + type);
         }
