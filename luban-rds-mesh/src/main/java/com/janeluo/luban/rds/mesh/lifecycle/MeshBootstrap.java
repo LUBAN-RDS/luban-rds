@@ -134,12 +134,23 @@ public class MeshBootstrap {
         LogApplier applier = new LogApplier(handler, rawStore);
 
         // 5. MeshStartupLoader 按 §5.5 顺序恢复：raft-nodes.conf → dump.rdb → logTail 重放
-        MeshState state = loadStartupState(persister, rdbPersistService, applier, rawStore, dbDir,
+        StartupLoad load = loadStartupState(persister, rdbPersistService, applier, rawStore, dbDir,
                 topo.selfNodeId);
+        MeshState state = load.state;
 
         // 6. 创建 MeshNode（注入 state/config/busClient/stateMachine/applier/rawStore）
         RaftStateMachine stateMachine = new RaftStateMachine();
         MeshNode meshNode = new MeshNode(meshConfig, state, busClient, stateMachine, applier, rawStore);
+
+        // 启动就绪门（fix-mesh-follower-read A2）：isTrusted 此前被算出后丢弃，导致
+        // 不可信节点（store 为空、等 INSTALL_SNAPSHOT）无人拦截。可信即置位；
+        // 不可信保持未就绪，由快照安装完成回调置位（快照安装路径见下方 setInstallCompleteHook）。
+        if (load.trusted) {
+            meshNode.markReady();
+        } else {
+            logger.warn("mesh 本地状态不可信（store 为空，等 Leader INSTALL_SNAPSHOT 追平）："
+                    + "读请求在追平前一律拒绝（-TRYAGAIN）");
+        }
 
         // 6.1 注册入站消息消费者：把 MeshNode.onMessage 注入共享的 @Sharable busHandler。
         // busHandler 同时挂在 MeshBusServer（peer→本节点 inbound）与 MeshBusClient（本节点→peer 出站连接上的应答 inbound）
@@ -184,6 +195,8 @@ public class MeshBootstrap {
                     }
                 });
         meshNode.setSnapshotManager(snapshotManager);
+        // 快照安装完成 → 唤醒读屏障 + 置位就绪（不可信节点追平后恢复服务读）
+        snapshotManager.setInstallCompleteHook(meshNode::onSnapshotInstalled);
         // P1-4a：快照携带/还原脚本表（脚本缓存属复制状态，快照截断后仍可 EVALSHA）
         snapshotManager.setScriptTableHooks(
                 com.janeluo.luban.rds.core.handler.LuaCommandHandler::snapshotScripts,
@@ -229,22 +242,29 @@ public class MeshBootstrap {
      * 按 §5.5 顺序恢复启动状态：raft-nodes.conf → dump.rdb 衔接 → logTail 重放。
      * <p>恢复硬失败（IO 错误、JSON 损坏）时抛异常中止启动（不静默重置 term，DESIGN §5.5）。</p>
      */
-    private MeshState loadStartupState(MeshConfigPersister persister,
-                                       RdbPersistService rdbPersistService,
-                                       LogApplier applier, MemoryStore rawStore,
-                                       String dbDir, String nodeId) {
+    private StartupLoad loadStartupState(MeshConfigPersister persister,
+                                         RdbPersistService rdbPersistService,
+                                         LogApplier applier, MemoryStore rawStore,
+                                         String dbDir, String nodeId) {
         MeshStartupLoader loader = new MeshStartupLoader(
                 persister, rdbPersistService, applier, rawStore, dbDir);
         try {
             MeshStartupLoader.StartupResult result = loader.load(nodeId);
             logger.info("mesh 启动状态恢复完成: isTrusted={}, firstStart={}, replayed={}, nodeId={}",
                     result.isTrusted, result.firstStart, result.replayedCount, abbrev(nodeId));
-            return result.state;
+            return new StartupLoad(result.state, result.isTrusted);
         } catch (IOException e) {
             // 启动硬故障：IO 错误或 raft-nodes.conf 损坏，中止启动（DESIGN §5.5）
             throw new IllegalStateException("mesh 启动状态加载失败（raft-nodes.conf/dump.rdb）: "
                     + "nodeId=" + abbrev(nodeId), e);
         }
+    }
+
+    /** 启动加载结果：state + 本轮是否可信（dump.rdb 衔接 + 重放后状态正确）。 */
+    private static final class StartupLoad {
+        final MeshState state;
+        final boolean trusted;
+        StartupLoad(MeshState state, boolean trusted) { this.state = state; this.trusted = trusted; }
     }
 
     // ==================== peers 解析 ====================
