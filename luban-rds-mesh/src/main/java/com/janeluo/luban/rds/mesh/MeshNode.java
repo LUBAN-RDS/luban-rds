@@ -23,6 +23,8 @@ import com.janeluo.luban.rds.mesh.rpc.AppendEntriesMessage;
 import com.janeluo.luban.rds.mesh.rpc.AppendEntriesResponse;
 import com.janeluo.luban.rds.mesh.rpc.InstallSnapshotMessage;
 import com.janeluo.luban.rds.mesh.rpc.MeshRpcMessage;
+import com.janeluo.luban.rds.mesh.rpc.ReadIndexRequestMessage;
+import com.janeluo.luban.rds.mesh.rpc.ReadIndexResponseMessage;
 import com.janeluo.luban.rds.mesh.rpc.RequestVoteMessage;
 import com.janeluo.luban.rds.mesh.rpc.RequestVoteResponse;
 import org.slf4j.Logger;
@@ -42,7 +44,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Mesh 节点主体（DESIGN.md §7.1）。
@@ -170,6 +174,33 @@ public class MeshNode {
 
     /** apply 屏障（follower 读路径用）；readIndex 取用与缓存见 gateway 层。 */
     private final ApplyBarrier applyBarrier;
+
+    // ==================== follower 读：readIndex 收发（fix-mesh-follower-read）====================
+
+    /** readIndex 请求序号（单调递增，请求-响应关联用）。 */
+    private final java.util.concurrent.atomic.AtomicLong readIndexSeq =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** 在途 readIndex 请求：requestId → future（响应在 raftExecutor 上落定）。 */
+    private final Map<Long, CompletableFuture<ReadIndexResponseMessage>> pendingReadIndex =
+            new ConcurrentHashMap<>();
+
+    /** 在途 readIndex 请求上限（超限不排队，直接回落 MOVED：只降活性不破正确性）。 */
+    static final int MAX_INFLIGHT_READ_INDEX = 256;
+    private final Semaphore readIndexPermits = new Semaphore(MAX_INFLIGHT_READ_INDEX);
+
+    /** 取读点总次数（每次进入 fetchReadIndex 即计，含成功与失败；INFO 用）。 */
+    private final java.util.concurrent.atomic.AtomicLong followerReadFetchTotal =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** 回落 MOVED 次数（fetch 失败，以及 gate 的回落分支）。 */
+    private final java.util.concurrent.atomic.AtomicLong followerReadFallback =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** 在途上限拒绝次数。 */
+    private final java.util.concurrent.atomic.AtomicLong followerReadRejected =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** follower 本地读成功次数（由 gate 递增）。 */
+    private final java.util.concurrent.atomic.AtomicLong followerReadLocal =
+            new java.util.concurrent.atomic.AtomicLong();
 
     /** 是否已就绪（启动加载完成且本地状态可信，或快照安装追平）；单向置位。 */
     private volatile boolean ready;
@@ -1238,6 +1269,12 @@ public class MeshNode {
                     logger.debug("INSTALL_SNAPSHOT 收到但 SnapshotManager 未注入，暂忽略");
                 }
                 break;
+            case READ_INDEX_REQ:
+                handleReadIndexRequest(fromNodeId, (ReadIndexRequestMessage) msg);
+                break;
+            case READ_INDEX_RESP:
+                handleReadIndexResponse(fromNodeId, (ReadIndexResponseMessage) msg);
+                break;
             default:
                 logger.warn("未处理的消息类型: {}", type);
         }
@@ -1452,6 +1489,141 @@ public class MeshNode {
         if (acks >= config.majority()) {
             lease.refreshOnMajorityAck(System.currentTimeMillis());
         }
+    }
+
+    // ==================== readIndex：Leader 应答 / Follower 取读点（fix-mesh-follower-read）====================
+
+    /**
+     * Leader 侧 readIndex 处理。
+     * <p>只有"自己是 Leader 且租约有效"才给出读点——与 DESIGN §5.7 现行 Leader 读同一假设，
+     * 不新增时钟假设。非 Leader / 租约失效一律 {@code success=false}，让发起方立刻回落 MOVED
+     * 而不是白等一个 RPC 超时。</p>
+     * <p>在 raftExecutor 单线程上执行（dispatch 保证），故直接读 {@link MeshState} 安全。</p>
+     */
+    void handleReadIndexRequest(String fromNodeId, ReadIndexRequestMessage req) {
+        boolean leaderWithLease = isLeader() && lease.isValid(System.currentTimeMillis());
+        long readIndex = leaderWithLease ? state.commitIndex : 0L;
+        String leaderNodeId = isLeader() ? nodeId : state.leaderId;
+        ReadIndexResponseMessage resp = new ReadIndexResponseMessage(
+                state.currentTerm, req.getRequestId(), readIndex, leaderWithLease, leaderNodeId);
+        sendResponse(fromNodeId, MessageType.READ_INDEX_RESP, resp);
+        logger.trace("回复 READ_INDEX: from={}, success={}, readIndex={}",
+                abbrev(fromNodeId), leaderWithLease, readIndex);
+    }
+
+    /** 入站 readIndex 应答：在 raftExecutor 单线程上落定在途 future。 */
+    void handleReadIndexResponse(String fromNodeId, ReadIndexResponseMessage resp) {
+        completePendingReadIndex(resp);
+    }
+
+    /**
+     * 向 Leader 取读点。
+     * <p>同步阻塞调用线程（业务线程）至响应到达或超时。<b>只允许在非 Leader 上调用。</b></p>
+     *
+     * @param timeoutMs 总等待上限
+     * @return 读点索引；无 Leader / 无许可 / 应答失败 / 超时 / term 不匹配一律返回 {@code null}
+     */
+    public Long fetchReadIndex(long timeoutMs) {
+        followerReadFetchTotal.incrementAndGet();    // 取读点总次数（含失败）
+        String leaderId = state.leaderId;
+        if (leaderId == null || leaderId.isEmpty() || leaderId.equals(nodeId)) {
+            followerReadFallback.incrementAndGet();
+            return null;
+        }
+        if (!readIndexPermits.tryAcquire()) {
+            // 在途请求已达上限：不排队，直接回落（只降活性不破正确性）
+            followerReadRejected.incrementAndGet();
+            followerReadFallback.incrementAndGet();
+            return null;
+        }
+        long requestId = readIndexSeq.incrementAndGet();
+        CompletableFuture<ReadIndexResponseMessage> future = new CompletableFuture<>();
+        pendingReadIndex.put(requestId, future);
+        try {
+            ReadIndexRequestMessage req = new ReadIndexRequestMessage(state.currentTerm, requestId);
+            busClient.send(leaderId, new MeshFrame(nodeId, MessageType.READ_INDEX_REQ.getCode(), req.encode()));
+            ReadIndexResponseMessage resp = future.get(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
+            if (!resp.isSuccess()) {
+                followerReadFallback.incrementAndGet();
+                return null;
+            }
+            return resp.getReadIndex();
+        } catch (TimeoutException e) {
+            followerReadFallback.incrementAndGet();
+            return null;
+        } catch (Exception e) {
+            logger.debug("fetchReadIndex 失败: leader={}, requestId={}", abbrev(leaderId), requestId, e);
+            followerReadFallback.incrementAndGet();
+            return null;
+        } finally {
+            pendingReadIndex.remove(requestId);
+            readIndexPermits.release();
+        }
+    }
+
+    /**
+     * 在途 readIndex 应答落定（raftExecutor 上调用；{@link MeshState} 只在此线程改）。
+     * <p>term 裁决：更高 term → 按 Raft 规则收敛（降级为 FOLLOWER + 落盘 + 复位定时器），
+     * 但该读点不可采信；低于本节点 term → 过期响应丢弃；相等且成功 → 读点可用。</p>
+     */
+    void completePendingReadIndex(ReadIndexResponseMessage resp) {
+        if (resp.getTerm() > state.currentTerm) {
+            Transition t = stateMachine.becomeFollower(state, resp.getTerm(), null);
+            applyFollowerSideEffects(t);
+            persistStateSafe("readIndexResponse-term-up");
+            electionTimer.reset();
+            failPending(resp.getRequestId(), "higher term");
+            return;
+        }
+        if (resp.getTerm() < state.currentTerm) {
+            // 过期响应：丢弃（迟到/伪造都不采信）
+            failPending(resp.getRequestId(), "stale term");
+            return;
+        }
+        CompletableFuture<ReadIndexResponseMessage> f = pendingReadIndex.get(resp.getRequestId());
+        if (f == null) {
+            return;                                  // 已超时移除
+        }
+        f.complete(resp);
+    }
+
+    /** 以异常落定在途 future（响应不可采信时），使阻塞中的 fetchReadIndex 立即回落。 */
+    private void failPending(long requestId, String reason) {
+        CompletableFuture<ReadIndexResponseMessage> f = pendingReadIndex.get(requestId);
+        if (f != null) {
+            logger.debug("丢弃 readIndex 响应: requestId={}, reason={}", requestId, reason);
+            f.completeExceptionally(new IllegalStateException("readIndex discarded: " + reason));
+        }
+    }
+
+    /** 取读点总次数（每次进入 fetchReadIndex 即计，含成功与失败；INFO 用）。 */
+    public long readIndexFetchCount() {
+        return followerReadFetchTotal.get();
+    }
+
+    /** 回落 MOVED 次数（fetch 失败 + gate 回落分支；INFO 用）。 */
+    public long followerReadFallbackCount() {
+        return followerReadFallback.get();
+    }
+
+    /** 在途上限拒绝次数（INFO 用）。 */
+    public long followerReadRejectedCount() {
+        return followerReadRejected.get();
+    }
+
+    /** follower 本地读成功次数（INFO 用）。 */
+    public long followerReadLocalCount() {
+        return followerReadLocal.get();
+    }
+
+    /** follower 本地读成功计数 +1（gate 走本地读成功后调用）。 */
+    public void incFollowerReadLocal() {
+        followerReadLocal.incrementAndGet();
+    }
+
+    /** 回落 MOVED 计数 +1（gate 的回落分支调用）。 */
+    public void incFollowerReadFallback() {
+        followerReadFallback.incrementAndGet();
     }
 
     // ==================== 副作用（解析 Transition）====================
