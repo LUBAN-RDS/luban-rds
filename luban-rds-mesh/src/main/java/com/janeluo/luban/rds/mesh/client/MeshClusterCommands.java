@@ -1,5 +1,7 @@
 package com.janeluo.luban.rds.mesh.client;
 
+import com.janeluo.luban.rds.mesh.MeshNode;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -84,6 +86,12 @@ public class MeshClusterCommands {
     private final java.util.function.Predicate<String> failPredicate;
 
     /**
+     * follower 读计数来源（CLUSTER INFO 的 {@code mesh_follower_read_*} 段用）。
+     * <p>null（单测/未装配）时该段输出全 0；装配层传 {@code () -> meshNode}。</p>
+     */
+    private final Supplier<MeshNode> meshNodeSupplier;
+
+    /**
      * 构造集群命令响应生成器。
      *
      * @param leaderNodeIdSupplier 当前 Leader nodeId 提供者（可返回 null）
@@ -129,6 +137,23 @@ public class MeshClusterCommands {
                                 String selfNodeId,
                                 java.util.function.Predicate<String> onlinePredicate,
                                 java.util.function.Predicate<String> failPredicate) {
+        this(leaderNodeIdSupplier, leaderAddrSupplier, allNodes, selfNodeId,
+                onlinePredicate, failPredicate, null);
+    }
+
+    /**
+     * 完整构造器：额外接受 follower 读计数来源（CLUSTER INFO 的 {@code mesh_follower_read_*} 段）。
+     *
+     * @param meshNodeSupplier 提供实时计数的 {@link MeshNode}（通常 {@code () -> meshNode}）；
+     *                         {@code null} 时该段输出全 0（单测/未启用场景）
+     */
+    public MeshClusterCommands(Supplier<String> leaderNodeIdSupplier,
+                                Supplier<String> leaderAddrSupplier,
+                                Map<String, NodeInfo> allNodes,
+                                String selfNodeId,
+                                java.util.function.Predicate<String> onlinePredicate,
+                                java.util.function.Predicate<String> failPredicate,
+                                Supplier<MeshNode> meshNodeSupplier) {
         this.leaderNodeIdSupplier = leaderNodeIdSupplier != null
                 ? leaderNodeIdSupplier : () -> null;
         this.leaderAddrSupplier = leaderAddrSupplier != null
@@ -139,6 +164,7 @@ public class MeshClusterCommands {
         this.selfNodeId = selfNodeId;
         this.onlinePredicate = onlinePredicate != null ? onlinePredicate : n -> true;
         this.failPredicate = failPredicate != null ? failPredicate : n -> false;
+        this.meshNodeSupplier = meshNodeSupplier;
     }
 
     // ==================== CLUSTER SLOTS ====================
@@ -238,7 +264,50 @@ public class MeshClusterCommands {
         sb.append("cluster_stats_messages_sent:0").append("\r\n");
         sb.append("cluster_stats_messages_received:0").append("\r\n");
 
+        // fix-mesh-follower-read：追加 follower 读计数段（不改既有 cluster_* 字段与顺序）。
+        // 未装配 MeshNode 时输出全 0。
+        MeshNode node = meshNodeSupplier != null ? meshNodeSupplier.get() : null;
+        sb.append(buildMeshInfoSection(
+                node != null ? node.readIndexFetchCount() : 0L,
+                node != null ? node.readIndexCacheHitCount() : 0L,
+                node != null ? node.readIndexCacheInvalidationCount() : 0L,
+                node != null ? node.readIndexCoalescedCount() : 0L,
+                node != null ? node.followerReadFallbackCount() : 0L,
+                node != null ? node.followerReadLocalCount() : 0L,
+                node != null ? node.followerReadRejectedCount() : 0L,
+                0L));
+
         return toBulkStringBytes(sb.toString());
+    }
+
+    /**
+     * follower 读计数（CLUSTER INFO 段，fix-mesh-follower-read）。
+     * <p>开关关闭（{@code mesh-read-from-follower=off}）时各计数保持 0——gate 不会进入
+     * follower 读路径。此处保持 CLUSTER INFO 的扁平 {@code key:value} 格式，
+     * 不插入 {@code #} 段头（CLUSTER INFO 无段头，且严格客户端按 {@code :} 拆分行）。</p>
+     *
+     * @param indexFetch       取读点总次数（每次进入 fetchReadIndex 即计，含成功与失败）
+     * @param cacheHit         readIndex 短窗口缓存命中次数
+     * @param cacheInvalidated 缓存失效次数（term 变化 / Leader 变更）
+     * @param coalesced        在途取读点合并次数
+     * @param fallbackMoved    回落 MOVED 次数（fetch 失败 + gate 回落分支）
+     * @param local            follower 本地读成功次数
+     * @param rejected         在途上限拒绝次数
+     * @param notReadyRejected 未就绪拒绝次数；<b>当前无独立数据源，恒 0（预留）</b>
+     */
+    static String buildMeshInfoSection(long indexFetch, long cacheHit, long cacheInvalidated,
+                                       long coalesced, long fallbackMoved, long local, long rejected,
+                                       long notReadyRejected) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("mesh_follower_read_index_fetch:").append(indexFetch).append("\r\n");
+        sb.append("mesh_follower_read_cache_hit:").append(cacheHit).append("\r\n");
+        sb.append("mesh_follower_read_cache_invalidated:").append(cacheInvalidated).append("\r\n");
+        sb.append("mesh_follower_read_coalesced:").append(coalesced).append("\r\n");
+        sb.append("mesh_follower_read_fallback_moved:").append(fallbackMoved).append("\r\n");
+        sb.append("mesh_follower_read_local:").append(local).append("\r\n");
+        sb.append("mesh_follower_read_rejected:").append(rejected).append("\r\n");
+        sb.append("mesh_follower_read_not_ready_rejected:").append(notReadyRejected).append("\r\n");
+        return sb.toString();
     }
 
     // ==================== 内部辅助 ====================

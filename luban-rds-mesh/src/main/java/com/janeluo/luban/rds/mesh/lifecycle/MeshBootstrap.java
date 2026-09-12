@@ -503,7 +503,9 @@ public class MeshBootstrap {
 
         return new MeshClusterCommands(leaderNodeIdSupplier, leaderAddrSupplier, allNodes,
                 topo.selfNodeId, busClient::isConnected,
-                nodeId -> busClient.isFailed(nodeId, NODE_FAIL_THRESHOLD_MS));
+                nodeId -> busClient.isFailed(nodeId, NODE_FAIL_THRESHOLD_MS),
+                // fix-mesh-follower-read：CLUSTER INFO 暴露 follower 读计数（实时读 MeshNode 计数器）
+                () -> meshNode);
     }
 
     private static String hostOf(String hostPort) {
