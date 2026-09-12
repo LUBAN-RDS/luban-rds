@@ -591,7 +591,12 @@ public class SnapshotManager {
 
                 // follower 读：快照安装使 lastApplied 跳到 lastIncludedIndex → 唤醒屏障等待者；
                 // 状态已可信 → 就绪门置位
-                installCompleteHook.run();
+                // 屏障/就绪信号：hook 异常不得影响快照成功 ACK（否则 Leader 重发整份快照）
+                try {
+                    installCompleteHook.run();
+                } catch (Exception e) {
+                    logger.warn("快照安装完成回调异常, lastIncluded={}", done.lastIncludedIndex, e);
+                }
 
                 logger.info("handleInstallSnapshot: 快照加载完成 lastIncluded={}/{}, bytes={}, 回 ACK 给 {}",
                         done.lastIncludedIndex, done.lastIncludedTerm, receivedBytes, fromNodeId);

@@ -584,7 +584,12 @@ public class LogReplicator {
                 // 更新 lastApplied（apply 成功后才推进）
                 state.lastApplied = next;
                 // follower 读屏障：唤醒等待 lastApplied 追平的读线程（业务线程）
-                appliedSignal.run();
+                // 屏障信号：与 appliedNotifier 同样防御——hook 异常绝不能被误判为毒条目触发 fail-stop
+                try {
+                    appliedSignal.run();
+                } catch (Exception e) {
+                    logger.warn("apply 屏障信号异常, index={}", next, e);
+                }
                 // 通知 pendingProposals：Leader 侧 complete 对应 future（携带 apply 响应对象）；
                 // Follower 侧无 future，回调内 no-op（响应对象丢弃，DESIGN §5.1 步骤5）。
                 if (appliedNotifier != null) {
