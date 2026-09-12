@@ -47,7 +47,7 @@ public class ReadIndexCache {
         }
     }
 
-    private volatile Entry cached;
+    private final AtomicReference<Entry> cached = new AtomicReference<>();
     private final AtomicReference<CompletableFuture<Entry>> inFlight = new AtomicReference<>();
     private final AtomicInteger cacheHits = new AtomicInteger();
     private final AtomicInteger invalidations = new AtomicInteger();
@@ -73,7 +73,7 @@ public class ReadIndexCache {
      */
     public Entry get(long cacheMs, long rpcTimeoutMs, Supplier<Long> rpcCall, long currentTerm) {
         long now = System.currentTimeMillis();
-        Entry hit = cached;
+        Entry hit = cached.get();
         if (cacheMs > 0 && hit != null
                 && hit.term == currentTerm
                 && (now - hit.takenAtMs) <= cacheMs) {
@@ -120,7 +120,7 @@ public class ReadIndexCache {
             // 不得把失效前的读点写回缓存——否则后续调用会持续拿到陈旧读点。本次调用方仍可
             // 采信该读点（取自租约有效的 Leader），此处只阻断"污染缓存"，不阻断本次回答。
             if (epoch.get() == epochAtStart) {
-                cached = entry;
+                cached.set(entry);
             }
             mine.complete(entry);
             return entry.term == currentTerm ? entry : null;
@@ -132,11 +132,23 @@ public class ReadIndexCache {
         }
     }
 
-    /** 立即整体失效（term/Leader 变更、apply halt）。 */
+    /**
+     * 立即整体失效（term/Leader 变更、apply halt）。
+     * <p>两件事<b>分开处理</b>：</p>
+     * <ul>
+     *   <li><b>纪元必然递增</b>、缓存项必然清空——纪元是阻断「在途 RPC 返回后回填失效前读点」
+     *       的唯一手段，绝不能因有无缓存项而条件化；</li>
+     *   <li>用户可见的 {@code invalidations} 计数<b>仅在确实清掉一个非 null 缓存项时</b>递增
+     *       ——开关关闭（OFF）的节点 gate 从不写缓存，失效计数因此保持 0，符合
+     *       「计数在开关关闭时不增长」的规格；同时让计数语义收敛为「确实丢弃了一个缓存读点」。</li>
+     * </ul>
+     */
     public void invalidate() {
-        cached = null;
+        Entry prev = cached.getAndSet(null);
         epoch.incrementAndGet();   // 纪元递增：在途 RPC 返回后不再回填失效前的读点
-        invalidations.incrementAndGet();
+        if (prev != null) {
+            invalidations.incrementAndGet();
+        }
     }
 
     public int cacheHits() {

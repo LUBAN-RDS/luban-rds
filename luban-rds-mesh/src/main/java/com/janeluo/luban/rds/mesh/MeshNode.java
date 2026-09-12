@@ -198,6 +198,8 @@ public class MeshNode {
     private final AtomicLong followerReadRejected = new AtomicLong();
     /** follower 本地读成功次数（由 gate 递增）。 */
     private final AtomicLong followerReadLocal = new AtomicLong();
+    /** 未就绪拒绝次数（gate 读入口因 {@code !isReady()} 拒绝时递增）。 */
+    private final AtomicLong followerReadNotReadyRejected = new AtomicLong();
 
     /**
      * readIndex 短窗口缓存 + single-flight（fix-mesh-follower-read）。
@@ -332,6 +334,9 @@ public class MeshNode {
             this.replicator.setAppliedNotifier(this::onEntryApplied);
             // apply 每推进一条 → 唤醒屏障等待者（follower 读路径）
             this.replicator.setAppliedSignal(applyBarrier::signalApplied);
+            // apply 进入 fail-stop → 立即失效读点缓存（delta spec「缓存失效」四类触发之一：
+            // Leader term 变化 / 更高 term 帧 / Leader 变更 / apply halt）
+            this.replicator.setApplyHaltedHook(this::invalidateReadIndexCache);
             // 多数派 ACK 续租回调（Leader Lease，DESIGN §5.7）
             this.replicator.setLeaseRefresher(() ->
                     lease.refreshOnMajorityAck(System.currentTimeMillis()));
@@ -1634,6 +1639,16 @@ public class MeshNode {
         followerReadLocal.incrementAndGet();
     }
 
+    /** 未就绪拒绝计数 +1（gate 读入口因 {@code !isReady()} 拒绝时调用）。 */
+    public void incFollowerReadNotReadyRejected() {
+        followerReadNotReadyRejected.incrementAndGet();
+    }
+
+    /** 未就绪拒绝次数（INFO/CLUSTER INFO 用）。 */
+    public long followerReadNotReadyRejectedCount() {
+        return followerReadNotReadyRejected.get();
+    }
+
     /** 回落 MOVED 计数 +1（gate 的回落分支调用）。 */
     public void incFollowerReadFallback() {
         followerReadFallback.incrementAndGet();
@@ -1665,12 +1680,15 @@ public class MeshNode {
     }
 
     /**
-     * 读点缓存失效：term 变化 / Leader 变更时调用（唯一入口 {@code applyFollowerSideEffects}，
-     * 所有抬 term/降级路径都经它，保证每次转移只失效一次、计数不虚高）。
+     * 读点缓存失效：term 变化 / Leader 变更 / apply 进入 fail-stop 时调用。
+     * <p>调用点：{@code applyFollowerSideEffects}（所有抬 term/降级路径的收尾，保证每次转移
+     * 只失效一次、计数不虚高）+ {@link LogReplicator} 毒条目 fail-stop 的 halt hook（经
+     * {@code setApplyHaltedHook} 注入）。</p>
      * <p>缓存里的读点只在"当时那个 term 的 Leader"下有效；角色/任期一变就必须立即失效，
-     * 否则新 Follower 可能拿旧读点去等一个已无意义的 apply 屏障（陈旧读或白等）。</p>
-     * <p>apply halt 不进这里：读入口已由 {@link #isApplyHalted()} <b>先于</b>缓存查询短路
-     * （gate 的 read 顶部检查），停摆节点根本到不了缓存命中分支，无需重复处理。</p>
+     * 否则新 Follower 可能拿旧读点去等一个已无意义的 apply 屏障（陈旧读或白等）。
+     * fail-stop 后同理：lastApplied 冻结，缓存读点若继续复用会误导 apply 屏障判定。</p>
+     * <p>gate 读入口仍会先查 {@link #isApplyHalted()} 短路，但那是"拒绝服务"，不替代这里的
+     * "清缓存"——两者职责不同，规格要求 fail-stop 必须作为失效触发之一。</p>
      */
     private void invalidateReadIndexCache() {
         readIndexCache.invalidate();

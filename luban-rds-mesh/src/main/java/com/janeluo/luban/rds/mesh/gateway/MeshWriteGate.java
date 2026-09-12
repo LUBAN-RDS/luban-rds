@@ -505,6 +505,7 @@ public class MeshWriteGate {
         // A2（fix-mesh-follower-read）：本地状态不可信（store 为空 / 未追平）时不得作答。
         // 写入口不拦（同上理由）。
         if (!meshNode.isReady()) {
+            meshNode.incFollowerReadNotReadyRejected();
             throw new RetryableMeshException("mesh node not ready (state not caught up), please retry");
         }
 

@@ -275,7 +275,7 @@ public class MeshClusterCommands {
                 node != null ? node.followerReadFallbackCount() : 0L,
                 node != null ? node.followerReadLocalCount() : 0L,
                 node != null ? node.followerReadRejectedCount() : 0L,
-                0L));
+                node != null ? node.followerReadNotReadyRejectedCount() : 0L));
 
         return toBulkStringBytes(sb.toString());
     }
@@ -293,7 +293,7 @@ public class MeshClusterCommands {
      * @param fallbackMoved    回落 MOVED 次数（fetch 失败 + gate 回落分支）
      * @param local            follower 本地读成功次数
      * @param rejected         在途上限拒绝次数
-     * @param notReadyRejected 未就绪拒绝次数；<b>当前无独立数据源，恒 0（预留）</b>
+     * @param notReadyRejected 未就绪拒绝次数（gate 读入口因 {@code !isReady()} 拒绝）
      */
     static String buildMeshInfoSection(long indexFetch, long cacheHit, long cacheInvalidated,
                                        long coalesced, long fallbackMoved, long local, long rejected,

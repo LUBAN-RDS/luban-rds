@@ -172,6 +172,13 @@ public class LogReplicator {
     private volatile Runnable appliedSignal = () -> { };
 
     /**
+     * apply 进入 fail-stop 时的通知 hook；默认 no-op。
+     * <p>MeshNode 注入此 hook 以在毒条目挂起 apply 时失效 readIndex 读点缓存
+     * （delta spec「readIndex 短窗口缓存与失效」四类触发之一）。</p>
+     */
+    private volatile Runnable applyHaltedHook = () -> { };
+
+    /**
      * @param nodeId       本节点 nodeId
      * @param config       集群配置
      * @param state        Raft 状态（读写 log/commitIndex/lastApplied）
@@ -202,6 +209,16 @@ public class LogReplicator {
     /** 注入 apply 推进信号（每条成功 apply 后触发）。 */
     public void setAppliedSignal(Runnable signal) {
         this.appliedSignal = signal != null ? signal : () -> { };
+    }
+
+    /**
+     * 注入 apply 进入 fail-stop 的 hook（毒条目挂起 apply 循环时触发一次）。
+     * <p>hook 异常在调用处防御性捕获，绝不能被误判为毒条目路径（与 {@code appliedSignal} 同口径）。</p>
+     *
+     * @param hook fail-stop 通知；{@code null} 恢复 no-op
+     */
+    public void setApplyHaltedHook(Runnable hook) {
+        this.applyHaltedHook = hook != null ? hook : () -> { };
     }
 
     // ==================== nextIndex / matchIndex 管理 ====================
@@ -610,6 +627,13 @@ public class LogReplicator {
                 logger.error("apply 异常 fail-stop：lastApplied 冻结在 {}，毒条目 index={} "
                         + "已挂起 apply 循环。人工修复数据问题后重启节点恢复"
                         + "（WAL 重放复现则需处置该条目）", state.lastApplied, next, e);
+                // 失效 readIndex 读点缓存（delta spec 的四类失效触发之一）。
+                // 防御性包裹：hook 异常绝不能被误判为毒条目路径（与 appliedSignal 同口径）。
+                try {
+                    applyHaltedHook.run();
+                } catch (Exception hookEx) {
+                    logger.warn("apply halt hook 异常", hookEx);
+                }
                 break;
             }
         }

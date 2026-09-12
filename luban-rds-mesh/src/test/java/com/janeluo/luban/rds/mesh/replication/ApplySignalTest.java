@@ -132,4 +132,74 @@ class ApplySignalTest {
         assertFalse(replicator.isApplyHalted(), "屏障 hook 异常不得触发 apply fail-stop");
         assertEquals(1L, state.lastApplied);
     }
+
+    /** 构造 apply 直接抛非预期异常的 applier（触发 P1-5 毒条目 fail-stop）。 */
+    private static LogApplier poisonApplier() {
+        return new LogApplier(new DefaultCommandHandler(), new DefaultMemoryStore()) {
+            @Override
+            public Object apply(LogEntry entry) {
+                throw new IllegalStateException("injected poison entry");
+            }
+        };
+    }
+
+    /**
+     * Item 2（fix-mesh-follower-read 复核）：apply 进入 fail-stop 时必须触发注入的 halt hook
+     * （MeshNode 借此失效 readIndex 缓存），且 halt 后不再重复触发。
+     */
+    @Test
+    void failStop_invokesApplyHaltedHook_once() {
+        MeshState state = new MeshState();
+        LogReplicator replicator = newReplicator(state, poisonApplier());
+        AtomicInteger haltHooks = new AtomicInteger();
+        replicator.setApplyHaltedHook(haltHooks::incrementAndGet);
+        state.appendEntry(new LogEntry(1L, 1L, setFrame("k", "v"), 0, null));
+        state.commitIndex = 1;
+
+        replicator.applyCommittedEntries();
+        assertTrue(replicator.isApplyHalted(), "毒条目应触发 fail-stop");
+        assertEquals(1, haltHooks.get(), "fail-stop 应触发一次 halt hook");
+
+        replicator.applyCommittedEntries();          // 已 halt：不再进入循环
+        assertEquals(1, haltHooks.get(), "已 halt 后不得重复触发 halt hook");
+    }
+
+    /** 非毒条目路径（事务暂不支持）不得触发 halt hook。 */
+    @Test
+    void unsupportedEntry_doesNotInvokeApplyHaltedHook() {
+        MeshState state = new MeshState();
+        LogApplier applier = new LogApplier(new DefaultCommandHandler(), new DefaultMemoryStore()) {
+            @Override
+            public Object apply(LogEntry entry) {
+                throw new UnsupportedOperationException("injected unsupported entry");
+            }
+        };
+        LogReplicator replicator = newReplicator(state, applier);
+        AtomicInteger haltHooks = new AtomicInteger();
+        replicator.setApplyHaltedHook(haltHooks::incrementAndGet);
+        state.appendEntry(new LogEntry(1L, 1L, setFrame("k", "v"), 0, null));
+        state.commitIndex = 1;
+
+        replicator.applyCommittedEntries();
+
+        assertFalse(replicator.isApplyHalted());
+        assertEquals(0, haltHooks.get(), "非 fail-stop 路径不得触发 halt hook");
+    }
+
+    /** halt hook 抛异常必须被吞掉，不得被误判为毒条目路径（与 appliedSignal 同口径）。 */
+    @Test
+    void throwingApplyHaltedHook_doesNotEscape() {
+        MeshState state = new MeshState();
+        LogReplicator replicator = newReplicator(state, poisonApplier());
+        replicator.setApplyHaltedHook(() -> {
+            throw new IllegalStateException("halt hook boom");
+        });
+        state.appendEntry(new LogEntry(1L, 1L, setFrame("k", "v"), 0, null));
+        state.commitIndex = 1;
+
+        // 不抛异常即通过（hook 异常被防御性捕获）
+        replicator.applyCommittedEntries();
+
+        assertTrue(replicator.isApplyHalted(), "毒条目仍应 fail-stop");
+    }
 }

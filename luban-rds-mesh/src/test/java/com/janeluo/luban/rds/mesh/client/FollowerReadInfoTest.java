@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class FollowerReadInfoTest {
 
-    /** 全部 8 个计数键（含预留的 not_ready_rejected）。 */
+    /** 全部 8 个计数键（含未就绪拒绝）。 */
     private static final String[] KEYS = {
             "mesh_follower_read_index_fetch",
             "mesh_follower_read_cache_hit",
@@ -53,6 +53,8 @@ class FollowerReadInfoTest {
         assertEquals(0L, node.followerReadFallbackCount());
         assertEquals(0L, node.followerReadLocalCount());
         assertEquals(0L, node.followerReadRejectedCount());
+        assertEquals(0L, node.followerReadNotReadyRejectedCount(),
+                "OFF 节点未就绪拒绝计数应为 0（真实计数源见 MeshWriteGate 就绪门）");
 
         String info = MeshClusterCommands.buildMeshInfoSection(
                 node.readIndexFetchCount(),
