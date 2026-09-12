@@ -1007,6 +1007,16 @@ public class MeshNode {
         notifyRoleListener();
         // 成为 Leader 后读路径不再需要 follower 读屏障：唤醒等待者使其立即按新角色重判定
         applyBarrier.signalApplied();
+
+        // 未就绪当选 Leader：Leader 只会向外发 INSTALL_SNAPSHOT，不会接收快照，
+        // 故没有 peer 能替本节点补齐状态；就绪门会持续拒绝集群读，需运维介入。
+        // 仅在角色切换时触发（罕见），无需限流。
+        if (!isReady()) {
+            logger.error("未就绪（本地状态不可信 / store 未追平）节点当选 LEADER：没有 peer 会向 "
+                    + "Leader 发 INSTALL_SNAPSHOT，读请求将被就绪门持续拒绝（-TRYAGAIN）。"
+                    + "运维处置：恢复与 lastIncludedIndex 匹配的 dump.rdb 后重启，"
+                    + "或删除 raft-nodes.conf 强制以可信空状态重启（接受数据丢失）。nodeId={}", nodeId);
+        }
     }
 
     /**

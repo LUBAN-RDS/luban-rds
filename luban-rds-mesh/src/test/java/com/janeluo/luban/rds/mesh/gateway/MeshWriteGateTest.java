@@ -76,6 +76,22 @@ class MeshWriteGateTest {
     }
 
     @Test
+    void write_notReadyAndApplyHalted_stillProposes() {
+        MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(false);
+        when(node.isApplyHalted()).thenReturn(true);
+        when(node.propose(eq(OK), eq(0), any())).thenReturn(CompletableFuture.completedFuture(OK));
+
+        MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler());
+
+        byte[] resp = gate.write(OK, 0, null);
+
+        // 就绪门/apply-halt 只拦读：写入口不被拦（apply 停摆时 propose 自会超时失败）
+        assertArrayEquals(OK, resp);
+        verify(node, times(1)).propose(OK, 0, null);
+    }
+
+    @Test
     void write_nonLeaderThrowsMovedToLeaderException() {
         MeshNode node = mock(MeshNode.class);
         when(node.isReady()).thenReturn(true);

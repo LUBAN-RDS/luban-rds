@@ -5,11 +5,13 @@ import com.janeluo.luban.rds.core.handler.DefaultCommandHandler;
 import com.janeluo.luban.rds.core.store.DefaultMemoryStore;
 import com.janeluo.luban.rds.mesh.MeshNode;
 import com.janeluo.luban.rds.mesh.client.MeshClusterCommands;
+import com.janeluo.luban.rds.mesh.core.MeshState;
 import com.janeluo.luban.rds.mesh.gateway.MeshWriteGate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
@@ -311,5 +313,61 @@ class MeshBootstrapTest {
 
         // 本节点 n1 的 service 地址应为 127.0.0.1:6391（第三段）
         assertEquals("127.0.0.1:6391", assembly.getClientRedirector().getServiceAddr("n1"));
+    }
+
+    // ==================== 启动就绪门（fix-mesh-follower-read A2）====================
+
+    /** 全新数据目录（firstStart → trusted）→ 装配后即就绪。 */
+    @Test
+    void bootstrap_freshDataDir_nodeIsReady() {
+        RdsConfig config = threeNodeConfig();
+
+        MeshAssembly assembly = new MeshBootstrap().bootstrap(config,
+                new DefaultMemoryStore(), new DefaultCommandHandler());
+
+        assertTrue(assembly.getMeshNode().isReady(), "首次启动状态可信，装配后应就绪");
+    }
+
+    /** 多节点 + 不可信衔接（lastIncludedIndex>0 且无 dump.rdb）→ 未就绪；快照安装完成回调置位。 */
+    @Test
+    void bootstrap_untrustedMultiNode_notReadyUntilInstallHook() throws Exception {
+        RdsConfig config = threeNodeConfig();
+        MeshState untrusted = new MeshState();
+        untrusted.currentTerm = 1;
+        untrusted.lastIncludedIndex = 50L; // 曾快照过但 dump.rdb 缺失 → 不可信
+        new MeshConfigPersister(tempDir.toString()).save(untrusted, "n1");
+
+        MeshAssembly assembly = new MeshBootstrap().bootstrap(config,
+                new DefaultMemoryStore(), new DefaultCommandHandler());
+
+        assertFalse(assembly.getMeshNode().isReady(),
+                "多节点不可信衔接：收到 INSTALL_SNAPSHOT 前不得就绪");
+
+        // 装配必须把 installCompleteHook 接到 onSnapshotInstalled（不可信节点追平后恢复读）
+        runInstallCompleteHook(assembly);
+        assertTrue(assembly.getMeshNode().isReady(), "快照安装完成回调必须置位就绪");
+    }
+
+    /** 单节点（无其他 peer）+ 不可信 → 不可能收到 INSTALL_SNAPSHOT，本地即唯一真源，立即就绪。 */
+    @Test
+    void bootstrap_untrustedSingleNode_noPeers_isReady() throws Exception {
+        RdsConfig config = singleNodeConfig();
+        MeshState untrusted = new MeshState();
+        untrusted.currentTerm = 1;
+        untrusted.lastIncludedIndex = 50L;
+        new MeshConfigPersister(tempDir.toString()).save(untrusted, "n1");
+
+        MeshAssembly assembly = new MeshBootstrap().bootstrap(config,
+                new DefaultMemoryStore(), new DefaultCommandHandler());
+
+        assertTrue(assembly.getMeshNode().isReady(),
+                "无 peer 时本地即唯一真源，不得被就绪门永久拒读");
+    }
+
+    /** 取出 SnapshotManager 上被装配的安装完成回调并执行（无公开 getter，测试直读装配结果）。 */
+    private static void runInstallCompleteHook(MeshAssembly assembly) throws Exception {
+        Field field = assembly.getSnapshotManager().getClass().getDeclaredField("installCompleteHook");
+        field.setAccessible(true);
+        ((Runnable) field.get(assembly.getSnapshotManager())).run();
     }
 }

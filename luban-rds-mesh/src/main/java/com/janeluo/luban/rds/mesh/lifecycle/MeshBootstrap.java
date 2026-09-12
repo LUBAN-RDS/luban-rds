@@ -147,6 +147,13 @@ public class MeshBootstrap {
         // 不可信保持未就绪，由快照安装完成回调置位（快照安装路径见下方 setInstallCompleteHook）。
         if (load.trusted) {
             meshNode.markReady();
+        } else if (meshConfig.getOtherNodeIds().isEmpty()) {
+            // 单副本特例：无其他 peer 就永远收不到 INSTALL_SNAPSHOT（该消息只 Leader→Follower 发），
+            // 「本地 store 可能不反映复制状态」的前提在无副本时是空的——拒绝读保护不了任何东西，
+            // 只会把可用的读永久打成 -TRYAGAIN。本地即唯一真源，直接置位就绪。
+            meshNode.markReady();
+            logger.warn("mesh 本地状态不可信但无其他 peer（单副本）：不可能收到 Leader "
+                    + "INSTALL_SNAPSHOT，本地 store 即唯一真源，直接置位就绪（不拒绝读）");
         } else {
             logger.warn("mesh 本地状态不可信（store 为空，等 Leader INSTALL_SNAPSHOT 追平）："
                     + "读请求在追平前一律拒绝（-TRYAGAIN）");
