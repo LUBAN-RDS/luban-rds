@@ -168,6 +168,9 @@ public class LogReplicator {
     /** 续租回调：matchIndex 多数派 ACK 后触发（Leader Lease，阶段 3 LeaseManager.refreshOnMajorityAck）。 */
     private volatile Runnable leaseRefresher;
 
+    /** apply 推进信号（follower 读屏障唤醒）；默认 no-op。 */
+    private volatile Runnable appliedSignal = () -> { };
+
     /**
      * @param nodeId       本节点 nodeId
      * @param config       集群配置
@@ -194,6 +197,11 @@ public class LogReplicator {
     /** 注入续租回调（多数派 ACK 后触发）。 */
     public void setLeaseRefresher(Runnable refresher) {
         this.leaseRefresher = refresher;
+    }
+
+    /** 注入 apply 推进信号（每条成功 apply 后触发）。 */
+    public void setAppliedSignal(Runnable signal) {
+        this.appliedSignal = signal != null ? signal : () -> { };
     }
 
     // ==================== nextIndex / matchIndex 管理 ====================
@@ -575,6 +583,8 @@ public class LogReplicator {
                 applied++;
                 // 更新 lastApplied（apply 成功后才推进）
                 state.lastApplied = next;
+                // follower 读屏障：唤醒等待 lastApplied 追平的读线程（业务线程）
+                appliedSignal.run();
                 // 通知 pendingProposals：Leader 侧 complete 对应 future（携带 apply 响应对象）；
                 // Follower 侧无 future，回调内 no-op（响应对象丢弃，DESIGN §5.1 步骤5）。
                 if (appliedNotifier != null) {

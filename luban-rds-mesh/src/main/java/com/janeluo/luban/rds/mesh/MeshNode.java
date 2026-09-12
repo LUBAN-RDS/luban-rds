@@ -5,6 +5,7 @@ import com.janeluo.luban.rds.mesh.bus.MeshFrame;
 import com.janeluo.luban.rds.mesh.bus.MessageType;
 import com.janeluo.luban.rds.mesh.client.MovedToLeaderException;
 import com.janeluo.luban.rds.mesh.client.RetryableMeshException;
+import com.janeluo.luban.rds.mesh.core.ApplyBarrier;
 import com.janeluo.luban.rds.mesh.core.LogEntry;
 import com.janeluo.luban.rds.mesh.core.MeshRole;
 import com.janeluo.luban.rds.mesh.core.MeshState;
@@ -167,6 +168,12 @@ public class MeshNode {
     /** apply 到 raw store 的应用器（仅用 raw store + handle，不写 AOF）。 */
     private final LogApplier applier;
 
+    /** apply 屏障（follower 读路径用）；readIndex 取用与缓存见 gateway 层。 */
+    private final ApplyBarrier applyBarrier;
+
+    /** 是否已就绪（启动加载完成且本地状态可信，或快照安装追平）；单向置位。 */
+    private volatile boolean ready;
+
     /**
      * 阶段 10：快照管理器（chunked INSTALL_SNAPSHOT + 周期快照）。
      * 可为 null（未注入时收到 INSTALL_SNAPSHOT 静默忽略，保持向后兼容）。
@@ -277,6 +284,8 @@ public class MeshNode {
                 this.scheduler);
 
         this.applier = applier;
+        // apply 屏障：follower 读路径按绝对索引等待本地 lastApplied 追平（fix-mesh-follower-read）
+        this.applyBarrier = new ApplyBarrier(state);
         if (applier != null) {
             this.replicator = new LogReplicator(nodeId, config, state, busClient, applier);
             // 自身 match 以已落盘 index 为上限（未落盘不 commit，持久性语义）
@@ -286,6 +295,8 @@ public class MeshNode {
                     durableGatingActive ? durableIndex : state.getLastLogIndex());
             // apply 完成回调：complete 对应 pendingProposals future（携带 apply 响应对象；序列化为字节）
             this.replicator.setAppliedNotifier(this::onEntryApplied);
+            // apply 每推进一条 → 唤醒屏障等待者（follower 读路径）
+            this.replicator.setAppliedSignal(applyBarrier::signalApplied);
             // 多数派 ACK 续租回调（Leader Lease，DESIGN §5.7）
             this.replicator.setLeaseRefresher(() ->
                     lease.refreshOnMajorityAck(System.currentTimeMillis()));
@@ -367,6 +378,35 @@ public class MeshNode {
 
     public MeshState getState() {
         return state;
+    }
+
+    /** apply 屏障（follower 读路径按绝对索引等待 lastApplied 追平）。 */
+    public ApplyBarrier applyBarrier() {
+        return applyBarrier;
+    }
+
+    /** 启动加载完成且本地状态可信，或快照安装追平。 */
+    public boolean isReady() {
+        return ready;
+    }
+
+    /** 单向置位就绪（幂等）。 */
+    public void markReady() {
+        if (!ready) {
+            ready = true;
+            logger.info("mesh 节点就绪：本地状态可信，开始服务读");
+        }
+    }
+
+    /** 快照安装完成：唤醒屏障等待者 + 置位就绪。 */
+    public void onSnapshotInstalled() {
+        applyBarrier.signalApplied();
+        markReady();
+    }
+
+    /** apply 是否已 fail-stop（gate 读入口据此短路 -TRYAGAIN）。 */
+    public boolean isApplyHalted() {
+        return replicator != null && replicator.isApplyHalted();
     }
 
     /** P1-12b：非成员来源帧丢弃计数（观测/测试）。 */
@@ -965,6 +1005,8 @@ public class MeshNode {
         electionTimer.onElectionSucceeded();
         // 阶段 12：通知角色监听器（Leader 变更）
         notifyRoleListener();
+        // 成为 Leader 后读路径不再需要 follower 读屏障：唤醒等待者使其立即按新角色重判定
+        applyBarrier.signalApplied();
     }
 
     /**
@@ -1423,6 +1465,8 @@ public class MeshNode {
         logger.info("转为 FOLLOWER: term={}, leader={}", t.newTerm, t.newLeaderId);
         // 阶段 12：通知角色监听器（失去 Leader / Leader 变更）
         notifyRoleListener();
+        // 降级为 Follower 后等待语义变化：唤醒等待者立即按新角色重判定（避免等满超时）
+        applyBarrier.signalApplied();
     }
 
     /**
