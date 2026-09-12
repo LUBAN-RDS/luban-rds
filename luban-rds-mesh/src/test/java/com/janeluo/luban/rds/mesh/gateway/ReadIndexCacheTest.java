@@ -12,6 +12,7 @@ import java.util.function.Supplier;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Timeout(value = 20, unit = TimeUnit.SECONDS)
 class ReadIndexCacheTest {
@@ -110,14 +111,87 @@ class ReadIndexCacheTest {
                 done.countDown();
             }).start();
         }
-        inRpc.await(2, TimeUnit.SECONDS);
-        Thread.sleep(100);                            // 让其余线程都挂到在途 future
+        assertTrue(inRpc.await(2, TimeUnit.SECONDS), "owner 应已进入 RPC");
+        // 等待全部 7 个等待者都挂到在途 future（coalesced 计数可观测），避免 sleep 抖动导致
+        // owner 提前完成、部分线程另起一次 RPC 的 flake；owner 在 release 前不会释放 inFlight。
+        long deadline = System.currentTimeMillis() + 2_000;
+        while (cache.coalesced() < threads - 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(threads - 1, cache.coalesced(), "所有并发读都应挂到在途 future");
         release.countDown();
         done.await(5, TimeUnit.SECONDS);
 
         assertEquals(8, ok.get(), "所有并发读都应拿到读点");
         assertEquals(1, calls.get(), "并发 miss 必须合并为一次 RPC");
         assertEquals(7, cache.coalesced());
+    }
+
+    @Test
+    void invalidateDuringInFlightRpc_doesNotCacheStaleEntry() throws Exception {
+        ReadIndexCache cache = new ReadIndexCache();
+        AtomicInteger calls = new AtomicInteger();
+        CountDownLatch inRpc = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Supplier<Long> slowRpc = () -> {
+            calls.incrementAndGet();
+            inRpc.countDown();
+            try {
+                release.await(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return 100L;
+        };
+
+        Thread owner = new Thread(() -> cache.get(10_000, 3_000, slowRpc, 1L));
+        owner.start();
+        assertTrue(inRpc.await(2, TimeUnit.SECONDS), "owner 应已进入 RPC");
+
+        cache.invalidate();                           // 取点途中失效（模拟 term/Leader 变更、apply halt）
+        release.countDown();
+        owner.join(5_000);
+
+        cache.get(10_000, 500, () -> {
+            calls.incrementAndGet();
+            return 200L;
+        }, 1L);
+
+        assertEquals(2, calls.get(), "在途 RPC 期间失效后，陈旧读点不得被回填缓存");
+    }
+
+    @Test
+    void coalescedWaiterWithDifferentTerm_getsNull() throws Exception {
+        ReadIndexCache cache = new ReadIndexCache();
+        CountDownLatch inRpc = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Supplier<Long> rpc = () -> {
+            inRpc.countDown();
+            try {
+                release.await(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return 100L;
+        };
+
+        Thread owner = new Thread(() -> cache.get(10_000, 3_000, rpc, 1L));
+        owner.start();
+        assertTrue(inRpc.await(2, TimeUnit.SECONDS), "owner 应已进入 RPC");
+
+        java.util.concurrent.atomic.AtomicReference<ReadIndexCache.Entry> waiterResult =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        Thread waiter = new Thread(() -> waiterResult.set(cache.get(10_000, 3_000, rpc, 2L)));
+        waiter.start();
+        long deadline = System.currentTimeMillis() + 2_000;
+        while (cache.coalesced() < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5);
+        }
+        release.countDown();
+        waiter.join(5_000);
+        owner.join(5_000);
+
+        assertNull(waiterResult.get(), "term 不一致的合并读点必须拒绝（回落 MOVED）");
     }
 
     @Test

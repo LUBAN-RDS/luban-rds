@@ -15,6 +15,9 @@ import java.io.DataOutputStream;
  */
 public class ReadIndexRequestMessage extends MeshRpcMessage {
 
+    /** body 固定长度：term(8) + requestId(8)。短于该值视为截断/畸形。 */
+    private static final int MIN_BODY_LENGTH = 16;
+
     private final long requestId;
 
     public ReadIndexRequestMessage(long term, long requestId) {
@@ -32,6 +35,10 @@ public class ReadIndexRequestMessage extends MeshRpcMessage {
     }
 
     public static ReadIndexRequestMessage decode(byte[] body) {
+        if (body == null || body.length < MIN_BODY_LENGTH) {
+            throw new IllegalArgumentException("ReadIndexRequestMessage body 过短: "
+                    + (body == null ? "null" : body.length) + " < " + MIN_BODY_LENGTH);
+        }
         try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(body))) {
             long term = in.readLong();
             long requestId = in.readLong();

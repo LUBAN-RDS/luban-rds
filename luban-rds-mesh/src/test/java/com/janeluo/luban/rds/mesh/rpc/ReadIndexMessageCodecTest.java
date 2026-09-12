@@ -3,8 +3,11 @@ package com.janeluo.luban.rds.mesh.rpc;
 import com.janeluo.luban.rds.mesh.bus.MessageType;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReadIndexMessageCodecTest {
@@ -37,5 +40,27 @@ class ReadIndexMessageCodecTest {
                 MeshRpcMessage.decode(MessageType.READ_INDEX_RESP, resp.encode());
         assertFalse(decoded.isSuccess());
         assertEquals(null, decoded.getLeaderNodeId());
+    }
+
+    @Test
+    void request_truncatedBody_throwsIllegalArgument() {
+        assertThrows(IllegalArgumentException.class,
+                () -> ReadIndexRequestMessage.decode(new byte[15]));
+    }
+
+    @Test
+    void response_truncatedBody_throwsIllegalArgument() {
+        assertThrows(IllegalArgumentException.class,
+                () -> ReadIndexResponseMessage.decode(new byte[28]));
+    }
+
+    @Test
+    void response_overLongNodeIdLengthPrefix_throwsIllegalArgumentNotError() {
+        // term(8)+requestId(8)+readIndex(8)+success(1)+nodeId len(4=Integer.MAX_VALUE)
+        byte[] body = new byte[29];
+        ByteBuffer buf = ByteBuffer.wrap(body);
+        buf.putLong(1L).putLong(1L).putLong(0L).put((byte) 1).putInt(Integer.MAX_VALUE);
+        assertThrows(IllegalArgumentException.class,
+                () -> ReadIndexResponseMessage.decode(body));
     }
 }

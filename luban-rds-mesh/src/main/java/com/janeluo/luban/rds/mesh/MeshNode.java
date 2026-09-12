@@ -48,6 +48,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Mesh 节点主体（DESIGN.md §7.1）。
@@ -179,8 +180,7 @@ public class MeshNode {
     // ==================== follower 读：readIndex 收发（fix-mesh-follower-read）====================
 
     /** readIndex 请求序号（单调递增，请求-响应关联用）。 */
-    private final java.util.concurrent.atomic.AtomicLong readIndexSeq =
-            new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong readIndexSeq = new AtomicLong();
 
     /** 在途 readIndex 请求：requestId → future（响应在 raftExecutor 上落定）。 */
     private final Map<Long, CompletableFuture<ReadIndexResponseMessage>> pendingReadIndex =
@@ -191,17 +191,13 @@ public class MeshNode {
     private final Semaphore readIndexPermits = new Semaphore(MAX_INFLIGHT_READ_INDEX);
 
     /** 取读点总次数（每次进入 fetchReadIndex 即计，含成功与失败；INFO 用）。 */
-    private final java.util.concurrent.atomic.AtomicLong followerReadFetchTotal =
-            new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong followerReadFetchTotal = new AtomicLong();
     /** 回落 MOVED 次数（fetch 失败，以及 gate 的回落分支）。 */
-    private final java.util.concurrent.atomic.AtomicLong followerReadFallback =
-            new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong followerReadFallback = new AtomicLong();
     /** 在途上限拒绝次数。 */
-    private final java.util.concurrent.atomic.AtomicLong followerReadRejected =
-            new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong followerReadRejected = new AtomicLong();
     /** follower 本地读成功次数（由 gate 递增）。 */
-    private final java.util.concurrent.atomic.AtomicLong followerReadLocal =
-            new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong followerReadLocal = new AtomicLong();
 
     /**
      * readIndex 短窗口缓存 + single-flight（fix-mesh-follower-read）。
@@ -1281,7 +1277,7 @@ public class MeshNode {
                 handleReadIndexRequest(fromNodeId, (ReadIndexRequestMessage) msg);
                 break;
             case READ_INDEX_RESP:
-                handleReadIndexResponse(fromNodeId, (ReadIndexResponseMessage) msg);
+                handleReadIndexResponse((ReadIndexResponseMessage) msg);
                 break;
             default:
                 logger.warn("未处理的消息类型: {}", type);
@@ -1506,12 +1502,18 @@ public class MeshNode {
      * <p>只有"自己是 Leader 且租约有效"才给出读点——与 DESIGN §5.7 现行 Leader 读同一假设，
      * 不新增时钟假设。非 Leader / 租约失效一律 {@code success=false}，让发起方立刻回落 MOVED
      * 而不是白等一个 RPC 超时。</p>
+     * <p><b>故意不在 {@code req.getTerm() > currentTerm} 时自降级/抬 term</b>：readIndex 请求不是
+     * 选举，term 收敛由既有 AppendEntries / RequestVote 路径负责；在此引入 term 变更会绕过
+     * 那些路径的副作用（停心跳/失效租约/落盘），得不偿失。发起方按应答 term 自行裁决。</p>
      * <p>在 raftExecutor 单线程上执行（dispatch 保证），故直接读 {@link MeshState} 安全。</p>
      */
     void handleReadIndexRequest(String fromNodeId, ReadIndexRequestMessage req) {
         boolean leaderWithLease = isLeader() && lease.isValid(System.currentTimeMillis());
         long readIndex = leaderWithLease ? state.commitIndex : 0L;
-        String leaderNodeId = isLeader() ? nodeId : state.leaderId;
+        // leaderNodeId：成功时填自己（信息性）；自己是 Leader 但租约失效时填 null——绝不能把
+        // 自己指为 Leader，否则 gate 会把 success=false 变成指向自身的 MOVED 重试自环，
+        // 让发起方走自身已知 Leader / CLUSTERDOWN 回落；非 Leader 时给出已知 Leader。
+        String leaderNodeId = leaderWithLease ? nodeId : (isLeader() ? null : state.leaderId);
         ReadIndexResponseMessage resp = new ReadIndexResponseMessage(
                 state.currentTerm, req.getRequestId(), readIndex, leaderWithLease, leaderNodeId);
         sendResponse(fromNodeId, MessageType.READ_INDEX_RESP, resp);
@@ -1520,7 +1522,7 @@ public class MeshNode {
     }
 
     /** 入站 readIndex 应答：在 raftExecutor 单线程上落定在途 future。 */
-    void handleReadIndexResponse(String fromNodeId, ReadIndexResponseMessage resp) {
+    void handleReadIndexResponse(ReadIndexResponseMessage resp) {
         completePendingReadIndex(resp);
     }
 

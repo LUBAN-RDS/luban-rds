@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
@@ -17,7 +18,9 @@ import java.util.function.Supplier;
  * 缓存项以<b>请求发出时刻</b>为年龄基准（不是响应到达时刻），因此"读点陈旧上界"
  * = 缓存有效期 + 网络往返，可被审计与压测断言。窗口内的 Follower 读是<b>有界陈旧读</b>：
  * 可能读不到一个"在窗口内已返回 +OK"的写。这是已记录并接受的语义代价；
- * {@code cacheMs <= 0} 时完全关闭缓存，每次读取新读点，恢复严格线性一致。
+ * {@code cacheMs <= 0} 时完全关闭缓存，每次读取新读点。注意：关闭缓存只是严格线性一致的
+ * <b>必要条件</b>——读点取得后仍须由 gate 等待本地 apply 追平该读点（apply 屏障），
+ * 二者共同决定是否严格线性一致。
  * </p>
  *
  * <h3>线程模型</h3>
@@ -51,6 +54,12 @@ public class ReadIndexCache {
     private final AtomicInteger coalesced = new AtomicInteger();
 
     /**
+     * 失效纪元：{@link #invalidate()} 自增。在途 RPC 发起前捕获，返回后仅当纪元未变才写缓存，
+     * 防止"取点途中发生 term/Leader 变更/apply halt"的读点在失效后被回填（陈旧缓存污染）。
+     */
+    private final AtomicLong epoch = new AtomicLong();
+
+    /**
      * 取读点。
      *
      * @param cacheMs      缓存有效期（&lt;=0 = 关闭缓存）
@@ -58,7 +67,9 @@ public class ReadIndexCache {
      * @param rpcCall      真正取读点的调用；返回 {@code null} 表示不可用
      *                     （返回 {@code Long} 而非 {@code long}，失败须能以 null 表达）
      * @param currentTerm  本节点当前 term（缓存随 term 变化失效）
-     * @return 可用读点；不可用返回 {@code null}（调用方回落 MOVED）
+     * @return 可用读点；不可用返回 {@code null}（调用方回落 MOVED）。注意：合并等待者
+     *         （coalesced）可能因共享读点的 term 与自身 {@code currentTerm} 不一致而拿到
+     *         {@code null}——此时同样回落 MOVED，而非采信 term 不一致的读点。
      */
     public Entry get(long cacheMs, long rpcTimeoutMs, Supplier<Long> rpcCall, long currentTerm) {
         long now = System.currentTimeMillis();
@@ -84,12 +95,20 @@ public class ReadIndexCache {
             // 已有在途请求：挂到同一 future（single-flight）
             coalesced.incrementAndGet();
             try {
-                return running.get(rpcTimeoutMs, TimeUnit.MILLISECONDS);
+                Entry shared = running.get(rpcTimeoutMs, TimeUnit.MILLISECONDS);
+                // single-flight 只共享"取点动作"，不共享 term：owner 可能在本调用方的 term
+                // 之前发起。读点 term 若与本调用方当前 term 不一致则不采信（返回 null 回落
+                // MOVED，绝不返回 term 不一致的读点，保持 entry.term == currentTerm 不变式）。
+                if (shared == null || shared.term != currentTerm) {
+                    return null;
+                }
+                return shared;
             } catch (Exception e) {
                 logger.debug("readIndex 合并等待失败: {}", e.toString());
                 return null;
             }
         }
+        long epochAtStart = epoch.get();
         try {
             Long v = rpcCall.get();
             if (v == null) {
@@ -97,9 +116,14 @@ public class ReadIndexCache {
                 return null;
             }
             Entry entry = new Entry(v, currentTerm, now);   // 年龄基准 = 请求发出时刻
-            cached = entry;
+            // 失效竞态防护：RPC 在途期间若发生 invalidate（term/Leader 变更、apply halt），
+            // 不得把失效前的读点写回缓存——否则后续调用会持续拿到陈旧读点。本次调用方仍可
+            // 采信该读点（取自租约有效的 Leader），此处只阻断"污染缓存"，不阻断本次回答。
+            if (epoch.get() == epochAtStart) {
+                cached = entry;
+            }
             mine.complete(entry);
-            return entry;
+            return entry.term == currentTerm ? entry : null;
         } catch (Exception e) {
             mine.completeExceptionally(e);
             return null;
@@ -111,6 +135,7 @@ public class ReadIndexCache {
     /** 立即整体失效（term/Leader 变更、apply halt）。 */
     public void invalidate() {
         cached = null;
+        epoch.incrementAndGet();   // 纪元递增：在途 RPC 返回后不再回填失效前的读点
         invalidations.incrementAndGet();
     }
 
