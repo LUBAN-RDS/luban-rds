@@ -382,10 +382,20 @@ class MeshNodeTest {
                     "PreVote RequestVote 不得重排选举定时器");
             assertEquals(1, timer.getConsecutiveFailures(), "RequestVote 不得复位选举退避");
 
+            // 断言 4（对齐 Q2 语义，消除异步竞态）：正式投票在"授予"时会经 persistExecutor
+            // 异步执行 electionTimer.reset()（见 MeshNode.handleRequestVote 授予分支），
+            // 授予后立即断言 pending 不变必然与持久化线程赛跑，故本用例改为验证 D2 的另一半
+            // 不变量——"被拒绝的正式投票不得重排定时器/复位退避"。
+            // 先把 votedFor 置为另一候选者 C，使来自 B 的同任期正式投票命中
+            // RaftStateMachine.decideRequestVote 的"已投给别人"分支
+            //（votedFor != candidate → canVote=false → grant=false，见 RaftStateMachine:242）；
+            // 拒绝路径完全同步（不发 persistExecutor 任务、不调用 electionTimer.reset），
+            // 断言与持久化线程无竞态。
+            state.votedFor = C;
             invokeOnRaftThread(node, () -> node.handleRequestVote(B, new RequestVoteMessage(1, B, 0, 0, false)));
             org.junit.jupiter.api.Assertions.assertSame(pendingBefore, pendingOf(timer),
-                    "正式 RequestVote 也不得重排选举定时器");
-            assertEquals(1, timer.getConsecutiveFailures(), "正式 RequestVote 同样不得复位退避");
+                    "被拒绝的正式 RequestVote 不得重排选举定时器");
+            assertEquals(1, timer.getConsecutiveFailures(), "被拒绝的正式 RequestVote 同样不得复位退避");
         } finally {
             node.stop();
         }
