@@ -16,6 +16,7 @@ import com.janeluo.luban.rds.mesh.core.RaftStateMachine.VoteDecision;
 import com.janeluo.luban.rds.mesh.election.ElectionTimer;
 import com.janeluo.luban.rds.mesh.election.LeaseManager;
 import com.janeluo.luban.rds.mesh.election.VoteCollector;
+import com.janeluo.luban.rds.mesh.gateway.ReadIndexCache;
 import com.janeluo.luban.rds.mesh.replication.LogApplier;
 import com.janeluo.luban.rds.mesh.replication.LogReplicator;
 import com.janeluo.luban.rds.mesh.replication.SnapshotManager;
@@ -201,6 +202,13 @@ public class MeshNode {
     /** follower 本地读成功次数（由 gate 递增）。 */
     private final java.util.concurrent.atomic.AtomicLong followerReadLocal =
             new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * readIndex 短窗口缓存 + single-flight（fix-mesh-follower-read）。
+     * <p>缓存窗口与 RPC 超时由 gate 按配置传入（{@code ReadIndexCache.get} 参数化），
+     * 故本节点不持有配置字段；term/Leader 变更/apply halt 时由 gate 调 {@code invalidate()}。</p>
+     */
+    private final ReadIndexCache readIndexCache = new ReadIndexCache();
 
     /** 是否已就绪（启动加载完成且本地状态可信，或快照安装追平）；单向置位。 */
     private volatile boolean ready;
@@ -1624,6 +1632,31 @@ public class MeshNode {
     /** 回落 MOVED 计数 +1（gate 的回落分支调用）。 */
     public void incFollowerReadFallback() {
         followerReadFallback.incrementAndGet();
+    }
+
+    /** 本节点当前任期（读点缓存按 term 失效用）。 */
+    public long currentTerm() {
+        return state.currentTerm;
+    }
+
+    /** readIndex 缓存（gate 取读点与失效用）。 */
+    public ReadIndexCache readIndexCache() {
+        return readIndexCache;
+    }
+
+    /** readIndex 缓存命中次数（INFO 用）。 */
+    public long readIndexCacheHitCount() {
+        return readIndexCache.cacheHits();
+    }
+
+    /** readIndex 缓存失效次数（INFO 用）。 */
+    public long readIndexCacheInvalidationCount() {
+        return readIndexCache.invalidations();
+    }
+
+    /** readIndex 在途合并次数（INFO 用）。 */
+    public long readIndexCoalescedCount() {
+        return readIndexCache.coalesced();
     }
 
     // ==================== 副作用（解析 Transition）====================
