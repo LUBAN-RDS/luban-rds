@@ -33,6 +33,7 @@ class BlockCommandTest {
     /** 构造一个 Leader gate（租约有效、本地读）。 */
     private static MeshWriteGate leaderGate(DefaultMemoryStore store) {
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(true);
         when(node.lease()).thenReturn(new com.janeluo.luban.rds.mesh.election.LeaseManager() {
             {
@@ -109,6 +110,7 @@ class BlockCommandTest {
     void read_blockCommand_returnsBlockErrorBeforeLeaderCheck() {
         // 即便不是 Leader 也应返回 BLOCK 错误（命令级禁用，优先于 MOVED）
         MeshNode node = mock(MeshNode.class);
+        when(node.isReady()).thenReturn(true);
         when(node.isLeader()).thenReturn(false);  // 非 Leader
         MeshWriteGate gate = new MeshWriteGate(node, new DefaultMemoryStore(), new DefaultCommandHandler());
 

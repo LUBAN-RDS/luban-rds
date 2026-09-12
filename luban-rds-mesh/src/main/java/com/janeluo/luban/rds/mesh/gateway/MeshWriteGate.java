@@ -480,11 +480,26 @@ public class MeshWriteGate {
      * @return 响应字节（本地读结果序列化）
      * @throws MovedToLeaderException 非 Leader 时
      * @throws LeaseInvalidException  lease 模式租约续租等待超时 / read-index 模式主动确认失败
+     * @throws RetryableMeshException apply fail-stop 或本地未就绪（客户端 -TRYAGAIN 退避重试）
      * @throws IllegalArgumentException args 为空
      */
     public byte[] read(int dbIndex, String[] args) {
         if (args == null || args.length == 0) {
             throw new IllegalArgumentException("read: args 不能为空");
+        }
+
+        // A1（fix-mesh-follower-read，修审计 F1）：apply fail-stop 后 lastApplied 冻结，
+        // 但 Leader 租约仍照常续租 → 继续本地读会静默返回陈旧值。读入口 fail-fast，
+        // 让客户端 -TRYAGAIN 退避重试。写入口不拦：apply 停摆时 propose 本就会超时失败，
+        // 额外拦截只会拒掉可能成功的写路径（引入新的写可用性风险）。
+        if (meshNode.isApplyHalted()) {
+            throw new RetryableMeshException("mesh apply halted (fail-stop), please retry");
+        }
+
+        // A2（fix-mesh-follower-read）：本地状态不可信（store 为空 / 未追平）时不得作答。
+        // 写入口不拦（同上理由）。
+        if (!meshNode.isReady()) {
+            throw new RetryableMeshException("mesh node not ready (state not caught up), please retry");
         }
 
         // 0. BLOCK 类命令禁用（阶段 9 / DESIGN §9）：到达 gate 即返回错误字节
