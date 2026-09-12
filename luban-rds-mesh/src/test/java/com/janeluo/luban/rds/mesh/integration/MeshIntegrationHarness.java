@@ -321,6 +321,16 @@ final class MeshIntegrationHarness implements AutoCloseable {
                 // 释放 NioEventLoopGroup（内存路由未使用，构造时已创建）
             }
         }
+        // close() 的优雅关停是异步的：不等待则残留的 Netty 事件循环线程会与后续
+        // 时序敏感用例（如 SlowPersistElectionStabilityTest）争抢 CPU，放大其偶发失败。
+        // 逐个等待终止，确保夹具关停后资源确实释放。
+        for (RoutingBus bus : buses.values()) {
+            try {
+                bus.awaitTermination(5_000L);
+            } catch (Exception ignored) {
+                // 终止等待失败不阻断清理：最坏退化为异步关停
+            }
+        }
     }
 
     // ==================== 内部：RESP 帧构造 ====================

@@ -93,6 +93,14 @@ public class MeshBusClient {
 
     private volatile boolean closed;
 
+    /**
+     * close() 触发的事件循环优雅关停 future；未 close 时为 null。
+     * <p>{@link #close()} 的 {@code shutdownGracefully} 是<b>异步</b>的——立即返回，
+     * Netty 事件循环线程仍在后台收尾。希望关停后资源确实释放（测试夹具/进程退出）的调用方
+     * 可调 {@link #awaitTermination(long)} 等待其终止。</p>
+     */
+    private volatile io.netty.util.concurrent.Future<?> shutdownFuture;
+
     /** 设置出站握手 token（空 = 关闭）；与 busServer 配置同值。 */
     public void setAuthToken(String authToken) {
         this.authToken = (authToken == null || authToken.isEmpty()) ? null : authToken;
@@ -474,8 +482,26 @@ public class MeshBusClient {
         nodeEndpoints.clear();
         reconnectScheduled.clear();
         reconnectAttempts.clear();
-        group.shutdownGracefully(0, 5, TimeUnit.SECONDS);
+        // 保存 future 供 awaitTermination 等待（shutdownGracefully 本身异步返回）
+        shutdownFuture = group.shutdownGracefully(0, 5, TimeUnit.SECONDS);
         logger.info("MeshBusClient 已关闭");
+    }
+
+    /**
+     * 等待事件循环真正终止（配合 {@link #close()} 使用）。
+     * <p>close() 的优雅关停是异步的：本方法阻塞至 Netty 事件循环线程全部退出，
+     * 使 {@code close()} 返回后不再残留事件循环线程（避免与后续时序敏感任务争抢 CPU）。
+     * 未调用过 {@code close()} 时视为已终止（无在途关停）。</p>
+     *
+     * @param timeoutMs 最长等待（ms）
+     * @return true=已终止；false=超时
+     */
+    public boolean awaitTermination(long timeoutMs) {
+        io.netty.util.concurrent.Future<?> f = shutdownFuture;
+        if (f == null) {
+            return true;
+        }
+        return f.awaitUninterruptibly(timeoutMs);
     }
 
     private boolean isSelf(String nodeId) {
