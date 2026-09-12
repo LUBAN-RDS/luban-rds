@@ -12,6 +12,7 @@ import com.janeluo.luban.rds.mesh.bus.MeshFrame;
 import com.janeluo.luban.rds.mesh.core.MeshRole;
 import com.janeluo.luban.rds.mesh.core.MeshState;
 import com.janeluo.luban.rds.mesh.core.RaftStateMachine;
+import com.janeluo.luban.rds.mesh.gateway.MeshWriteGate;
 import com.janeluo.luban.rds.mesh.replication.LogApplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,9 +70,17 @@ public class MeshPerfCluster {
 
     private final Map<String, MeshNode> nodes = new LinkedHashMap<>();
     private final Map<String, MemoryStore> stores = new LinkedHashMap<>();
+    private final Map<String, MeshWriteGate> gates = new LinkedHashMap<>();
     private final Map<String, MeshBusClient> busClients = new LinkedHashMap<>();
     private final Map<String, MeshBusServer> busServers = new LinkedHashMap<>();
     private final Map<String, Integer> nodePorts = new LinkedHashMap<>();
+
+    /** follower 读模式（follower 读性能测量注入；默认 OFF = 现状）。 */
+    private final MeshConfig.ReadFromFollower readFromFollower;
+    /** readIndex 短窗口缓存（ms）；仅 readFromFollower=READ_INDEX 时有意义。 */
+    private final long followerReadCacheMs;
+    /** follower 读总预算（ms）。 */
+    private final long followerReadMaxWaitMs;
 
     /**
      * @param nodeCount 节点数（1=单节点基线；3=标准集群）
@@ -80,6 +89,20 @@ public class MeshPerfCluster {
      * @param fsync     true=注入真实 fsync persistHook（近似生产落盘成本）
      */
     public MeshPerfCluster(int nodeCount, boolean nettyBus, int basePort, boolean fsync) {
+        this(nodeCount, nettyBus, basePort, fsync,
+                MeshConfig.ReadFromFollower.OFF, 100L, 500L);
+    }
+
+    /**
+     * 带 follower 读配置的构造器（Task 19 性能对比：off / readindex cache=0 / cache=100）。
+     *
+     * @param readFromFollower   follower 读模式
+     * @param followerReadCacheMs readIndex 短窗口缓存（ms，0 = 每次取新读点）
+     * @param followerReadMaxWaitMs follower 读总预算（ms）
+     */
+    public MeshPerfCluster(int nodeCount, boolean nettyBus, int basePort, boolean fsync,
+                           MeshConfig.ReadFromFollower readFromFollower,
+                           long followerReadCacheMs, long followerReadMaxWaitMs) {
         if (nodeCount != 1 && nodeCount != 3) {
             throw new IllegalArgumentException("nodeCount 仅支持 1 或 3: " + nodeCount);
         }
@@ -87,6 +110,9 @@ public class MeshPerfCluster {
         this.nettyBus = nettyBus;
         this.fsync = fsync;
         this.fsyncDir = fsync ? createFsyncDir() : null;
+        this.readFromFollower = readFromFollower;
+        this.followerReadCacheMs = followerReadCacheMs;
+        this.followerReadMaxWaitMs = followerReadMaxWaitMs;
         for (int i = 0; i < nodeCount; i++) {
             nodePorts.put(nodeIds().get(i), basePort + i);
         }
@@ -113,6 +139,16 @@ public class MeshPerfCluster {
         }
         for (MeshNode n : nodes.values()) {
             n.start();
+        }
+    }
+
+    /**
+     * 对全部节点置位就绪门（Task 4 起 {@code gate.read} 入口要求 {@link MeshNode#isReady()}）。
+     * <p>未调用则读一律 {@code -TRYAGAIN}，读路径性能场景会以「全失败」假象误导排查。</p>
+     */
+    public void markAllReady() {
+        for (MeshNode n : nodes.values()) {
+            n.markReady();
         }
     }
 
@@ -194,6 +230,7 @@ public class MeshPerfCluster {
 
         nodes.put(nodeId, node);
         stores.put(nodeId, store);
+        gates.put(nodeId, new MeshWriteGate(node, store, cmdHandler, config));
         busClients.put(nodeId, client);
         if (nettyBus) {
             busServers.put(nodeId, new MeshBusServer(nodeId, nodePorts.get(nodeId), busHandler));
@@ -205,7 +242,10 @@ public class MeshPerfCluster {
         MeshConfig.Builder b = MeshConfig.builder(nodeId)
                 .electionTimeout(100, 200)
                 .heartbeatIntervalMs(50)
-                .leaseDurationMs(400);
+                .leaseDurationMs(400)
+                .readFromFollower(readFromFollower)
+                .followerReadCacheMs(followerReadCacheMs)
+                .followerReadMaxWaitMs(followerReadMaxWaitMs);
         for (Map.Entry<String, Integer> e : nodePorts.entrySet()) {
             b.addPeer(e.getKey(), HOST + ":" + e.getValue());
         }
@@ -285,6 +325,11 @@ public class MeshPerfCluster {
 
     public MemoryStore getStore(String nodeId) {
         return stores.get(nodeId);
+    }
+
+    /** 节点读写门面（与节点同配置装配，读性能场景复用，避免各测试各自 new）。 */
+    public MeshWriteGate getGate(String nodeId) {
+        return gates.get(nodeId);
     }
 
     public Map<String, MeshNode> getNodes() {

@@ -233,7 +233,8 @@ redis-cli -p 6379 CLUSTER INFO
 
 ## 测试
 
-模块当前 **291 个测试全过**（`mvn -pl luban-rds-mesh test`），覆盖：
+模块当前 **499 个测试全过**（`mvn -pl luban-rds-mesh test`，v1.0.26 口径，Skipped=0）。
+下表为阶段 13 时点的历史快照（当时 291 个），新增用例见各特性对应章节：
 
 | 阶段 | 测试内容 | 测试数（累计） |
 |------|----------|--------|
@@ -254,6 +255,51 @@ redis-cli -p 6379 CLUSTER INFO
 阶段 13 的 [ThreeNodeIntegrationTest](src/test/java/com/janeluo/luban/rds/mesh/integration/ThreeNodeIntegrationTest.java) 用内存路由总线连接 3 个真实 `MeshNode`，验证：选举出唯一 Leader → Leader 写 SET 经多数派确认 → 3 节点最终一致。
 
 > **3 进程集成测试 / 故障注入**（kill leader、网络分区、时钟偏移）需真实多进程环境，留作手动验证（见 DESIGN §十「测试策略」）。单元 + 内存集成测试已覆盖协议正确性主线。
+
+---
+
+## 性能：Follower 读三组配置基线（v1.0.26）
+
+探针：[`perf/FollowerReadPerfProbe`](src/test/java/com/janeluo/luban/rds/mesh/perf/FollowerReadPerfProbe.java)。
+类名不含 `*Test`（surefire 默认不拾取，零 CI 影响），需显式运行：
+
+```bash
+mvn -pl luban-rds-mesh -am test-compile
+mvn -pl luban-rds-mesh test -Dtest=FollowerReadPerfProbe
+# 可调：-Dmesh.perf.ops=20000 -Dmesh.perf.threads=8 -Dmesh.perf.basePort=15100
+```
+
+工况：3 节点真实 `MeshPerfCluster`（netty 总线 = 回环 TCP），8 线程共 20000 次「客户端读」——
+先问 Follower，被 MOVED 则跟随到 Leader；每轮先预热 2000 次不计量。取三连跑的代表值：
+
+| 配置 | ops/s | p50(μs) | p95(μs) | p99(μs) |
+|------|-------|---------|---------|---------|
+| `mesh-read-from-follower off`（基线，全部 MOVED 到 Leader） | 444,444（三跑 351k–444k） | 14 | 30 | 53 |
+| `readindex` + `cache-ms=0`（严格线性一致） | 34,130（三跑 29.8k–34.1k） | 200 | 371 | 477 |
+| `readindex` + `cache-ms=100`（有界陈旧读） | 1,111,111（三跑 1.05M–1.11M） | 5 | 8 | 17 |
+| Leader 本地读（同集群标尺，非配置项） | 1,176,471 | 6 | 9 | 16 |
+
+计数证据（`CLUSTER INFO` 口径，含 2000 次预热，err 全 0、term 全程稳定）：
+
+| 配置 | fetch | cacheHit | local | fallback |
+|------|-------|----------|-------|----------|
+| off | 0 | 0 | 0 | 0（Follower 一律 MOVED，读全在 Leader） |
+| cache-ms=0 | 22000 | 0 | 22000 | 0 |
+| cache-ms=100 | **1** | 21999 | 22000 | 0 |
+
+**这些数字能说明什么、不能说明什么（务必读完再引用）：**
+
+- **能说明**：`cache-ms=100` 的 follower 读在进程内开销上已与 Leader 本地读同级（p99 17μs vs 16μs，
+  整轮仅 1 次取读点 RPC，其余 21999 次命中窗口）；`cache-ms=0` 每次读都要一次取读点总线往返，
+  因此在本夹具中吞吐约为 `cache-ms=100` 的 **1/32**——**`cache-ms=0` 是严格一致性档，不是性能档**。
+- **不能说明**：本探针直接调用 `MeshWriteGate.read`，**完全绕开客户端 ↔ 服务端的网络层**。
+  真实部署中 off 基线的「MOVED 双跳」各含一次客户端网络往返，而 follower 读只需一次，
+  网络 RTT 才是生产差异主因；本夹具里的两跳是进程内方法调用，
+  故 **off 基线被显著低估、上表的倍率（约 2.5–3×）不可当作生产加速比**。
+  夹具可信的部分是取读点路径（cache=0 时确实走真实 netty 回环总线 RTT）与
+  gate/handler/apply 屏障的进程内开销对比。
+- **Windows 定时器工件**：`cache-ms=0` 的 max 出现 12–16ms 尖峰（约 15.6ms = Windows 定时器粒度），
+  是有既有结论的环境工件，非代码回归；p50/p95/p99 不受影响。
 
 ---
 
