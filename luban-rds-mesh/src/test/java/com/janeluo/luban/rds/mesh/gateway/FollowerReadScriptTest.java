@@ -24,6 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -92,11 +94,14 @@ class FollowerReadScriptTest {
     void evalsha_miss_locally_fallsBackToMoved_notNoScript() {
         DefaultMemoryStore store = new DefaultMemoryStore();
         LuaCommandHandler.restoreScripts(new HashMap<>());   // 确保未命中
-        MeshWriteGate gate = gate(followerNode(), store);
+        MeshNode node = followerNode();
+        MeshWriteGate gate = gate(node, store);
         String[] args = {"EVALSHA", "0000000000000000000000000000000000000000", "1", "foo"};
 
         assertThrows(MovedToLeaderException.class, () -> gate.read(0, args),
                 "脚本未命中必须回落 MOVED，不得返回 -NOSCRIPT");
+        // EVALSHA 未命中是回落原因之一，必须计入计数（INFO 指标覆盖全部回落原因）
+        verify(node, times(1)).incFollowerReadFallback();
     }
 
     @Test

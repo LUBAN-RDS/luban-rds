@@ -1375,9 +1375,9 @@ public class MeshNode {
         long appliedBefore = state.lastApplied;
         AppendDecision decision = stateMachine.decideAppendEntries(state, msg);
         if (decision.transition.kind == Transition.Kind.TO_FOLLOWER) {
+            // applyFollowerSideEffects 内部已失效读点缓存（角色/Leader 变更），此处不再重复调用，
+            // 否则 readIndexCacheInvalidationCount 每次转移 +2（INFO 指标虚高）。
             applyFollowerSideEffects(decision.transition);
-            // fix-mesh-follower-read：收到更高 term 帧（Leader 变更）→ 缓存读点立即失效（调用点 3/3）
-            invalidateReadIndexCache();
             // 阶段 11：若 term 自增导致降级 → 持久化（追加的 fsync 已由 decideAppendEntries 内
             // persistHook 完成；此处覆盖 term 变化场景）
             persistStateSafe("handleAppendEntries-term-up");
@@ -1581,9 +1581,8 @@ public class MeshNode {
     void completePendingReadIndex(ReadIndexResponseMessage resp) {
         if (resp.getTerm() > state.currentTerm) {
             Transition t = stateMachine.becomeFollower(state, resp.getTerm(), null);
+            // 失效读点缓存由 applyFollowerSideEffects 统一完成（见其收尾调用），此处不重复。
             applyFollowerSideEffects(t);
-            // fix-mesh-follower-read：更高 term 收敛 → 缓存读点立即失效（调用点 2/3）
-            invalidateReadIndexCache();
             persistStateSafe("readIndexResponse-term-up");
             electionTimer.reset();
             failPending(resp.getRequestId(), "higher term");
@@ -1666,7 +1665,8 @@ public class MeshNode {
     }
 
     /**
-     * 读点缓存失效（幂等）：term 变化 / Leader 变更 / apply halt 时调用。
+     * 读点缓存失效：term 变化 / Leader 变更时调用（唯一入口 {@code applyFollowerSideEffects}，
+     * 所有抬 term/降级路径都经它，保证每次转移只失效一次、计数不虚高）。
      * <p>缓存里的读点只在"当时那个 term 的 Leader"下有效；角色/任期一变就必须立即失效，
      * 否则新 Follower 可能拿旧读点去等一个已无意义的 apply 屏障（陈旧读或白等）。</p>
      * <p>apply halt 不进这里：读入口已由 {@link #isApplyHalted()} <b>先于</b>缓存查询短路
@@ -1699,7 +1699,8 @@ public class MeshNode {
         notifyRoleListener();
         // 降级为 Follower 后等待语义变化：唤醒等待者立即按新角色重判定（避免等满超时）
         applyBarrier.signalApplied();
-        // fix-mesh-follower-read：角色/Leader 变更 → 旧读点立即失效（调用点 1/3）
+        // fix-mesh-follower-read：角色/Leader 变更 → 旧读点立即失效（唯一调用点：
+        // 所有 term 抬升/降级路径都经此方法，避免在多处重复失效使计数虚高）
         invalidateReadIndexCache();
     }
 

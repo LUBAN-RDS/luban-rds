@@ -12,9 +12,9 @@ import com.janeluo.luban.rds.mesh.rpc.ReadIndexResponseMessage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * readIndex 缓存失效（fix-mesh-follower-read / Task 11）。
@@ -53,15 +53,18 @@ class ReadIndexCacheInvalidationTest {
 
         ReadIndexCache cache = node.readIndexCache();
         assertNotNull(cache.get(10_000L, 100L, () -> 7L, 5L), "seed 读点应命中缓存");
+        int invalidationsBefore = cache.invalidations();
 
         // 同 term（5）收到 Leader n2 的 AppendEntries → TO_FOLLOWER 且 term 不变
         node.handleAppendEntries("n2", new AppendEntriesMessage(5L, "n2", 0L, 0L, null, 0L));
 
+        assertEquals(invalidationsBefore + 1, cache.invalidations(),
+                "同 term 角色切换必须且只失效一次（多调用点重复失效会让 INFO 计数虚高）");
         assertNull(cache.get(10_000L, 100L, () -> null, 5L),
                 "同 term 角色切换后缓存必须已被显式失效（term 未变，不可能靠 term 失配兜底）");
     }
 
-    /** 更高 term 的 readIndex 应答：收敛降级 + 缓存失效。 */
+    /** 更高 term 的 readIndex 应答：收敛降级 + 缓存失效（恰好一次）。 */
     @Test
     void higherTermReadIndexResponse_invalidatesCache() {
         MeshState state = new MeshState();
@@ -76,11 +79,11 @@ class ReadIndexCacheInvalidationTest {
 
         node.completePendingReadIndex(new ReadIndexResponseMessage(9L, 1L, 0L, false, null));
 
-        assertTrue(cache.invalidations() > invalidationsBefore,
-                "更高 term 收敛必须立即失效读点缓存");
+        assertEquals(invalidationsBefore + 1, cache.invalidations(),
+                "更高 term 收敛必须恰好失效一次读点缓存");
     }
 
-    /** 更高 term 帧（AppendEntries）→ 降级 + 缓存失效。 */
+    /** 更高 term 帧（AppendEntries）→ 降级 + 缓存失效（恰好一次）。 */
     @Test
     void higherTermAppendEntries_invalidatesCache() {
         MeshState state = new MeshState();
@@ -95,8 +98,8 @@ class ReadIndexCacheInvalidationTest {
 
         node.handleAppendEntries("n2", new AppendEntriesMessage(9L, "n2", 0L, 0L, null, 0L));
 
-        assertTrue(cache.invalidations() > invalidationsBefore,
-                "更高 term 帧必须立即失效读点缓存");
+        assertEquals(invalidationsBefore + 1, cache.invalidations(),
+                "更高 term 帧必须恰好失效一次读点缓存");
         assertNull(cache.get(10_000L, 100L, () -> null, 9L),
                 "更高 term 帧后缓存读点必须失效，需重新取点");
     }

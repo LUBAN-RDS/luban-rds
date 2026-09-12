@@ -515,17 +515,23 @@ public class MeshWriteGate {
 
         // 1. 非 Leader：按配置决定"本地读（readindex）"还是"MOVED（off/现状）"
         if (!meshNode.isLeader()) {
-            if (getEffectiveReadFromFollower() == MeshConfig.ReadFromFollower.READ_INDEX
-                    && !isScriptNotLocallyExecutable(args)) {
-                byte[] local = tryFollowerRead(dbIndex, args);
-                if (local != null) {
-                    return local;
+            if (getEffectiveReadFromFollower() == MeshConfig.ReadFromFollower.READ_INDEX) {
+                if (isScriptNotLocallyExecutable(args)) {
+                    // EVALSHA 本地未命中：不本地执行，回落 MOVED（不返回 -NOSCRIPT）。
+                    // 同样计入回落计数，让 mesh_follower_read_fallback_moved 覆盖全部回落原因。
+                    meshNode.incFollowerReadFallback();
+                    logger.debug("follower 脚本未命中回落 MOVED: cmd={}", args[0]);
+                } else {
+                    byte[] local = tryFollowerRead(dbIndex, args);
+                    if (local != null) {
+                        return local;
+                    }
+                    // 本地读不可用（无读点/屏障超时/执行异常）→ 回落 MOVED。
+                    // 关键不变量：所有失败路径都收敛到下面的 MOVED，结构上不可能返回
+                    // "未达 readIndex 的状态"。
+                    meshNode.incFollowerReadFallback();
+                    logger.debug("follower 读回落 MOVED: cmd={}", args[0]);
                 }
-                // 本地读不可用（无读点/屏障超时/脚本未命中/执行异常）→ 回落 MOVED。
-                // 关键不变量：所有失败路径都收敛到下面的 MOVED，结构上不可能返回
-                // "未达 readIndex 的状态"。
-                meshNode.incFollowerReadFallback();
-                logger.debug("follower 读回落 MOVED: cmd={}", args[0]);
             }
             String leaderId = meshNode.getLeaderId();
             String key = args.length >= 2 ? args[1] : null;
