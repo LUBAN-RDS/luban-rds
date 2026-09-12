@@ -4,10 +4,10 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Mesh 总线消息类型枚举（0x60-0x65）。
+ * Mesh 总线消息类型枚举（0x60-0x67）。
  * <p>
  * 与 cluster 模块（{@code GossipMessageType}，0x40 起）的码段不冲突；
- * 对应 Raft 的 5 类 RPC（见 DESIGN.md §4.1）。
+ * 对应 Raft 的 5 类 RPC（见 DESIGN.md §4.1），另加 follower 读用的 readIndex 一对。
  * </p>
  * <ul>
  *   <li>{@link #APPEND_ENTRIES}      0x60 Leader → Follower：心跳 + 日志复制</li>
@@ -17,6 +17,8 @@ import java.util.Map;
  *   <li>{@link #INSTALL_SNAPSHOT}    0x64 Leader → Follower：快照传输</li>
  *   <li>{@link #BUS_HELLO}           0x65 Client → Server：连接握手认证（P1-12，
  *       body=mesh-auth-token UTF-8 字节，senderNodeId=发起方 nodeId；token 未配置时不发送）</li>
+ *   <li>{@link #READ_INDEX_REQ}      0x66 Follower → Leader：请求读点（readIndex）</li>
+ *   <li>{@link #READ_INDEX_RESP}     0x67 Leader → Follower：读点应答</li>
  * </ul>
  */
 public enum MessageType {
@@ -26,7 +28,19 @@ public enum MessageType {
     REQUEST_VOTE((byte) 0x62),
     REQUEST_VOTE_RESP((byte) 0x63),
     INSTALL_SNAPSHOT((byte) 0x64),
-    BUS_HELLO((byte) 0x65);
+    BUS_HELLO((byte) 0x65),
+
+    /**
+     * {@link #READ_INDEX_REQ}    0x66 Follower → Leader：请求读点（readIndex）
+     * <p>body: long term; long requestId;</p>
+     * @see #READ_INDEX_RESP
+     */
+    READ_INDEX_REQ((byte) 0x66),
+    /**
+     * {@link #READ_INDEX_RESP}   0x67 Leader → Follower：读点应答
+     * <p>body: long term; long requestId; long readIndex; boolean success; String leaderNodeId;</p>
+     */
+    READ_INDEX_RESP((byte) 0x67);
 
     private final byte code;
 
@@ -57,7 +71,7 @@ public enum MessageType {
      *
      * @param code 类型码
      * @return 对应的 MessageType
-     * @throws IllegalArgumentException 未知类型码（不在 0x60-0x64 范围内）
+     * @throws IllegalArgumentException 未知类型码（不在 0x60-0x67 范围内）
      */
     public static MessageType fromCode(byte code) {
         MessageType type = CODE_MAP.get(code);
